@@ -10,7 +10,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::reader::Tracer;
+use super::time;
+use crate::reader::{Read, Tracer};
 use crate::trace::Records;
 use crate::trace::kdebug::KdBuf;
 use crate::trace::kdebug::codes;
@@ -168,12 +169,24 @@ impl Tracer for Kdebug {
         wait(millis).map_err(|e| KdebugError::from_os("KERN_KDBUFWAIT", e))
     }
 
-    fn read(&mut self) -> Result<Option<Records>, KdebugError> {
+    /// A read that finds no records has seen every record stamped before it began.
+    fn read(&mut self) -> Result<Read, KdebugError> {
         if self.buf.len() != self.capacity {
             self.buf.resize(self.capacity, KdBuf::default());
         }
+        let read_at = time::now_ticks();
         let count = read(&mut self.buf).map_err(|e| KdebugError::from_os("KERN_KDREADTR", e))?;
-        Ok((count > 0).then(|| Records::Kdebug(self.buf[..count].to_vec())))
+        Ok(if count > 0 {
+            Read {
+                records: Some(Records::Kdebug(self.buf[..count].to_vec())),
+                complete_to: None,
+            }
+        } else {
+            Read {
+                records: None,
+                complete_to: Some(read_at),
+            }
+        })
     }
 
     /// Flags `pid` for tracing. Calling it again for a flagged process is harmless, which is

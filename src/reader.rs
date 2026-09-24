@@ -18,6 +18,16 @@ use crate::trace::Records;
 /// can settle what it asked libproc about.
 const IDLE_WATERMARK: Duration = Duration::from_millis(100);
 
+/// What one read of the kernel buffer found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Read {
+    /// The records taken, in order; `None` when there were none.
+    pub records: Option<Records>,
+    /// Every record stamped before this trace time has now been read; `None` when the read
+    /// cannot vouch for that.
+    pub complete_to: Option<u64>,
+}
+
 /// A kernel trace facility while iotap owns it, such as kdebug.
 pub trait Tracer {
     type Error: Error + Send + Sync + 'static;
@@ -25,12 +35,17 @@ pub trait Tracer {
     /// Blocks until records wait or `timeout` passes.
     fn wait(&mut self, timeout: Duration) -> Result<(), Self::Error>;
 
-    /// Takes the records waiting now; `None` when there are none.
-    fn read(&mut self) -> Result<Option<Records>, Self::Error>;
+    /// Takes the records waiting now.
+    fn read(&mut self) -> Result<Read, Self::Error>;
 
     /// Traces `pid` too. Harmless for a process already traced; a facility that stops tracing a
     /// process when it runs exec, as kdebug does, traces it again.
     fn add_pid(&mut self, pid: i32) -> Result<(), Self::Error>;
+
+    /// Takes what the facility still holds once tracing stops. Called once, after the last read.
+    fn finish(&mut self) -> Result<Option<Records>, Self::Error> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,27 +71,14 @@ pub fn run<T: Tracer>(
 ) -> Result<(), T::Error> {
     let mut watch = Watch::new(tracked, config);
     let mut last_poll = Instant::now();
-    let mut last_watermark = Instant::now();
-    // Records went out after the last watermark.
-    let mut unmarked = false;
+    let mut marks = Marks::new();
     loop {
         let stopping = stop.load(Ordering::SeqCst);
         if !stopping {
             tracer.wait(config.wait)?;
         }
-        let read_at = time::now_ticks();
-        let Some(read) = drain(tracer, tx)? else {
+        if !marks.forward(tracer.read()?, tx) {
             return Ok(());
-        };
-        if read {
-            unmarked = true;
-        } else if unmarked || last_watermark.elapsed() >= IDLE_WATERMARK {
-            // The read found nothing, so every record before it has been sent.
-            if tx.send(Input::Watermark { ticks: read_at }).is_err() {
-                return Ok(());
-            }
-            unmarked = false;
-            last_watermark = Instant::now();
         }
         if stopping {
             break;
@@ -92,7 +94,7 @@ pub fn run<T: Tracer>(
                 // Records of the last moments may still be in per-CPU buffers.
                 for _ in 0..2 {
                     thread::sleep(Duration::from_millis(20));
-                    if drain(tracer, tx)?.is_none() {
+                    if !marks.forward(tracer.read()?, tx) {
                         return Ok(());
                     }
                 }
@@ -100,22 +102,52 @@ pub fn run<T: Tracer>(
             }
         }
     }
+    if let Some(records) = tracer.finish()?
+        && tx.send(Input::Records(records)).is_err()
+    {
+        return Ok(());
+    }
     let _ = tx.send(Input::Stopped {
         ticks: time::now_ticks(),
     });
     Ok(())
 }
 
-/// Moves waiting records to the consumer. Returns whether there were any, or `None` if the
-/// consumer is gone.
-fn drain<T: Tracer>(tracer: &mut T, tx: &Sender<Input>) -> Result<Option<bool>, T::Error> {
-    let Some(records) = tracer.read()? else {
-        return Ok(Some(false));
-    };
-    if tx.send(Input::Records(records)).is_err() {
-        return Ok(None);
+/// Hands what reads find to the consumer and tells it how far the trace has been read: after
+/// records went out, and now and then while idle.
+struct Marks {
+    /// Records went out after the last watermark.
+    unmarked: bool,
+    last: Instant,
+}
+
+impl Marks {
+    fn new() -> Self {
+        Self {
+            unmarked: false,
+            last: Instant::now(),
+        }
     }
-    Ok(Some(true))
+
+    /// Sends what `read` found. Returns false if the consumer is gone.
+    fn forward(&mut self, read: Read, tx: &Sender<Input>) -> bool {
+        if let Some(records) = read.records {
+            if tx.send(Input::Records(records)).is_err() {
+                return false;
+            }
+            self.unmarked = true;
+        }
+        if let Some(ticks) = read.complete_to
+            && (self.unmarked || self.last.elapsed() >= IDLE_WATERMARK)
+        {
+            if tx.send(Input::Watermark { ticks }).is_err() {
+                return false;
+            }
+            self.unmarked = false;
+            self.last = Instant::now();
+        }
+        true
+    }
 }
 
 /// Liveness, exec and name-follow bookkeeping for the traced processes.
@@ -220,9 +252,22 @@ mod tests {
     /// Hands out scripted reads. Once they run out, reads find nothing and, when given `stop`,
     /// ask the reader to stop.
     struct Scripted<'a> {
-        reads: VecDeque<Option<Records>>,
+        reads: VecDeque<Read>,
         stop: Option<&'a AtomicBool>,
         added: Vec<i32>,
+        /// What the facility still holds at the end.
+        held: Option<Records>,
+    }
+
+    impl<'a> Scripted<'a> {
+        fn new(reads: impl IntoIterator<Item = Read>, stop: Option<&'a AtomicBool>) -> Self {
+            Self {
+                reads: reads.into_iter().collect(),
+                stop,
+                added: Vec::new(),
+                held: None,
+            }
+        }
     }
 
     impl Tracer for Scripted<'_> {
@@ -232,19 +277,40 @@ mod tests {
             Ok(())
         }
 
-        fn read(&mut self) -> io::Result<Option<Records>> {
+        fn read(&mut self) -> io::Result<Read> {
             if let Some(read) = self.reads.pop_front() {
                 return Ok(read);
             }
             if let Some(stop) = self.stop {
                 stop.store(true, Ordering::SeqCst);
             }
-            Ok(None)
+            Ok(Read {
+                records: None,
+                complete_to: Some(time::now_ticks()),
+            })
         }
 
         fn add_pid(&mut self, pid: i32) -> io::Result<()> {
             self.added.push(pid);
             Ok(())
+        }
+
+        fn finish(&mut self) -> io::Result<Option<Records>> {
+            Ok(self.held.take())
+        }
+    }
+
+    fn found(records: &Records) -> Read {
+        Read {
+            records: Some(records.clone()),
+            complete_to: None,
+        }
+    }
+
+    fn complete(ticks: u64) -> Read {
+        Read {
+            records: None,
+            complete_to: Some(ticks),
         }
     }
 
@@ -275,30 +341,58 @@ mod tests {
     fn forwards_records_and_marks_what_was_read_until_stopped() {
         let stop = AtomicBool::new(false);
         let records = Records::Kdebug(Synth::new(0, 1).io(1, 2, 3, 4, 5, 5));
-        let mut tracer = Scripted {
-            reads: VecDeque::from([Some(records.clone()), None]),
-            stop: Some(&stop),
-            added: Vec::new(),
-        };
+        let mut tracer = Scripted::new([found(&records), complete(70)], Some(&stop));
         let (tx, rx) = mpsc::channel();
         // It never polls the processes, so only the stop flag ends it.
         run(&mut tracer, Vec::new(), &config(Duration::MAX), &tx, &stop).unwrap();
         let got = sent(&rx);
-        assert_eq!(got.first(), Some(&Input::Records(records)));
-        // A read that finds nothing tells the session the trace has been read up to then.
-        assert!(matches!(got[1], Input::Watermark { .. }), "{got:?}");
+        // The read that finds nothing says the trace has been read up to its time.
+        assert_eq!(
+            got[..2],
+            [Input::Records(records), Input::Watermark { ticks: 70 }]
+        );
         assert!(matches!(got.last(), Some(Input::Stopped { .. })), "{got:?}");
+    }
+
+    #[test]
+    fn a_read_that_reaches_the_end_marks_its_own_records() {
+        let stop = AtomicBool::new(false);
+        let records = Records::Kdebug(Synth::new(0, 1).io(1, 2, 3, 4, 5, 5));
+        let read = Read {
+            complete_to: Some(90),
+            ..found(&records)
+        };
+        let mut tracer = Scripted::new([read], Some(&stop));
+        let (tx, rx) = mpsc::channel();
+        run(&mut tracer, Vec::new(), &config(Duration::MAX), &tx, &stop).unwrap();
+        let got = sent(&rx);
+        assert_eq!(
+            got[..2],
+            [Input::Records(records), Input::Watermark { ticks: 90 }]
+        );
+    }
+
+    #[test]
+    fn what_the_facility_holds_at_the_end_comes_before_the_stop() {
+        let stop = AtomicBool::new(false);
+        let records = Records::Kdebug(Synth::new(0, 1).io(1, 2, 3, 4, 5, 5));
+        let mut tracer = Scripted::new([], Some(&stop));
+        tracer.held = Some(records.clone());
+        let (tx, rx) = mpsc::channel();
+        run(&mut tracer, Vec::new(), &config(Duration::MAX), &tx, &stop).unwrap();
+        let got = sent(&rx);
+        let [.., last_records, stopped] = &got[..] else {
+            panic!("{got:?}")
+        };
+        assert_eq!(*last_records, Input::Records(records));
+        assert!(matches!(stopped, Input::Stopped { .. }), "{got:?}");
     }
 
     #[test]
     fn reports_exits_and_traces_running_processes_again() {
         let stop = AtomicBool::new(false);
         let me = Tracked::probe(i32::try_from(std::process::id()).unwrap()).unwrap();
-        let mut tracer = Scripted {
-            reads: VecDeque::from([None, None]),
-            stop: Some(&stop),
-            added: Vec::new(),
-        };
+        let mut tracer = Scripted::new([complete(1), complete(2)], Some(&stop));
         let (tx, rx) = mpsc::channel();
         run(
             &mut tracer,
@@ -323,11 +417,7 @@ mod tests {
     #[test]
     fn stops_by_itself_once_every_process_is_gone() {
         let stop = AtomicBool::new(false);
-        let mut tracer = Scripted {
-            reads: VecDeque::new(),
-            stop: None,
-            added: Vec::new(),
-        };
+        let mut tracer = Scripted::new([], None);
         let (tx, rx) = mpsc::channel();
         run(&mut tracer, vec![gone()], &config(Duration::ZERO), &tx, &stop).unwrap();
         let got = sent(&rx);
