@@ -1,5 +1,7 @@
 //! Aggregates I/O events per target and per second of trace time.
 
+use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
@@ -206,18 +208,48 @@ pub struct SummaryRow {
     pub connections: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Stats {
     rows: HashMap<Key, Row>,
+    /// Rows per category, indexed by [`category_index`].
+    targets: [usize; 3],
     totals: Totals,
     history: VecDeque<Second>,
+}
+
+fn category_index(category: Category) -> usize {
+    match category {
+        Category::File => 0,
+        Category::Network => 1,
+        Category::Other => 2,
+    }
+}
+
+/// Row order for `sort`: largest first, then most calls, then by key so the order is total.
+fn compare(sort: SortBy, (ka, a): &(&Key, &Row), (kb, b): &(&Key, &Row)) -> Ordering {
+    let primary = match sort {
+        SortBy::Bytes => b.bytes().cmp(&a.bytes()),
+        SortBy::Read => b.read.bytes.cmp(&a.read.bytes),
+        SortBy::Write => b.write.bytes.cmp(&a.write.bytes),
+        SortBy::Calls => b.calls().cmp(&a.calls()),
+        SortBy::Recent => b.last_ns.cmp(&a.last_ns),
+    };
+    primary
+        .then_with(|| b.calls().cmp(&a.calls()))
+        .then_with(|| ka.cmp(kb))
 }
 
 impl Stats {
     pub fn record(&mut self, event: &IoEvent) {
         let key = Key::of(&event.target);
         let category = key.category();
-        let row = self.rows.entry(key).or_default();
+        let row = match self.rows.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                self.targets[category_index(category)] += 1;
+                entry.insert(Row::default())
+            }
+        };
         let dir = event.dir();
         match dir {
             Dir::Read => row.read.add(event.bytes),
@@ -265,6 +297,11 @@ impl Stats {
         &self.totals
     }
 
+    /// Number of distinct targets in a category.
+    pub fn targets(&self, category: Category) -> usize {
+        self.targets[category_index(category)]
+    }
+
     /// Rows of one category, sorted.
     pub fn rows(&self, category: Category, sort: SortBy) -> Vec<(&Key, &Row)> {
         let mut rows: Vec<_> = self
@@ -272,18 +309,36 @@ impl Stats {
             .iter()
             .filter(|(key, _)| key.category() == category)
             .collect();
-        rows.sort_by(|(ka, a), (kb, b)| {
-            let primary = match sort {
-                SortBy::Bytes => b.bytes().cmp(&a.bytes()),
-                SortBy::Read => b.read.bytes.cmp(&a.read.bytes),
-                SortBy::Write => b.write.bytes.cmp(&a.write.bytes),
-                SortBy::Calls => b.calls().cmp(&a.calls()),
-                SortBy::Recent => b.last_ns.cmp(&a.last_ns),
-            };
-            primary
-                .then_with(|| b.calls().cmp(&a.calls()))
-                .then_with(|| ka.cmp(kb))
-        });
+        rows.sort_by(|a, b| compare(sort, a, b));
+        rows
+    }
+
+    /// Rows `skip..skip + take` in `sort` order among the categories `wanted` accepts. Only
+    /// the rows returned are fully sorted, so a live view can ask for one screen of a large
+    /// table many times a second.
+    pub fn page(
+        &self,
+        wanted: impl Fn(Category) -> bool,
+        sort: SortBy,
+        skip: usize,
+        take: usize,
+    ) -> Vec<(&Key, &Row)> {
+        let mut rows: Vec<_> = self
+            .rows
+            .iter()
+            .filter(|(key, _)| wanted(key.category()))
+            .collect();
+        let end = skip.saturating_add(take).min(rows.len());
+        if end == 0 {
+            return Vec::new();
+        }
+        if end < rows.len() {
+            // Afterwards the first `end` rows are the smallest, in no particular order.
+            rows.select_nth_unstable_by(end - 1, |a, b| compare(sort, a, b));
+            rows.truncate(end);
+        }
+        rows.sort_by(|a, b| compare(sort, a, b));
+        rows.drain(..skip.min(end));
         rows
     }
 
@@ -482,6 +537,58 @@ mod tests {
             "tcp ?"
         );
         assert_eq!(SortBy::Recent.next(), SortBy::Bytes);
+    }
+
+    #[test]
+    fn pages_match_a_full_sort() {
+        let mut stats = Stats::default();
+        for i in 0..40_u64 {
+            let target = if i % 4 == 0 {
+                Target::Other {
+                    fd_type: FdType::Pipe,
+                }
+            } else {
+                Target::File {
+                    path: format!("/f{i}"),
+                }
+            };
+            // Equal byte counts exercise the tie-breakers.
+            stats.record(&event(Op::Read, target, Some(i % 7), 0, i));
+        }
+        stats.record(&event(
+            Op::Sendto,
+            Target::Socket(Endpoint::unresolved(Proto::Udp)),
+            Some(9),
+            0,
+            50,
+        ));
+        assert_eq!(
+            (
+                stats.targets(Category::File),
+                stats.targets(Category::Network),
+                stats.targets(Category::Other)
+            ),
+            (30, 1, 1)
+        );
+        let local = |c: Category| c != Category::Network;
+        for sort in [SortBy::Bytes, SortBy::Calls, SortBy::Recent] {
+            let mut full: Vec<_> = stats.rows(Category::File, sort);
+            full.extend(stats.rows(Category::Other, sort));
+            full.sort_by(|a, b| compare(sort, a, b));
+            for (skip, take) in [(0, 5), (3, 10), (25, 10), (31, 4), (0, 100), (0, 0)] {
+                let end = (skip + take).min(full.len());
+                let expected: Vec<String> = full[skip.min(end)..end]
+                    .iter()
+                    .map(|(k, _)| k.to_string())
+                    .collect();
+                let got: Vec<String> = stats
+                    .page(local, sort, skip, take)
+                    .iter()
+                    .map(|(k, _)| k.to_string())
+                    .collect();
+                assert_eq!(got, expected, "{sort:?} {skip}+{take}");
+            }
+        }
     }
 
     #[test]

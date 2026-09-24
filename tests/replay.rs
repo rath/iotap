@@ -218,3 +218,18 @@ fn replay_writes_json_lines() {
     assert_eq!(summary["network"][0]["target"], "tcp 93.184.216.34:443");
     assert_eq!(summary["files"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn tui_needs_a_terminal() {
+    let dir = TempDir::new("tui");
+    let path = dir.0.join("curl.iotaprec");
+    write_recording(&path);
+    let output = iotap(&["--replay", path.to_str().unwrap(), "--tui"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        "iotap: --tui needs a terminal, but stdout is redirected\n"
+    );
+}

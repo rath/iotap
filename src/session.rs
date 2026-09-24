@@ -26,6 +26,14 @@ pub struct Process {
     pub name: String,
 }
 
+/// A traced process and whether it is still running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessStatus {
+    pub pid: i32,
+    pub name: String,
+    pub alive: bool,
+}
+
 /// Facts fixed when tracing starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -179,9 +187,31 @@ impl Session {
         &self.stats
     }
 
+    /// Which kinds of targets the session reports.
+    pub fn filter(&self) -> Filter {
+        self.filter
+    }
+
     /// Name of a traced process.
     pub fn process_name(&self, pid: i32) -> Option<&str> {
         self.processes.get(&pid).map(|p| p.name.as_str())
+    }
+
+    /// Every process traced so far, in pid order.
+    pub fn processes(&self) -> Vec<ProcessStatus> {
+        self.processes
+            .iter()
+            .map(|(&pid, state)| ProcessStatus {
+                pid,
+                name: state.name.clone(),
+                alive: state.alive,
+            })
+            .collect()
+    }
+
+    /// Times the kernel reported dropped records.
+    pub fn lost_events(&self) -> u64 {
+        self.lost_events
     }
 
     /// True once every traced process has exited.
@@ -361,6 +391,20 @@ impl Session {
     }
 }
 
+/// A sink that drops everything, for input whose output nobody will see.
+#[derive(Debug, Default)]
+pub struct Discard;
+
+impl Sink for Discard {
+    fn event(&mut self, _: &IoEvent) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn notice(&mut self, _: &Notice) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A sink that keeps everything; for tests.
 #[derive(Debug, Default)]
 pub struct Collect {
@@ -503,6 +547,7 @@ mod tests {
             ),
             (1, 1, 1)
         );
+        assert_eq!(session.lost_events(), 1);
     }
 
     #[test]
@@ -584,5 +629,17 @@ mod tests {
         assert_eq!(session.process_name(PID), Some("other"));
         assert_eq!(sink.notices[0], Notice::Attached(child));
         assert!(!session.all_exited());
+        session
+            .handle(&Input::Exited { pid: 777 }, &mut src, &mut Discard)
+            .unwrap();
+        let status = |pid, name: &str, alive| ProcessStatus {
+            pid,
+            name: name.into(),
+            alive,
+        };
+        assert_eq!(
+            session.processes(),
+            [status(PID, "other", true), status(777, "demo", false)]
+        );
     }
 }

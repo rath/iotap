@@ -1,7 +1,7 @@
 //! Wires the command line to the kernel reader, the session and the chosen output.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,19 +16,24 @@ use crate::cli::Cli;
 use crate::output::json::JsonSink;
 use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
-use crate::record::{self, Recorder, Recording};
-use crate::session::{Filter, Input, Session, SessionInfo, Sink, Summary};
+use crate::record::{self, Answers, Recorder, Recording};
+use crate::session::{Discard, Filter, Input, Session, SessionInfo, Sink, Summary};
 use crate::sys;
 use crate::sys::kdebug::{self, Kdebug, KdebugConfig, KdebugError, TypeFilter};
-use crate::sys::time::{ClockAnchor, Timebase};
+use crate::sys::time::{self, ClockAnchor, Timebase};
 use crate::target::{self, Spec, Tracked};
 use crate::trace::codes;
 use crate::trace::procs::{Live, ProcSource};
+use crate::tui::{self, Feed, state::App};
 
 /// Process source of a live trace: libproc, optionally recorded to a file.
 type LiveSource = Recording<Live, BufWriter<File>>;
 
 type Stdout = BufWriter<io::StdoutLock<'static>>;
+
+/// Contexts for failures of the output and of the terminal UI.
+const WRITE_FAILED: &str = "cannot write output";
+const TUI_FAILED: &str = "the terminal UI failed";
 
 /// The stdout format chosen on the command line.
 enum Printer {
@@ -73,6 +78,9 @@ pub fn run(cli: &Cli) -> Result<ExitCode> {
     if let Some(pid) = cli.dump_fds {
         return dump_fds(pid);
     }
+    if cli.tui && !io::stdout().is_terminal() {
+        bail!("--tui needs a terminal, but stdout is redirected");
+    }
     if let Some(path) = &cli.replay {
         return replay(cli, path);
     }
@@ -112,7 +120,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
             Spec::Pid(_) => None,
         })
         .collect();
-    announce(&tracked, &follow);
+    announce(&tracked, &follow, cli.tui);
 
     let timebase = Timebase::host();
     let anchor = ClockAnchor::now();
@@ -137,7 +145,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let mut session = Session::new(info, filter(cli), &mut src);
 
     let stop = Arc::new(AtomicBool::new(false));
-    watch_signals(&stop)?;
+    let interrupted = watch_signals(&stop)?;
     let config = ReaderConfig {
         follow,
         wait: Duration::from_millis(50),
@@ -147,7 +155,12 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let deadline = cli
         .duration
         .map(|secs| Instant::now() + Duration::from_secs(secs));
-    let mut printer = Printer::new(cli, session.info())?;
+    // The terminal UI prints its summary as text once the terminal is restored.
+    let mut printer = if cli.tui {
+        None
+    } else {
+        Some(Printer::new(cli, session.info())?)
+    };
 
     let (tx, rx) = mpsc::channel();
     let (kd_ref, stop_ref, config_ref) = (&kd, &*stop, &config);
@@ -158,7 +171,18 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
                 reader::run(kd_ref, tracked, config_ref, &tx, stop_ref)
             })
             .context("cannot start the kernel reader")?;
-        let consumed = consume(&rx, &mut session, &mut src, printer.sink(), stop_ref, deadline);
+        let mut input = LiveInput {
+            rx: &rx,
+            src: &mut src,
+            stop: stop_ref,
+            deadline,
+            expired: false,
+            reported: false,
+        };
+        let consumed = match printer.as_mut() {
+            Some(printer) => consume(&mut input, &mut session, printer.sink()),
+            None => watch_live(&mut input, &mut session, &interrupted),
+        };
         stop_ref.store(true, Ordering::SeqCst);
         let read = reader.join().map_err(|_| anyhow!("the kernel reader panicked"))?;
         anyhow::Ok((consumed, read))
@@ -167,7 +191,13 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     drop(kd);
 
     let saved = src.finish();
-    if !finish_output(consumed)? || !finish_output(printer.summary(&session.summary(), cli))? {
+    let (printer, failed) = match printer {
+        Some(printer) => (printer, WRITE_FAILED),
+        None => (Printer::new(cli, session.info())?, TUI_FAILED),
+    };
+    if !finish_output(consumed, failed)?
+        || !finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?
+    {
         return Ok(ExitCode::SUCCESS);
     }
     read?;
@@ -177,36 +207,172 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Feeds reader input to the session until tracing stops or the reader goes away.
-fn consume(
-    rx: &Receiver<Input>,
-    session: &mut Session,
-    src: &mut LiveSource,
-    sink: &mut dyn Sink,
-    stop: &AtomicBool,
+/// Live input: what the reader thread sends, saved as it arrives when recording.
+struct LiveInput<'a> {
+    rx: &'a Receiver<Input>,
+    src: &'a mut LiveSource,
+    stop: &'a AtomicBool,
     deadline: Option<Instant>,
-) -> io::Result<()> {
-    let mut reported = false;
-    loop {
-        if deadline.is_some_and(|at| Instant::now() >= at) {
-            stop.store(true, Ordering::SeqCst);
+    /// Set once the deadline has stopped tracing.
+    expired: bool,
+    /// Set once a recording failure has been reported.
+    reported: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// Nothing arrived in time.
+    Idle,
+    Handled,
+    /// The reader stopped tracing; nothing follows.
+    Stopped,
+    /// The reader went away without stopping, which means it failed.
+    Closed,
+}
+
+impl LiveInput<'_> {
+    /// Waits up to `wait` for the next input and hands it to the session.
+    fn step(&mut self, session: &mut Session, sink: &mut dyn Sink, wait: Duration) -> io::Result<Step> {
+        if !self.expired && self.deadline.is_some_and(|at| Instant::now() >= at) {
+            self.expired = true;
+            self.stop.store(true, Ordering::SeqCst);
         }
-        let input = match rx.recv_timeout(Duration::from_millis(100)) {
+        let input = match self.rx.recv_timeout(wait) {
             Ok(input) => input,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Timeout) => return Ok(Step::Idle),
+            Err(RecvTimeoutError::Disconnected) => return Ok(Step::Closed),
         };
-        let last = matches!(input, Input::Stopped { .. });
-        src.input(&input);
-        session.handle(&input, src, sink)?;
+        self.src.input(&input);
+        session.handle(&input, self.src, sink)?;
         sink.flush()?;
-        if !reported && let Some(err) = src.error() {
-            let _ = writeln!(io::stderr(), "iotap: recording stopped: {err}; tracing continues");
-            reported = true;
+        Ok(if matches!(input, Input::Stopped { .. }) {
+            Step::Stopped
+        } else {
+            Step::Handled
+        })
+    }
+
+    /// Describes a recording failure, once.
+    fn recording_error(&mut self) -> Option<String> {
+        if self.reported {
+            return None;
         }
-        if last {
+        let err = self.src.error()?;
+        self.reported = true;
+        Some(format!("recording stopped: {err}; tracing continues"))
+    }
+}
+
+/// Feeds live input to the session until tracing stops or the reader goes away.
+fn consume(input: &mut LiveInput<'_>, session: &mut Session, sink: &mut dyn Sink) -> io::Result<()> {
+    loop {
+        let step = input.step(session, sink, Duration::from_millis(100))?;
+        if let Some(message) = input.recording_error() {
+            let _ = writeln!(io::stderr(), "iotap: {message}");
+        }
+        if matches!(step, Step::Stopped | Step::Closed) {
             return Ok(());
         }
+    }
+}
+
+/// Shows live input in the terminal UI until the user quits, then takes in what the reader
+/// still delivers so the summary covers every record read from the kernel.
+fn watch_live(input: &mut LiveInput<'_>, session: &mut Session, interrupted: &AtomicBool) -> io::Result<()> {
+    let mut feed = LiveFeed {
+        input,
+        interrupted,
+        ended: false,
+    };
+    let shown = tui::run(session, &mut feed);
+    let ended = feed.ended;
+    input.stop.store(true, Ordering::SeqCst);
+    let drained = if ended {
+        Ok(())
+    } else {
+        consume(input, session, &mut Discard)
+    };
+    shown.and(drained)
+}
+
+/// Live input for the terminal UI.
+struct LiveFeed<'a, 'b> {
+    input: &'a mut LiveInput<'b>,
+    interrupted: &'a AtomicBool,
+    /// Set once the reader has stopped or gone away.
+    ended: bool,
+}
+
+impl Feed for LiveFeed<'_, '_> {
+    fn pump(&mut self, session: &mut Session, app: &mut App, until: Instant) -> io::Result<Option<String>> {
+        loop {
+            let wait = until.saturating_duration_since(Instant::now());
+            let step = self.input.step(session, app, wait)?;
+            if let Some(message) = self.input.recording_error() {
+                app.message(message);
+            }
+            match step {
+                Step::Idle => return Ok(None),
+                Step::Handled if Instant::now() >= until => return Ok(None),
+                Step::Handled => {}
+                Step::Stopped => {
+                    self.ended = true;
+                    let why = if self.input.expired {
+                        "the --duration limit was reached"
+                    } else if session.all_exited() {
+                        "every traced process has exited"
+                    } else {
+                        "tracing was interrupted"
+                    };
+                    return Ok(Some(format!("Tracing stopped: {why}.")));
+                }
+                Step::Closed => {
+                    self.ended = true;
+                    return Ok(Some(
+                        "The kernel reader failed; its error follows the summary.".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn now_ns(&self, session: &Session) -> u64 {
+        if self.ended {
+            return session.now_ns();
+        }
+        let info = session.info();
+        info.anchor.unix_nanos_at(info.timebase, time::now_ticks())
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
+    }
+}
+
+/// A recording, fed to the terminal UI as fast as the session takes it.
+struct ReplayFeed<'a> {
+    inputs: std::vec::IntoIter<Input>,
+    answers: Answers,
+    interrupted: &'a AtomicBool,
+}
+
+impl Feed for ReplayFeed<'_> {
+    fn pump(&mut self, session: &mut Session, app: &mut App, until: Instant) -> io::Result<Option<String>> {
+        for input in self.inputs.by_ref() {
+            session.handle(&input, &mut self.answers, app)?;
+            if Instant::now() >= until {
+                return Ok(None);
+            }
+        }
+        Ok(Some("End of the recording.".to_owned()))
+    }
+
+    fn now_ns(&self, session: &Session) -> u64 {
+        session.now_ns()
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
     }
 }
 
@@ -234,28 +400,46 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
     );
     let mut answers = replay.answers;
     let mut session = Session::new(replay.info, filter(cli), &mut answers);
+    if cli.tui {
+        // A replay has nothing to stop; only the request to quit matters.
+        let interrupted = watch_signals(&Arc::new(AtomicBool::new(false)))?;
+        let mut feed = ReplayFeed {
+            inputs: replay.inputs.into_iter(),
+            answers,
+            interrupted: &interrupted,
+        };
+        if finish_output(tui::run(&mut session, &mut feed), TUI_FAILED)? {
+            // The summary covers the whole recording, as it does without --tui.
+            for input in feed.inputs.by_ref() {
+                session.handle(&input, &mut feed.answers, &mut Discard)?;
+            }
+            let printer = Printer::new(cli, session.info())?;
+            finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let mut printer = Printer::new(cli, session.info())?;
     let sink = printer.sink();
     let fed = replay.inputs.iter().try_for_each(|input| {
         session.handle(input, &mut answers, sink)?;
         sink.flush()
     });
-    if finish_output(fed)? {
-        finish_output(printer.summary(&session.summary(), cli))?;
+    if finish_output(fed, WRITE_FAILED)? {
+        finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
 /// False when stdout was closed by its reader, as with `| head`, which is not an error.
-fn finish_output(result: io::Result<()>) -> Result<bool> {
+fn finish_output(result: io::Result<()>, failed: &'static str) -> Result<bool> {
     match result {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(false),
-        Err(err) => Err(err).context("cannot write output"),
+        Err(err) => Err(err).context(failed),
     }
 }
 
-fn announce(tracked: &[Tracked], follow: &[String]) {
+fn announce(tracked: &[Tracked], follow: &[String], tui: bool) {
     let list: Vec<String> = tracked
         .iter()
         .map(|t| format!("{} ({})", t.pid, t.name))
@@ -270,29 +454,39 @@ fn announce(tracked: &[Tracked], follow: &[String]) {
         let names: Vec<String> = follow.iter().map(|n| format!("'{n}'")).collect();
         format!(", and new processes named {}", names.join(" or "))
     };
-    let _ = writeln!(io::stderr(), "iotap: tracing {what}{also}; press Ctrl-C to stop");
+    let how = if tui {
+        "press q to quit"
+    } else {
+        "press Ctrl-C to stop"
+    };
+    let _ = writeln!(io::stderr(), "iotap: tracing {what}{also}; {how}");
 }
 
-/// The first signal asks for a clean stop; a second one releases the trace facility and exits
-/// at once, in case output is blocked.
-fn watch_signals(stop: &Arc<AtomicBool>) -> Result<()> {
+/// The first signal asks for a clean stop: it sets `stop` and the returned flag. A second one
+/// releases the trace facility, restores the terminal and exits at once, in case output is
+/// blocked.
+fn watch_signals(stop: &Arc<AtomicBool>) -> Result<Arc<AtomicBool>> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP])?;
-    let stop = Arc::clone(stop);
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let (stop, flag) = (Arc::clone(stop), Arc::clone(&interrupted));
     thread::Builder::new().name("signals".into()).spawn(move || {
         for (received, _) in signals.forever().enumerate() {
             if received == 0 {
+                flag.store(true, Ordering::SeqCst);
                 stop.store(true, Ordering::SeqCst);
             } else {
                 kdebug::release();
+                tui::emergency_restore();
                 std::process::exit(130);
             }
         }
     })?;
-    Ok(())
+    Ok(interrupted)
 }
 
-/// Releases the trace facility before the default panic output.
+/// Releases the trace facility before the default panic output. The terminal UI installs its
+/// own hook on top, so a panic restores the terminal first.
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

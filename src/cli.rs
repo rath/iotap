@@ -24,6 +24,11 @@ pub struct Cli {
     pub name: bool,
 
     /// Show a live terminal UI instead of streaming events.
+    ///
+    /// Keys: 1, 2 and 3 switch between the Files, Network and Events tabs; s changes the sort
+    /// order; p pauses the view while tracing goes on; the arrow keys, Page Up, Page Down,
+    /// Home and End scroll; q quits and prints the summary. The UI stays open after tracing
+    /// stops.
     #[arg(long, conflicts_with_all = ["json", "quiet"])]
     pub tui: bool,
 

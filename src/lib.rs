@@ -15,3 +15,4 @@ pub mod stats;
 pub mod sys;
 pub mod target;
 pub mod trace;
+pub mod tui;

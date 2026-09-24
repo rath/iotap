@@ -32,8 +32,8 @@ impl<W: Write> TextSink<W> {
     }
 }
 
-/// Formats one event line (without a trailing newline).
-pub fn event_line(event: &IoEvent, clock: &mut LocalClock) -> String {
+/// The columns of an event line: time, pid, op, fd, requested, result, latency and target.
+pub fn event_fields(event: &IoEvent, clock: &mut LocalClock) -> [String; 8] {
     let fd = event.fd.map_or_else(|| "-".to_owned(), |fd| fd.to_string());
     let requested = event.requested.map_or_else(|| "-".to_owned(), |n| n.to_string());
     let result = if !event.is_ok() {
@@ -46,17 +46,22 @@ pub fn event_line(event: &IoEvent, clock: &mut LocalClock) -> String {
         "?".to_owned()
     };
     let latency = event.latency_ns.map_or_else(|| "-".to_owned(), latency);
-    format!(
-        "{}  {:>6}  {:<13} {:>5} {:>11} {:>11} {:>11}  {}",
+    [
         clock.format(event.time_ns),
-        event.pid,
-        event.op.name(),
+        event.pid.to_string(),
+        event.op.name().to_owned(),
         fd,
         requested,
         result,
         latency,
-        event.target
-    )
+        event.target.to_string(),
+    ]
+}
+
+/// Formats one event line (without a trailing newline).
+pub fn event_line(event: &IoEvent, clock: &mut LocalClock) -> String {
+    let [time, pid, op, fd, requested, result, latency, target] = event_fields(event, clock);
+    format!("{time}  {pid:>6}  {op:<13} {fd:>5} {requested:>11} {result:>11} {latency:>11}  {target}")
 }
 
 /// Header matching [`event_line`].
