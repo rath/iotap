@@ -123,18 +123,33 @@ pub enum Proto {
     Icmp,
     Raw,
     Unix,
+    /// A macOS routing socket.
     Route,
+    /// A macOS kernel control or event socket.
     System,
+    /// A Linux netlink socket, which talks to the kernel.
+    Netlink,
+    /// A Linux packet socket, which sees whole link-layer frames.
+    Packet,
     Other,
 }
 
 impl Proto {
     /// Classifies a socket from its `socket(2)` arguments or its `socket_info`.
     pub fn classify(family: i32, sock_type: i32, protocol: i32) -> Self {
+        // Linux takes descriptor flags in the type.
+        #[cfg(target_os = "linux")]
+        let sock_type = sock_type & !(libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC);
         match family {
             libc::AF_UNIX => Self::Unix,
+            #[cfg(target_os = "macos")]
             libc::AF_ROUTE => Self::Route,
+            #[cfg(target_os = "macos")]
             libc::AF_SYSTEM => Self::System,
+            #[cfg(target_os = "linux")]
+            libc::AF_NETLINK => Self::Netlink,
+            #[cfg(target_os = "linux")]
+            libc::AF_PACKET => Self::Packet,
             libc::AF_INET | libc::AF_INET6 => match (protocol, sock_type) {
                 (libc::IPPROTO_TCP, _) | (0, libc::SOCK_STREAM) => Self::Tcp,
                 (libc::IPPROTO_UDP, _) | (0, libc::SOCK_DGRAM) => Self::Udp,
@@ -160,6 +175,8 @@ impl Proto {
             Self::Unix => "unix",
             Self::Route => "route",
             Self::System => "system",
+            Self::Netlink => "netlink",
+            Self::Packet => "packet",
             Self::Other => "socket",
         }
     }
@@ -214,7 +231,8 @@ impl fmt::Display for Endpoint {
     }
 }
 
-/// Kind of a descriptor that is neither a file nor a socket.
+/// Kind of a descriptor that is neither a file nor a socket. Most kinds exist on one system
+/// only: from `Kqueue` to `Atalk` on macOS, from `Eventfd` to `Userfaultfd` on Linux.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FdType {
@@ -227,6 +245,18 @@ pub enum FdType {
     Channel,
     Nexus,
     Atalk,
+    Eventfd,
+    Epoll,
+    Timerfd,
+    Signalfd,
+    Inotify,
+    Fanotify,
+    Pidfd,
+    IoUring,
+    /// A BPF map, program or link.
+    Bpf,
+    PerfEvent,
+    Userfaultfd,
     Other,
 }
 
@@ -242,6 +272,17 @@ impl FdType {
             Self::Channel => "channel",
             Self::Nexus => "nexus",
             Self::Atalk => "appletalk",
+            Self::Eventfd => "eventfd",
+            Self::Epoll => "epoll",
+            Self::Timerfd => "timerfd",
+            Self::Signalfd => "signalfd",
+            Self::Inotify => "inotify",
+            Self::Fanotify => "fanotify",
+            Self::Pidfd => "pidfd",
+            Self::IoUring => "io_uring",
+            Self::Bpf => "bpf",
+            Self::PerfEvent => "perf_event",
+            Self::Userfaultfd => "userfaultfd",
             Self::Other => "other",
         }
     }
@@ -342,11 +383,25 @@ impl IoEvent {
     }
 }
 
-/// Symbolic name of an errno value as reported by the kernel, e.g. `EAGAIN`.
+/// Symbolic name of an errno value as reported by the kernel, e.g. `EAGAIN`. Kernels also
+/// report values of their own that user space never sees, such as the ones that make a call
+/// start over after a signal.
 pub fn errno_name(errno: i32) -> Cow<'static, str> {
     let name = match errno {
+        #[cfg(target_os = "macos")]
         -2 => "EJUSTRETURN",
+        #[cfg(target_os = "macos")]
         -1 => "ERESTART",
+        #[cfg(target_os = "linux")]
+        512 => "ERESTARTSYS",
+        #[cfg(target_os = "linux")]
+        513 => "ERESTARTNOINTR",
+        #[cfg(target_os = "linux")]
+        514 => "ERESTARTNOHAND",
+        #[cfg(target_os = "linux")]
+        515 => "ENOIOCTLCMD",
+        #[cfg(target_os = "linux")]
+        516 => "ERESTART_RESTARTBLOCK",
         libc::EPERM => "EPERM",
         libc::ENOENT => "ENOENT",
         libc::ESRCH => "ESRCH",
@@ -383,6 +438,8 @@ pub fn errno_name(errno: i32) -> Cow<'static, str> {
         libc::EPROTOTYPE => "EPROTOTYPE",
         libc::ENOPROTOOPT => "ENOPROTOOPT",
         libc::EPROTONOSUPPORT => "EPROTONOSUPPORT",
+        // Linux gives it the value of EOPNOTSUPP, which names it there.
+        #[cfg(target_os = "macos")]
         libc::ENOTSUP => "ENOTSUP",
         libc::EAFNOSUPPORT => "EAFNOSUPPORT",
         libc::EADDRINUSE => "EADDRINUSE",
@@ -410,9 +467,13 @@ pub fn errno_name(errno: i32) -> Cow<'static, str> {
         libc::EOVERFLOW => "EOVERFLOW",
         libc::ECANCELED => "ECANCELED",
         libc::EILSEQ => "EILSEQ",
+        #[cfg(target_os = "macos")]
         libc::ENOATTR => "ENOATTR",
+        #[cfg(target_os = "linux")]
+        libc::ENODATA => "ENODATA",
         libc::EBADMSG => "EBADMSG",
         libc::EOPNOTSUPP => "EOPNOTSUPP",
+        #[cfg(target_os = "macos")]
         libc::EQFULL => "EQFULL",
         _ => return Cow::Owned(format!("errno {errno}")),
     };
@@ -455,6 +516,15 @@ mod tests {
             Proto::classify(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP),
             Proto::Icmp
         );
+        #[cfg(target_os = "linux")]
+        {
+            let cloexec = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+            assert_eq!(Proto::classify(libc::AF_INET, cloexec, 0), Proto::Tcp);
+            assert_eq!(
+                Proto::classify(libc::AF_NETLINK, libc::SOCK_RAW, 0),
+                Proto::Netlink
+            );
+        }
     }
 
     #[test]
@@ -484,7 +554,11 @@ mod tests {
     #[test]
     fn names_errno_values() {
         assert_eq!(errno_name(libc::EAGAIN), "EAGAIN");
+        assert_eq!(errno_name(libc::EOPNOTSUPP), "EOPNOTSUPP");
+        #[cfg(target_os = "macos")]
         assert_eq!(errno_name(-1), "ERESTART");
+        #[cfg(target_os = "linux")]
+        assert_eq!(errno_name(512), "ERESTARTSYS");
         assert_eq!(errno_name(12345), "errno 12345");
     }
 }
