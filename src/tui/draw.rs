@@ -6,16 +6,17 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, Tabs};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::details;
 use super::state::{Drawn, Shown, Tab, View};
 use crate::output::{bytes, count, text};
 use crate::stats::{self, Key, Second, SortBy};
 
-const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
-const DIM: Style = Style::new().fg(Color::DarkGray);
-const FAILED: Style = Style::new().fg(Color::Red);
+pub(super) const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
+pub(super) const DIM: Style = Style::new().fg(Color::DarkGray);
+pub(super) const FAILED: Style = Style::new().fg(Color::Red);
 const SORTED: Style = Style::new()
     .fg(Color::Cyan)
     .add_modifier(Modifier::BOLD)
@@ -59,7 +60,7 @@ pub fn draw(frame: &mut Frame<'_>, view: &mut View, shown: &Shown<'_>) {
     // Tables start one column in, like the lines above them.
     let [_, body] = Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
     let position = match view.tab {
-        Tab::Files | Tab::Network => draw_targets(frame, body, view, shown),
+        Tab::Files | Tab::Network => draw_table_tab(frame, body, view, shown),
         Tab::Events => draw_events(frame, body, view, shown),
     };
     draw_tabs(frame, tabs, view, shown, position);
@@ -208,9 +209,43 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, 
     frame.render_widget(Paragraph::new(indicators), right);
 }
 
-/// Draws the Files or Network table, scrolled so the selected row shows; returns which rows
-/// are visible, when not all fit.
-fn draw_targets(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown<'_>) -> String {
+/// Draws the Files or Network table and, when asked for, the details of its selected row
+/// below it; returns which rows are visible, when not all fit.
+fn draw_table_tab(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown<'_>) -> String {
+    let tab = view.tab;
+    let stats = shown.stats;
+    let selected = view.selected_rank(stats);
+    let lines = if view.details {
+        let row = stats.page(|category| tab.lists(category), view.sort, selected, 1);
+        row.first()
+            .map(|&(key, row)| details::lines(key, row, usize::from(area.width), view, shown))
+    } else {
+        None
+    };
+    let Some(lines) = lines else {
+        return draw_targets(frame, area, view, shown, selected);
+    };
+    // The table keeps its header and a few rows; the panel gives up its last lines first.
+    let height = u16::try_from(lines.len() + 1).unwrap_or(u16::MAX);
+    let [table, panel] = Layout::vertical([Constraint::Min(4), Constraint::Length(height)]).areas(area);
+    let position = draw_targets(frame, table, view, shown, selected);
+    let block = Block::new()
+        .borders(Borders::TOP)
+        .border_style(DIM)
+        .title(Span::styled(" details ", BOLD));
+    frame.render_widget(Paragraph::new(lines).block(block), panel);
+    position
+}
+
+/// Draws the Files or Network table, scrolled so the row ranked `selected` shows; returns
+/// which rows are visible, when not all fit.
+fn draw_targets(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &mut View,
+    shown: &Shown<'_>,
+    selected: usize,
+) -> String {
     let tab = view.tab;
     let files = tab == Tab::Files;
     let stats = shown.stats;
@@ -222,7 +257,6 @@ fn draw_targets(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Show
     };
     let page = usize::from(area.height.saturating_sub(1));
     let index = tab.index();
-    let selected = view.selected_rank(stats);
     let mut offset = view.offsets[index].min(total.saturating_sub(page));
     if selected < offset {
         offset = selected;
@@ -427,13 +461,19 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>) {
-    let pause = if shown.paused { "p resume" } else { "p pause" };
-    let tabs = view.tabs.len();
-    let hints = Line::styled(
-        format!("q quit  1-{tabs} tabs  s sort  {pause}  r reset  ↑↓ PgUp PgDn scroll "),
-        DIM,
-    )
-    .right_aligned();
+    let table = view.tab != Tab::Events;
+    let mut hints = vec!["q quit"];
+    if table {
+        hints.push("s sort");
+    }
+    hints.push(if shown.paused { "p resume" } else { "p pause" });
+    hints.push("r reset");
+    hints.push(match (table, view.details) {
+        (true, false) => "enter details",
+        (true, true) => "esc close",
+        (false, _) => "↑↓ scroll",
+    });
+    let hints = Line::styled(format!("{} ", hints.join("  ")), DIM).right_aligned();
     let [left, right] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(width_of_line(&hints))]).areas(area);
     if let Some(status) = shown.status {
@@ -491,7 +531,7 @@ fn clock(ns: u64) -> String {
 }
 
 /// Syscall latency in at most 7 columns, e.g. `850µs`, `12.3ms`, `1.24s`.
-fn short_latency(ns: u64) -> String {
+pub(super) fn short_latency(ns: u64) -> String {
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
     match ns {
@@ -504,7 +544,7 @@ fn short_latency(ns: u64) -> String {
 }
 
 /// Time since the latest I/O on a target, coarsely.
-fn idle(ns: u64) -> String {
+pub(super) fn idle(ns: u64) -> String {
     let secs = ns / 1_000_000_000;
     match secs {
         0 => "<1s".to_owned(),
@@ -780,6 +820,95 @@ mod tests {
     }
 
     #[test]
+    fn details_describe_the_selected_target() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        let now = START_NS + 2_500_000_000;
+        press(&mut app, &session, KeyCode::Enter);
+        let lines = render(&session, &mut app, 100, 30, now);
+        assert!(find(&lines, " details ").starts_with("  details ───"));
+        assert!(lines.iter().any(|line| line == " /Users/me/page.html"));
+        let totals: Vec<&str> = find(&lines, " written ").split_whitespace().collect();
+        assert_eq!(
+            totals,
+            [
+                "read", "0", "B", "in", "0", "calls", "written", "4.0", "KiB", "in", "1", "call", "failed",
+                "0"
+            ]
+        );
+        assert!(find(&lines, " latency ").contains(" on average, "));
+        assert!(find(&lines, " used ").ends_with(", last 1s ago"));
+        assert!(find(&lines, " processes ").ends_with(" 4242 curl"));
+        assert!(find(&lines, " file ").ends_with(" no longer exists"));
+        let recent = find(&lines, " recent ");
+        assert!(
+            recent.contains(" 4242  write ") && recent.contains(" 4096 "),
+            "{recent}"
+        );
+        assert!(lines.last().unwrap().contains("esc close"));
+
+        press(&mut app, &session, KeyCode::Char('2'));
+        let lines = render(&session, &mut app, 100, 30, now);
+        assert!(lines.iter().any(|line| line == " tcp 93.184.216.34:443"));
+        assert!(find(&lines, " received ").contains(" sent 517 B in 1 call   failed 1"));
+        assert!(find(&lines, " local ").ends_with(" 192.168.1.20:61000"));
+        assert!(
+            !lines.iter().any(|line| line.starts_with(" file ")),
+            "sockets have no file line"
+        );
+        // The panel ends above the footer.
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with(" recent "))
+            .unwrap();
+        let recent = &lines[start..lines.len() - 1];
+        assert_eq!(recent.len(), 3, "three calls on the socket: {recent:?}");
+        assert!(recent[2].contains("EAGAIN"));
+
+        press(&mut app, &session, KeyCode::Char('3'));
+        let lines = render(&session, &mut app, 100, 30, now);
+        assert!(
+            !lines.iter().any(|line| line.contains(" details ")),
+            "the Events tab has no panel"
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_details_before_quitting() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        press(&mut app, &session, KeyCode::Char('3'));
+        press(&mut app, &session, KeyCode::Enter);
+        assert!(!app.view.details, "Enter does nothing in the Events tab");
+        press(&mut app, &session, KeyCode::Char('1'));
+        press(&mut app, &session, KeyCode::Enter);
+        assert!(app.view.details);
+        press(&mut app, &session, KeyCode::Esc);
+        assert!(!app.view.details && !app.wants_quit());
+        press(&mut app, &session, KeyCode::Esc);
+        assert!(app.wants_quit());
+    }
+
+    #[test]
+    fn details_give_way_to_the_table_on_small_screens() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        press(&mut app, &session, KeyCode::Enter);
+        // 14 lines leave the body 8: the table keeps a header and three rows, and the panel
+        // shows its first three lines.
+        let lines = render(&session, &mut app, 100, 14, START_NS);
+        let header = lines.iter().position(|line| line.contains(" CALLS ")).unwrap();
+        let panel = lines.iter().position(|line| line.contains(" details ")).unwrap();
+        assert_eq!(panel - header, 4, "{}", lines.join("\n"));
+        assert_eq!(lines[panel + 1], " /Users/me/page.html");
+        assert!(lines[panel + 3].starts_with(" latency "));
+        assert!(lines.last().unwrap().contains("esc close"));
+        for (width, height) in [(1, 1), (20, 5), (40, 8), (80, 3), (100, 12)] {
+            render(&session, &mut app, width, height, START_NS);
+        }
+    }
+
+    #[test]
     fn alerts_and_pause_are_visible() {
         let (session, mut app) = traced();
         app.end("Tracing stopped: every traced process has exited.".into());
@@ -804,7 +933,7 @@ mod tests {
             "{tabs}"
         );
         assert!(find(&lines, "tcp 93.184.216.34:443").contains("517 B"));
-        assert!(lines.last().unwrap().contains("q quit  1-2 tabs"));
+        assert!(lines.last().unwrap().contains("q quit  s sort  p pause"));
     }
 
     #[test]

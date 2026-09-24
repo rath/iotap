@@ -27,7 +27,8 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
   reads or stores the data being transferred.
 - Everything downstream of the kernel reader is deterministic and driven by trace timestamps, never
   by wall-clock time, so recordings replay to identical output. The one exception is presentation:
-  the live terminal UI reads the host clock for its elapsed time and its current second.
+  the live terminal UI reads the host clock for its elapsed time and its current second, and its
+  details panel reads a file's metadata (`lstat`) as it is now.
 - Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams built
   with `trace::synth`, the TUI by rendering into ratatui's `TestBackend`. After changing anything
   under `src/sys/`, `src/reader.rs`, the syscall table or `csrc/`, run the root-only checks in
@@ -51,8 +52,8 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/stats.rs` | Per-target and per-second aggregation |
 | `src/record.rs` | `--record` and `--replay` file format |
 | `src/output/` | Text and JSON Lines output, shared formatting |
-| `src/tui/` | Terminal UI: `state` (keys, pause, event ring), `draw` (rendering), the frame loop |
-| `src/sys/` | The only unsafe code: kdebug sysctls, libproc and mach time behind safe functions |
+| `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), the frame loop |
+| `src/sys/` | The only unsafe code: kdebug sysctls, libproc, mach time and user accounts behind safe functions |
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
 

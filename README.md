@@ -144,7 +144,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
         0 B       0   14.1 MiB    3601      0  <1s /Users/me/big.iso
         0 B       0       20 B       1      0  <1s /dev/ttys004
 
- 4242 (curl) exited             q quit  1-3 tabs  s sort  p pause  r reset  ↑↓ PgUp PgDn scroll
+ 4242 (curl) exited                             q quit  s sort  p pause  r reset  enter details
 ```
 
 | Key | Action |
@@ -152,11 +152,26 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | `1` `2` `3`, Tab, Left, Right | Switch tabs |
 | `s` | Sort by bytes, read, write, calls or most recent |
 | `p` or Space | Pause the view; tracing goes on |
+| Enter | Show or hide the details of the selected row |
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
 | Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, move the selected row. The selection stays with its target as the rows re-sort; Home selects the top row, whichever target that is. In the Events tab, scroll; End follows new events again |
-| `q`, Esc, Ctrl-C | Quit and print the summary |
+| `q`, Esc, Ctrl-C | Quit and print the summary; Esc closes the details first |
 
 The UI stays open after tracing stops and says why it stopped.
+
+The details panel opens below the Files or Network table and shows the selected target:
+
+- its full path or endpoint
+- bytes and calls in each direction, and the failed calls
+- mean and longest latency
+- when it was first and last used
+- the processes that used it
+- for a connection, its local addresses
+- its latest events, unless `-q` left out the Events tab
+
+For a file or a Unix-domain socket with a path, the panel also shows what the path is now: kind,
+size, time since modification, permissions and owner. It reads this metadata with `lstat` each time
+it draws, never the contents, so a replay shows the file on the replaying machine.
 
 ### Recordings
 

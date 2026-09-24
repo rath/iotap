@@ -4,6 +4,7 @@
 //! frames a second and handles keys. Pausing freezes only the view: tracing goes on, so the
 //! kernel buffer never waits for the user.
 
+mod details;
 pub mod draw;
 pub mod state;
 

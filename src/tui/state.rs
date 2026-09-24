@@ -1,7 +1,7 @@
 //! What the terminal UI keeps between frames, and how keys change it.
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -61,7 +61,7 @@ impl Ring {
     }
 
     /// The kept events numbered `from..to`.
-    pub fn range(&self, from: u64, to: u64) -> impl Iterator<Item = &IoEvent> {
+    pub fn range(&self, from: u64, to: u64) -> impl DoubleEndedIterator<Item = &IoEvent> {
         let index = |seq: u64| {
             usize::try_from(seq.saturating_sub(self.first))
                 .map_or(self.events.len(), |i| i.min(self.events.len()))
@@ -141,11 +141,15 @@ pub struct View {
     /// Selected target of the Files and Network tables. The selection stays with its target
     /// as the order changes; `None` selects the top row, whichever target that is.
     pub selected: [Option<Key>; 2],
+    /// True while the details of the selected row show below the Files and Network tables.
+    pub details: bool,
     /// Sequence number of the lowest visible event; `None` follows the newest.
     pub bottom: Option<u64>,
     pub drawn: Drawn,
     /// Formats event times; a cache, not state.
     pub clock: LocalClock,
+    /// Account names by uid, for file owners; a cache, not state.
+    pub owners: HashMap<u32, Option<String>>,
 }
 
 impl Default for View {
@@ -162,9 +166,11 @@ impl View {
             sort: SortBy::default(),
             offsets: [0; 2],
             selected: [None, None],
+            details: false,
             bottom: None,
             drawn: Drawn::default(),
             clock: LocalClock::default(),
+            owners: HashMap::new(),
         }
     }
 
@@ -441,6 +447,8 @@ impl App {
         let view = &mut self.view;
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Enter if view.tab != Tab::Events => view.details = !view.details,
+            KeyCode::Esc if view.details && view.tab != Tab::Events => view.details = false,
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char(digit @ '1'..='9') => view.select(digit),
             KeyCode::Tab | KeyCode::Right => view.next_tab(),
