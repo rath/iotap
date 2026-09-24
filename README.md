@@ -225,16 +225,22 @@ After changing `src/sys/`, `src/reader.rs`, the syscall table or the C file, run
 3. **Network.** Start a slow download, such as `curl -o /dev/null --limit-rate 100k <URL>`, and run
    `sudo ./target/release/iotap curl`. Expect `tcp … -> <server>:443` rows, and a summary when
    curl exits.
-4. **Dropped records.** Trace the `yes` process with `--buffer 1024`. Expect the dropped-records
-   notice, and tracing should continue.
+4. **Dropped records.** The kernel buffer holds at least 8192 records per CPU, whatever `--buffer`
+   asks for, so make iotap fall behind instead. While it traces the `yes` process, stop it with
+   `sudo kill -STOP <iotap pid>` and continue it two seconds later with `sudo kill -CONT`. Expect
+   the dropped-records notice, and tracing should go on.
 5. **Single owner.** While `sudo fs_usage` runs, iotap must fail with the "another tool … is using
    the kernel trace facility" error.
 6. **Release.** After iotap exits by Ctrl-C, by `--duration` or because the target exited,
    `sudo fs_usage -t 1` must start normally.
-7. **Replay.** Trace with `--record t.iotaprec`, then run `iotap --replay t.iotaprec`. The summary
-   must match the live one.
+7. **Replay.** Trace with `--json --record t.iotaprec`, then run
+   `iotap --json --replay t.iotaprec`. The replayed output must be identical to the live output.
 8. **Terminal UI.** Run `sudo ./target/release/iotap --tui $!` against the `yes` process. Try every
    key, then quit; the terminal must be restored and the summary printed.
+
+When scripting these checks, signal iotap itself, or send the signal from another process group.
+sudo does not pass on a signal that comes from its own process group, which is where `kill -INT $!`
+in the script that started `sudo iotap &` sends it from.
 
 ## Development
 
