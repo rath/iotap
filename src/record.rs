@@ -282,7 +282,7 @@ pub struct Replay {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
-    #[error("cannot read the recording: {0}")]
+    #[error("cannot read the recording")]
     Io(#[from] io::Error),
     #[error("not an iotap recording")]
     BadMagic,

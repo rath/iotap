@@ -90,7 +90,7 @@ pub enum KdebugError {
     NoSuchProcess(i32),
     #[error("a kdebug session is already active in this process")]
     AlreadyActive,
-    #[error("{op} failed: {source}")]
+    #[error("{op} failed")]
     Sysctl {
         op: &'static str,
         #[source]
