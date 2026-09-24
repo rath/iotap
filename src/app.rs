@@ -148,7 +148,8 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let interrupted = watch_signals(&stop)?;
     let config = ReaderConfig {
         follow,
-        wait: Duration::from_millis(50),
+        // Short, so that libproc is asked about new descriptors before most are closed again.
+        wait: Duration::from_millis(10),
         poll: Duration::from_millis(250),
         own_pid,
     };

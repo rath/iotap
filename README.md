@@ -166,8 +166,9 @@ live run in any output mode. A recording holds paths and addresses but no transf
 
 1. iotap configures kdebug to record BSD syscalls, file-system path lookups and process exits,
    and only for the traced processes.
-2. A reader thread drains the kernel buffer at least every 50 ms. Every 250 ms it also checks the
-   processes for exits, exec and new processes with a traced name.
+2. A reader thread drains the kernel buffer at least every 10 ms, so that descriptors can be looked
+   up while they are still open. Every 250 ms it also checks the processes for exits, exec and new
+   processes with a traced name.
 3. The main thread pairs the entry and return record of each syscall, reassembles paths from the
    lookup records, and tracks what each descriptor refers to. When a process is attached, its open
    descriptors come from libproc; after that, the traced open, socket, connect, accept, dup, fcntl
