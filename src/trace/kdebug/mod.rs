@@ -9,6 +9,10 @@ pub mod synth;
 
 use std::mem::size_of;
 
+use self::decode::Kind;
+use self::pairing::{Pairer, PathRecords};
+use super::{Decode, Step, Traced};
+
 /// One trace record as the kernel lays it out (`kd_buf` in `sys/kdebug_private.h`, LP64 layout).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,9 +82,52 @@ impl KdBuf {
     }
 }
 
+/// Puts kdebug records together: classifies each record and pairs the entry and return of every
+/// syscall, with the path looked up in between.
+#[derive(Debug)]
+pub struct Decoder {
+    pairer: Pairer,
+}
+
+impl Decoder {
+    /// A decoder for a kernel that lays out lookup paths as `paths` says.
+    pub fn new(paths: PathRecords) -> Self {
+        Self {
+            pairer: Pairer::new(paths),
+        }
+    }
+}
+
+impl Decode for Decoder {
+    type Record = KdBuf;
+
+    fn decode(&mut self, record: &KdBuf) -> Option<Step> {
+        let event = decode::decode(record)?;
+        let traced = match event.kind {
+            Kind::LostEvents => {
+                // The calls in progress lost their ends with the dropped records.
+                self.pairer.clear();
+                Some(Traced::LostEvents)
+            }
+            Kind::ProcExit { pid } => Some(Traced::ProcExit { pid }),
+            Kind::Syscall(_) | Kind::Lookup => self.pairer.push(&event).map(Traced::Call),
+        };
+        Some(Step { ts: event.ts, traced })
+    }
+
+    fn unfinished_calls(&self) -> u64 {
+        self.pairer.orphan_starts()
+    }
+
+    fn calls_started_before_trace(&self) -> u64 {
+        self.pairer.orphan_ends()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::kdebug::synth::Synth;
 
     #[test]
     fn record_bytes_round_trip() {
@@ -99,5 +146,41 @@ mod tests {
         assert_eq!(bytes[0], 0x08);
         assert_eq!(&bytes[48..52], &0x040c_000d_u32.to_le_bytes());
         assert_eq!(KdBuf::from_le_bytes(&bytes), rec);
+    }
+
+    #[test]
+    fn decoder_reports_calls_exits_and_losses_with_their_times() {
+        let mut synth = Synth::new(100, 10);
+        let mut decoder = Decoder::new(PathRecords::Whole);
+        let read = synth.io(1, 7, 3, 4, 10, 10);
+        let start = decoder.decode(&read[0]).unwrap();
+        assert_eq!(
+            start,
+            Step {
+                ts: 110,
+                traced: None
+            }
+        );
+        let end = decoder.decode(&read[1]).unwrap();
+        assert_eq!(end.ts, 120);
+        assert!(
+            matches!(&end.traced, Some(Traced::Call(done)) if done.pid == 7 && done.ret_u64() == 10),
+            "{end:?}"
+        );
+        let exit = decoder.decode(&synth.proc_exit(1, 7, 0)).unwrap();
+        assert_eq!(exit.traced, Some(Traced::ProcExit { pid: 7 }));
+
+        // A call whose return is lost with the dropped records.
+        decoder.decode(&synth.syscall_start(2, 3, [4, 0, 10, 0]));
+        let lost = decoder.decode(&synth.lost_events()).unwrap();
+        assert_eq!(lost.traced, Some(Traced::LostEvents));
+        let orphan = decoder.decode(&synth.syscall_end(2, 3, 7, 0, [10, 0])).unwrap();
+        assert!(matches!(&orphan.traced, Some(Traced::Call(done)) if done.start.is_none()));
+        assert_eq!(
+            (decoder.unfinished_calls(), decoder.calls_started_before_trace()),
+            (1, 1)
+        );
+        // A record of a class iotap does not use.
+        assert_eq!(decoder.decode(&KdBuf::default()), None);
     }
 }

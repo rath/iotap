@@ -1,8 +1,8 @@
 //! Recordings: everything a session consumed, in order, so it can be replayed without root.
 //!
 //! Layout: the magic `IOTAPREC`, a little-endian `u32` version, then frames of
-//! `[tag: u8][length: u32 LE][payload]`. Record batches carry raw 64-byte kernel records in
-//! little-endian order; every other payload is JSON. Recordings are specific to 64-bit Apple
+//! `[tag: u8][length: u32 LE][payload]`. Batches of kdebug records carry the raw 64-byte records
+//! in little-endian order; every other payload is JSON. Recordings are specific to 64-bit Apple
 //! hardware, like the records themselves.
 
 use std::collections::{HashMap, VecDeque};
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Target;
 use crate::session::{Input, Process, SessionInfo};
+use crate::trace::Records;
 use crate::trace::kdebug::KdBuf;
 use crate::trace::procs::{Described, ProcSource, Snapshot};
 
@@ -24,7 +25,7 @@ const VERSION: u32 = 1;
 const MAX_FRAME: usize = 1 << 30;
 
 const TAG_HEADER: u8 = 1;
-const TAG_RECORDS: u8 = 2;
+const TAG_KDEBUG_RECORDS: u8 = 2;
 const TAG_ATTACHED: u8 = 3;
 const TAG_EXEC: u8 = 4;
 const TAG_EXITED: u8 = 5;
@@ -105,12 +106,12 @@ impl<W: Write> Recorder<W> {
 
     pub fn input(&mut self, input: &Input) -> io::Result<()> {
         match input {
-            Input::Records(records) => {
+            Input::Records(Records::Kdebug(records)) => {
                 let mut payload = Vec::with_capacity(records.len() * KdBuf::SIZE);
                 for record in records {
                     payload.extend_from_slice(&record.to_le_bytes());
                 }
-                self.frame(TAG_RECORDS, &payload)
+                self.frame(TAG_KDEBUG_RECORDS, &payload)
             }
             Input::Attached(process) => self.json(TAG_ATTACHED, process),
             Input::Exec { pid, path } => self.json(
@@ -309,7 +310,7 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         let corrupt = |reason: String| ReplayError::Corrupt { index, tag, reason };
         match tag {
             TAG_HEADER => header = Some(json(&payload).map_err(corrupt)?),
-            TAG_RECORDS => {
+            TAG_KDEBUG_RECORDS => {
                 if payload.len() % KdBuf::SIZE != 0 {
                     return Err(corrupt(format!(
                         "{} bytes is not a whole number of records",
@@ -324,7 +325,7 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
                         KdBuf::from_le_bytes(&bytes)
                     })
                     .collect();
-                inputs.push(Input::Records(records));
+                inputs.push(Input::Records(Records::Kdebug(records)));
             }
             TAG_ATTACHED => inputs.push(Input::Attached(json::<Process>(&payload).map_err(corrupt)?)),
             TAG_EXEC => {
@@ -448,7 +449,7 @@ mod tests {
         records.extend(synth.io(1, 300, 4, 4, 1_256, 1_256));
         let stop = synth.now() + 24_000;
         let inputs = vec![
-            Input::Records(records),
+            Input::Records(Records::Kdebug(records)),
             Input::Exited { pid: 300 },
             Input::Stopped { ticks: stop },
         ];

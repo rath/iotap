@@ -653,6 +653,7 @@ mod tests {
     use crate::model::{Endpoint, Proto, Target};
     use crate::session::{Filter, Input, Process, Session, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
+    use crate::trace::Records;
     use crate::trace::kdebug::pairing::PathRecords;
     use crate::trace::kdebug::synth::{Call, Synth};
     use crate::trace::procs::{Fixed, Snapshot};
@@ -720,7 +721,7 @@ mod tests {
         records.extend(synth.io(1, PID, 4, 4, 4_096, 4_096));
         records.extend(synth.io(1, PID, 397, 1, 20, 20));
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         (session, app)
     }

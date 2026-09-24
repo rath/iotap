@@ -42,9 +42,10 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/cli.rs` | Command line (clap derive) |
 | `src/app.rs` | Wiring: root check, kdebug setup, reader thread, output modes, signals, replay |
 | `src/reader.rs` | Reader thread: drains kdebug, watches processes for exit, exec and new names |
-| `src/session.rs` | Deterministic core: records to I/O events, notices, statistics and the summary |
+| `src/session.rs` | Deterministic core: decoded records to I/O events, notices, statistics and the summary |
+| `src/trace/mod.rs` | Record batches of each format, what records tell once put together, and the `Decode` trait each format implements |
 | `src/trace/call.rs` | A syscall that returned, whatever format its records came in: its role, arguments, result and looked-up path |
-| `src/trace/kdebug/mod.rs` | The kdebug record format: the `kd_buf` record |
+| `src/trace/kdebug/mod.rs` | The kdebug record format: the `kd_buf` record and its decoder |
 | `src/trace/kdebug/codes.rs` | kdebug event IDs and the syscall table |
 | `src/trace/kdebug/decode.rs` | Raw `kd_buf` records to typed events |
 | `src/trace/kdebug/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |

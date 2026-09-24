@@ -9,6 +9,7 @@ use iotap::model::{Endpoint, Proto, Target};
 use iotap::record::{Recorder, Recording};
 use iotap::session::{Collect, Filter, Input, Process, Session, SessionInfo};
 use iotap::sys::time::{ClockAnchor, Timebase};
+use iotap::trace::Records;
 use iotap::trace::kdebug::pairing::PathRecords;
 use iotap::trace::kdebug::synth::{Call, Synth};
 use iotap::trace::procs::{Fixed, Snapshot};
@@ -95,7 +96,7 @@ fn write_recording(path: &Path) {
     let mut session = Session::new(info, Filter::ALL, &mut recording);
     let mut sink = Collect::default();
     for input in [
-        Input::Records(records),
+        Input::Records(Records::Kdebug(records)),
         Input::Exited { pid: PID },
         Input::Stopped { ticks: stop },
     ] {

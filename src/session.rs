@@ -14,10 +14,9 @@ use crate::stats::{Stats, SummaryRow, Totals};
 use crate::sys::time::{ClockAnchor, Timebase};
 use crate::trace::call::{Completed, Role};
 use crate::trace::fdtable::{FdTable, Found, Verdict};
-use crate::trace::kdebug::KdBuf;
-use crate::trace::kdebug::decode::{Event, Kind, decode};
-use crate::trace::kdebug::pairing::{Pairer, PathRecords};
+use crate::trace::kdebug::{self, pairing::PathRecords};
 use crate::trace::procs::ProcSource;
+use crate::trace::{Decode, Records, Step, Traced};
 
 /// A traced process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +48,7 @@ pub struct SessionInfo {
 /// What the kernel reader delivers, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
-    Records(Vec<KdBuf>),
+    Records(Records),
     /// A newly started process matching a traced name is now traced too.
     Attached(Process),
     /// A traced process replaced its program image.
@@ -164,7 +163,8 @@ impl Held {
 pub struct Session {
     info: SessionInfo,
     filter: Filter,
-    pairer: Pairer,
+    /// Puts kdebug records together.
+    kdebug: kdebug::Decoder,
     fds: FdTable,
     stats: Stats,
     processes: BTreeMap<i32, ProcessState>,
@@ -184,7 +184,7 @@ impl Session {
         let retry_ticks = info.timebase.nanos_to_ticks(1_000_000_000);
         let mut session = Self {
             filter,
-            pairer: Pairer::new(info.path_records),
+            kdebug: kdebug::Decoder::new(info.path_records),
             fds: FdTable::new(retry_ticks),
             stats: Stats::default(),
             processes: BTreeMap::new(),
@@ -256,9 +256,11 @@ impl Session {
 
     pub fn handle(&mut self, input: &Input, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
         match input {
-            Input::Records(records) => {
+            Input::Records(Records::Kdebug(records)) => {
                 for record in records {
-                    self.record(record, src, sink)?;
+                    if let Some(step) = self.kdebug.decode(record) {
+                        self.step(step, src, sink)?;
+                    }
                 }
             }
             Input::Attached(process) => {
@@ -325,50 +327,45 @@ impl Session {
             processes,
             totals: *self.stats.totals(),
             lost_events: self.lost_events,
-            unfinished_calls: self.pairer.orphan_starts(),
-            calls_started_before_trace: self.pairer.orphan_ends(),
+            unfinished_calls: self.kdebug.unfinished_calls(),
+            calls_started_before_trace: self.kdebug.calls_started_before_trace(),
             files: self.stats.summary_rows(Category::File),
             network: self.stats.summary_rows(Category::Network),
             other: self.stats.summary_rows(Category::Other),
         }
     }
 
-    fn record(&mut self, record: &KdBuf, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
-        let Some(event) = decode(record) else {
-            return Ok(());
-        };
-        self.last_ticks = self.last_ticks.max(event.ts);
-        self.apply(&event, src, sink)?;
+    /// Applies what one record tells.
+    fn step(&mut self, step: Step, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
+        self.last_ticks = self.last_ticks.max(step.ts);
+        match step.traced {
+            Some(Traced::Call(done)) => self.completed(&done, src, sink)?,
+            Some(Traced::ProcExit { pid }) => self.exited(pid, sink)?,
+            Some(Traced::LostEvents) => self.lost(step.ts, src, sink)?,
+            None => {}
+        }
         // Every record up to this one has been seen now.
-        self.fds.advance(event.ts);
+        self.fds.advance(step.ts);
         self.settle(sink)
     }
 
-    fn apply(&mut self, event: &Event, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
-        match event.kind {
-            Kind::LostEvents => {
-                self.lost_events += 1;
-                self.pairer.clear();
-                let alive: Vec<i32> = self
-                    .processes
-                    .iter()
-                    .filter(|(_, p)| p.alive)
-                    .map(|(&pid, _)| pid)
-                    .collect();
-                for pid in alive {
-                    self.fds.attach(pid, src);
-                }
-                let lost = Notice::LostEvents {
-                    time_ns: self.unix_ns(event.ts),
-                };
-                self.hold(Held::Notice(lost), sink)
-            }
-            Kind::ProcExit { pid } => self.exited(pid, sink),
-            Kind::Syscall(_) | Kind::Lookup => match self.pairer.push(event) {
-                Some(done) => self.completed(&done, src, sink),
-                None => Ok(()),
-            },
+    /// Reloads the descriptor tables after the kernel dropped records before trace time `ts`,
+    /// and says so.
+    fn lost(&mut self, ts: u64, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
+        self.lost_events += 1;
+        let alive: Vec<i32> = self
+            .processes
+            .iter()
+            .filter(|(_, p)| p.alive)
+            .map(|(&pid, _)| pid)
+            .collect();
+        for pid in alive {
+            self.fds.attach(pid, src);
         }
+        let lost = Notice::LostEvents {
+            time_ns: self.unix_ns(ts),
+        };
+        self.hold(Held::Notice(lost), sink)
     }
 
     /// Emits `item` now, or queues it behind what is already waiting.
@@ -613,7 +610,7 @@ mod tests {
 
         let mut sink = Collect::default();
         session
-            .handle(&Input::Records(records), &mut src, &mut sink)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
             .unwrap();
         let lines: Vec<String> = sink
             .events
@@ -671,7 +668,7 @@ mod tests {
         }
         let mut sink = Collect::default();
         session
-            .handle(&Input::Records(records), &mut src, &mut sink)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
             .unwrap();
         let shown = |sink: &Collect| -> Vec<String> {
             sink.events
@@ -737,7 +734,7 @@ mod tests {
             records.extend(synth.io(8, PID, 3, 3, 200, 200));
             let mut sink = Collect::default();
             session
-                .handle(&Input::Records(records), &mut src, &mut sink)
+                .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
                 .unwrap();
             assert!(sink.events.is_empty(), "both reads wait for their answers");
             session
@@ -761,7 +758,7 @@ mod tests {
         let records = synth.io(7, PID, 3, 6, 8, 8);
         let mut sink = Collect::default();
         session
-            .handle(&Input::Records(records), &mut src, &mut sink)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
             .unwrap();
         assert!(sink.events.is_empty());
         session
@@ -786,7 +783,7 @@ mod tests {
         }));
         let mut sink = Collect::default();
         session
-            .handle(&Input::Records(records), &mut src, &mut sink)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
             .unwrap();
         let targets: Vec<String> = sink.events.iter().map(|e| e.target.to_string()).collect();
         assert_eq!(targets, ["socket", "<unknown>", "<unknown>"]);
@@ -806,7 +803,7 @@ mod tests {
         records.push(synth.syscall_end(7, 3, PID, 0, [8, 0]));
         let mut sink = Collect::default();
         session
-            .handle(&Input::Records(records), &mut src, &mut sink)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
             .unwrap();
         assert!(matches!(sink.notices[..], [Notice::LostEvents { .. }]));
         assert_eq!(sink.events.len(), 1);
@@ -832,7 +829,7 @@ mod tests {
         let mut sink = Collect::default();
         session
             .handle(
-                &Input::Records(vec![synth.proc_exit(7, PID, 0)]),
+                &Input::Records(Records::Kdebug(vec![synth.proc_exit(7, PID, 0)])),
                 &mut src,
                 &mut sink,
             )
@@ -872,7 +869,11 @@ mod tests {
         let mut synth = Synth::new(2_000, 10);
         let mut sink = Collect::default();
         session
-            .handle(&Input::Records(synth.io(7, PID, 4, 1, 5, 5)), &mut src, &mut sink)
+            .handle(
+                &Input::Records(Records::Kdebug(synth.io(7, PID, 4, 1, 5, 5))),
+                &mut src,
+                &mut sink,
+            )
             .unwrap();
         assert!(sink.events.is_empty());
         assert_eq!(session.stats().totals().events, 0);

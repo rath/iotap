@@ -596,6 +596,7 @@ mod tests {
     use crate::model::{Op, Provenance, Target};
     use crate::session::{Input, Process, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
+    use crate::trace::Records;
     use crate::trace::kdebug::pairing::PathRecords;
     use crate::trace::kdebug::synth::Synth;
     use crate::trace::procs::Fixed;
@@ -769,7 +770,7 @@ mod tests {
         let records = synth.io(1, 7, 4, 1, 5, 5);
         app.key(press(KeyCode::Char('p')), &session, 42);
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         let shown = app.model.shown(&session, 99);
         assert!(shown.paused);
@@ -812,7 +813,7 @@ mod tests {
         let mut synth = Synth::new(2_000, 10);
         let records = synth.io(1, 7, 4, 1, 5, 5);
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         let shown = app.model.shown(&session, 0);
         assert_eq!((shown.events.len(), shown.stats.totals().events), (0, 1));
@@ -826,7 +827,7 @@ mod tests {
         let mut records = synth.io(1, 7, 4, 1, 5, 5);
         records.push(synth.lost_events());
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         app.view.tab = Tab::Events;
         app.view.bottom = Some(0);
@@ -855,7 +856,7 @@ mod tests {
 
         let records = synth.io(1, 7, 3, 1, 8, 8);
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         let shown = app.model.shown(&session, 0);
         assert_eq!((shown.events.len(), shown.stats.totals().events), (1, 1));
@@ -870,13 +871,13 @@ mod tests {
         let mut synth = Synth::new(2_000, 10);
         let records = synth.io(1, 7, 4, 1, 5, 5);
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         app.key(press(KeyCode::Char('p')), &session, 10);
         app.key(press(KeyCode::Char('r')), &session, 20);
         let records = synth.io(1, 7, 4, 1, 6, 6);
         session
-            .handle(&Input::Records(records), &mut src, &mut app)
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
             .unwrap();
         let shown = app.model.shown(&session, 30);
         assert!(shown.paused);

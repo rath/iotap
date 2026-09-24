@@ -12,6 +12,7 @@ use crate::sys::kdebug::{Kdebug, KdebugError};
 use crate::sys::proc as libproc;
 use crate::sys::time;
 use crate::target::{self, Tracked};
+use crate::trace::Records;
 
 /// How often an idle reader still says how far the trace has been read, so that the consumer
 /// can settle what it asked libproc about.
@@ -99,7 +100,11 @@ fn drain(
     tx: &Sender<Input>,
 ) -> Result<Option<usize>, KdebugError> {
     let count = kd.read(buf)?;
-    if count > 0 && tx.send(Input::Records(buf[..count].to_vec())).is_err() {
+    if count > 0
+        && tx
+            .send(Input::Records(Records::Kdebug(buf[..count].to_vec())))
+            .is_err()
+    {
         return Ok(None);
     }
     Ok(Some(count))
