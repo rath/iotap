@@ -21,13 +21,40 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 ## Rules
 
 - Tracing needs root (`sudo`). Only one process can own kdebug at a time; iotap must always
-  release it (`KERN_KDREMOVE`) on every exit path, including errors, signals and panics.
+  release it (`KERN_KDREMOVE`) on every exit path, including errors, signals and panics. The
+  terminal UI must likewise leave raw mode and the alternate screen on every exit path.
 - iotap records metadata only: syscall, fd, byte counts, latency, path, socket endpoint. It never
   reads or stores the data being transferred.
 - Everything downstream of the kernel reader is deterministic and driven by trace timestamps, never
-  by wall-clock time, so recordings replay to identical output.
-- Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams and
-  recordings; live checks are listed in README.md.
+  by wall-clock time, so recordings replay to identical output. The one exception is presentation:
+  the live terminal UI reads the host clock for its elapsed time and its current second.
+- Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams built
+  with `trace::synth`, the TUI by rendering into ratatui's `TestBackend`. After changing anything
+  under `src/sys/`, `src/reader.rs`, the syscall table or `csrc/`, run the root-only checks in
+  README.md ("Checking against a live kernel") and say which ones you ran.
+
+## Module map
+
+| Path | Role |
+|---|---|
+| `src/main.rs` | Entry point; prints errors as `iotap: …` and sets the exit status |
+| `src/cli.rs` | Command line (clap derive) |
+| `src/app.rs` | Wiring: root check, kdebug setup, reader thread, output modes, signals, replay |
+| `src/reader.rs` | Reader thread: drains kdebug, watches processes for exit, exec and new names |
+| `src/session.rs` | Deterministic core: records to I/O events, notices, statistics and the summary |
+| `src/trace/codes.rs` | kdebug event IDs and the syscall table |
+| `src/trace/decode.rs` | Raw `kd_buf` records to typed events |
+| `src/trace/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |
+| `src/trace/fdtable.rs` | What each descriptor of each process refers to |
+| `src/trace/procs.rs` | `ProcSource`: libproc when live, fixed answers in tests |
+| `src/trace/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
+| `src/stats.rs` | Per-target and per-second aggregation |
+| `src/record.rs` | `--record` and `--replay` file format |
+| `src/output/` | Text and JSON Lines output, shared formatting |
+| `src/tui/` | Terminal UI: `state` (keys, pause, event ring), `draw` (rendering), the frame loop |
+| `src/sys/` | The only unsafe code: kdebug sysctls, libproc and mach time behind safe functions |
+| `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
+| `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
 
 ## Commits
 
