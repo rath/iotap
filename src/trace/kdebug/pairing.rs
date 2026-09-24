@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::decode::{Event, Kind, Phase};
-use crate::trace::call::{Completed, Lookup, Syscall, low_i32};
+use crate::trace::call::{Completed, Lookup, PathForm, Syscall, low_i32};
 
 /// Most path bytes a lookup reports in the [`PathRecords::Tail`] format: `NUMPARMS` (23)
 /// words.
@@ -200,6 +200,7 @@ fn parse_lookup(bytes: &[u8], format: PathRecords) -> Option<Lookup> {
         path: String::from_utf8_lossy(path).into_owned(),
         truncated,
         vnode: 0,
+        form: PathForm::Kernel,
     })
 }
 
@@ -238,6 +239,7 @@ mod tests {
             path: path.to_owned(),
             truncated,
             vnode: 0,
+            form: PathForm::Kernel,
         }
     }
 

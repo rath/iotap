@@ -20,7 +20,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use super::call::{Completed, Lookup, NewFd, Role};
+use super::call::{Completed, Lookup, NewFd, PathForm, Role};
 use super::procs::{Described, ProcSource};
 use crate::model::{Endpoint, FdType, Proto, Provenance, Target};
 
@@ -694,7 +694,7 @@ impl FdTable {
         let guess = self.guess(pid, dirfd, lookup);
         let described = src.describe(pid, fd);
         match described.target {
-            Some(Target::File { path }) if same_name(&path, &lookup.path) => {
+            Some(Target::File { path }) if same_name(&path, lookup) => {
                 self.insert(pid, fd, file(path), since);
                 let fallback = (Arc::new(Target::File { path: guess }), Provenance::Traced);
                 self.rest_on(pid, fd, described.at, ts, fallback);
@@ -795,14 +795,17 @@ impl FdTable {
     }
 
     /// Best reading of a looked-up path without libproc. What is left of a truncated path is
-    /// shown after an ellipsis. A relative path through one of the root directory's links is
-    /// relative to the root. Any other relative path is joined to the directory it is relative
-    /// to when no link was followed, which is wrong after a link with a relative target.
+    /// shown after an ellipsis. A path the kernel reported relative through one of the root
+    /// directory's links is relative to the root. Any other relative path is joined to the
+    /// directory it is relative to; for a kernel's report, that is right only when no link was
+    /// followed.
     fn guess(&self, pid: i32, dirfd: Option<i32>, lookup: &Lookup) -> String {
         if lookup.truncated {
             format!("…{}", lookup.path)
-        } else if through_root_link(&lookup.path) {
+        } else if lookup.form == PathForm::Kernel && through_root_link(&lookup.path) {
             format!("/{}", lookup.path)
+        } else if lookup.is_absolute() {
+            lookup.path.clone()
         } else {
             self.absolute(pid, dirfd, &lookup.path)
         }
@@ -870,10 +873,15 @@ fn through_root_link(path: &str) -> bool {
     })
 }
 
-/// Whether two paths end in the same name, ignoring case as the default APFS format does.
-fn same_name(a: &str, b: &str) -> bool {
-    let (a, b) = (file_name(a), file_name(b));
-    !a.is_empty() && a.eq_ignore_ascii_case(b)
+/// Whether `path` ends in the name `lookup` found. Names the macOS kernel reports compare
+/// ignoring case, as its default APFS format does.
+fn same_name(path: &str, lookup: &Lookup) -> bool {
+    let (a, b) = (file_name(path), file_name(&lookup.path));
+    !a.is_empty()
+        && match lookup.form {
+            PathForm::Kernel => a.eq_ignore_ascii_case(b),
+            PathForm::Passed | PathForm::Abstract => a == b,
+        }
 }
 
 fn file_name(path: &str) -> &str {
@@ -941,6 +949,7 @@ mod tests {
                 path: (*path).to_owned(),
                 truncated: false,
                 vnode: 0,
+                form: PathForm::Kernel,
             }),
         }
     }
@@ -1343,6 +1352,7 @@ mod tests {
             path: "ntainers/app/Data/cache.db".into(),
             truncated: true,
             vnode: 0,
+            form: PathForm::Kernel,
         });
         table.apply(&cut, &mut src);
         assert_eq!(
@@ -1401,6 +1411,41 @@ mod tests {
             target_of(&mut table, 7, 14, &mut src).0,
             unix(Some("/private/var/run/b"))
         );
+    }
+
+    /// `done` with its lookup in `form`.
+    fn in_form(mut done: Completed, form: PathForm) -> Completed {
+        if let Some(lookup) = done.lookup.as_mut() {
+            lookup.form = form;
+        }
+        done
+    }
+
+    #[test]
+    fn paths_as_passed_follow_no_macos_rules() {
+        let mut src = Fake::default();
+        let mut table = table_in("/home/me", &mut src);
+        // With no link replacing it, `private/etc` is an ordinary relative path.
+        let open = done(5, 1, 2, [0; 4], 3, &["private/etc/hosts"]);
+        table.apply(&in_form(open, PathForm::Passed), &mut src);
+        assert_eq!(
+            target_of(&mut table, 3, 3, &mut src).0,
+            file("/home/me/private/etc/hosts")
+        );
+        // Names that differ in case are different files.
+        src.live.insert((PID, 4), file("/home/me/Notes.txt"));
+        let open = done(5, 4, 5, [0; 4], 4, &["notes.txt"]);
+        table.apply(&in_form(open, PathForm::Passed), &mut src);
+        assert_eq!(
+            target_of(&mut table, 4, 6, &mut src).0,
+            file("/home/me/notes.txt")
+        );
+        // An abstract socket name is no path to join to a directory.
+        let (af_unix, stream) = (i64::from(libc::AF_UNIX), i64::from(libc::SOCK_STREAM));
+        table.apply(&done(97, 7, 8, [af_unix, stream, 0, 0], 5, &[]), &mut src);
+        let connect = done(98, 9, 10, [5, 0, 0, 0], 0, &["@bus"]);
+        table.apply(&in_form(connect, PathForm::Abstract), &mut src);
+        assert_eq!(target_of(&mut table, 5, 11, &mut src).0, unix(Some("@bus")));
     }
 
     #[test]

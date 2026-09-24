@@ -73,12 +73,7 @@ pub struct Completed {
     pub lookup: Option<Lookup>,
 }
 
-/// A path as the kernel reports a name lookup: once, when the lookup is complete.
-///
-/// Following a symbolic link replaces the path with the link's text followed by the rest of
-/// the path. So the reported path is what the process passed only when no link was followed.
-/// After a link with a relative target, it is relative to the directory holding that link:
-/// `/etc/hosts` is reported as `private/etc/hosts`, because `/etc` links to `private/etc`.
+/// A path a call looked up, as the trace reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lookup {
     pub path: String,
@@ -86,15 +81,36 @@ pub struct Lookup {
     /// ([`PathRecords::Tail`](super::kdebug::pairing::PathRecords::Tail)). In that format a path
     /// of exactly the reported length looks the same, so it counts as truncated too.
     pub truncated: bool,
-    /// The kernel's identifier for the vnode found, 0 when nothing was. Lookups that find the
-    /// same file report the same identifier while its vnode lives, whatever path they took.
+    /// The kernel's identifier for the vnode found, 0 when nothing was or the trace does not
+    /// say. Lookups that find the same file report the same identifier while its vnode lives,
+    /// whatever path they took.
     pub vnode: u64,
+    /// How the path relates to what the process passed.
+    pub form: PathForm,
+}
+
+/// How a looked-up path relates to what the process passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathForm {
+    /// As the kernel reports a lookup it made, once it is complete (kdebug). Following a
+    /// symbolic link replaces the path with the link's text followed by the rest of the path,
+    /// so the path is what the process passed only when no link was followed. After a link with
+    /// a relative target, it is relative to the directory holding that link: `/etc/hosts` is
+    /// reported as `private/etc/hosts`, because `/etc` links to `private/etc`.
+    Kernel,
+    /// As the process passed it: relative to the working directory, or to the directory
+    /// descriptor of an `*at` call.
+    Passed,
+    /// A name in the abstract namespace of Unix-domain sockets, written `@name`. It names no
+    /// file and is relative to nothing.
+    Abstract,
 }
 
 impl Lookup {
-    /// Absolute, and reported whole.
+    /// Reported whole, and in need of no directory to be complete: an absolute path or an
+    /// abstract socket name.
     pub fn is_absolute(&self) -> bool {
-        !self.truncated && self.path.starts_with('/')
+        !self.truncated && (self.path.starts_with('/') || self.form == PathForm::Abstract)
     }
 }
 
