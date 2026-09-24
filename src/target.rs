@@ -1,7 +1,7 @@
 //! Resolves command-line targets to running processes.
 
 use crate::session::Process;
-use crate::sys::proc as libproc;
+use crate::sys::proc;
 
 /// A target as given on the command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,12 +39,12 @@ impl Tracked {
 
     /// Reads the current facts of `pid`; `None` if it is not running.
     pub fn probe(pid: i32) -> Option<Self> {
-        let info = libproc::info(pid)?;
+        let info = proc::info(pid)?;
         Some(Self {
             pid,
             name: info.name,
             start: info.start,
-            exe: libproc::exe_path(pid),
+            exe: proc::exe_path(pid),
         })
     }
 }
@@ -99,7 +99,7 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
 
 /// Every running process except `own_pid`.
 pub fn all_processes(own_pid: i32) -> Vec<Tracked> {
-    libproc::list_pids()
+    proc::list_pids()
         .into_iter()
         .filter(|&pid| pid != own_pid)
         .filter_map(Tracked::probe)

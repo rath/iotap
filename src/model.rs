@@ -231,22 +231,6 @@ pub enum FdType {
 }
 
 impl FdType {
-    /// Maps a libproc `PROX_FDTYPE_*` value (vnodes and sockets excluded).
-    pub fn from_prox(fd_type: u32) -> Self {
-        match i32::try_from(fd_type).unwrap_or(-1) {
-            libc::PROX_FDTYPE_PIPE => Self::Pipe,
-            libc::PROX_FDTYPE_KQUEUE => Self::Kqueue,
-            libc::PROX_FDTYPE_PSHM => Self::Pshm,
-            libc::PROX_FDTYPE_PSEM => Self::Psem,
-            libc::PROX_FDTYPE_FSEVENTS => Self::Fsevents,
-            libc::PROX_FDTYPE_NETPOLICY => Self::Netpolicy,
-            libc::PROX_FDTYPE_CHANNEL => Self::Channel,
-            libc::PROX_FDTYPE_NEXUS => Self::Nexus,
-            libc::PROX_FDTYPE_ATALK => Self::Atalk,
-            _ => Self::Other,
-        }
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Self::Pipe => "pipe",

@@ -5,9 +5,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{FdType, Target};
-use crate::sys::proc as libproc;
-use crate::sys::time;
+use crate::model::Target;
+use crate::sys::{proc, time};
 
 /// Descriptor table and working directory of a process at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,37 +45,19 @@ pub struct Live;
 
 impl ProcSource for Live {
     fn snapshot(&mut self, pid: i32) -> Option<Snapshot> {
-        let fds = libproc::list_fds(pid)?
-            .into_iter()
-            .filter_map(|(fd, fd_type)| describe_typed(pid, fd, fd_type).map(|target| (fd, target)))
-            .collect();
         Some(Snapshot {
-            fds,
-            cwd: libproc::cwd(pid),
+            fds: proc::fds(pid)?,
+            cwd: proc::cwd(pid),
         })
     }
 
     fn describe(&mut self, pid: i32, fd: i32) -> Described {
-        let target = live_target(pid, fd);
+        let target = proc::fd_target(pid, fd);
         Described {
             target,
             at: time::now_ticks(),
         }
     }
-}
-
-fn live_target(pid: i32, fd: i32) -> Option<Target> {
-    // Files and sockets answer directly; anything else needs the typed listing.
-    if let Ok(path) = libproc::fd_path(pid, fd) {
-        return Some(Target::File { path });
-    }
-    if let Ok(endpoint) = libproc::fd_socket(pid, fd) {
-        return Some(Target::Socket(endpoint));
-    }
-    let (_, fd_type) = libproc::list_fds(pid)?
-        .into_iter()
-        .find(|&(open, _)| open == fd)?;
-    describe_typed(pid, fd, fd_type)
 }
 
 /// Answers from fixed tables; for tests and synthetic fixtures.
@@ -101,16 +82,6 @@ impl ProcSource for Fixed {
     }
 }
 
-fn describe_typed(pid: i32, fd: i32, fd_type: u32) -> Option<Target> {
-    match i32::try_from(fd_type) {
-        Ok(libc::PROX_FDTYPE_VNODE) => libproc::fd_path(pid, fd).ok().map(|path| Target::File { path }),
-        Ok(libc::PROX_FDTYPE_SOCKET) => libproc::fd_socket(pid, fd).ok().map(Target::Socket),
-        _ => Some(Target::Other {
-            fd_type: FdType::from_prox(fd_type),
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs::File;
@@ -118,7 +89,7 @@ mod tests {
     use std::os::fd::AsRawFd;
 
     use super::*;
-    use crate::model::Proto;
+    use crate::model::{FdType, Proto};
 
     #[test]
     fn live_snapshot_and_describe_agree() {

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session::Input;
-use crate::sys::proc as libproc;
+use crate::sys::proc;
 use crate::sys::time;
 use crate::target::{self, Tracked};
 use crate::trace::Records;
@@ -151,7 +151,7 @@ impl Watch {
     fn poll<T: Tracer>(&mut self, tracer: &mut T) -> Vec<Input> {
         let mut inputs = Vec::new();
         self.tracked.retain_mut(|process| {
-            let alive = libproc::info(process.pid).is_some_and(|info| info.start == process.start)
+            let alive = proc::info(process.pid).is_some_and(|info| info.start == process.start)
                 // kdebug loses a process at exec, which gives it a new kernel proc without the
                 // trace flag; tracing it again brings it back.
                 && tracer.add_pid(process.pid).is_ok();
@@ -159,7 +159,7 @@ impl Watch {
                 inputs.push(Input::Exited { pid: process.pid });
                 return false;
             }
-            let exe = libproc::exe_path(process.pid);
+            let exe = proc::exe_path(process.pid);
             if exe.is_some() && exe != process.exe {
                 process.exe.clone_from(&exe);
                 inputs.push(Input::Exec {
@@ -176,17 +176,17 @@ impl Watch {
     }
 
     fn follow_new<T: Tracer>(&mut self, tracer: &mut T, inputs: &mut Vec<Input>) {
-        let pids = libproc::list_pids();
+        let pids = proc::list_pids();
         self.seen.retain(|pid, _| pids.contains(pid));
         for pid in pids {
             if pid == self.own_pid || self.tracked.iter().any(|t| t.pid == pid) {
                 continue;
             }
-            let Some(info) = libproc::info(pid) else { continue };
+            let Some(info) = proc::info(pid) else { continue };
             if self.seen.insert(pid, info.start) == Some(info.start) {
                 continue;
             }
-            let exe = libproc::exe_path(pid);
+            let exe = proc::exe_path(pid);
             if !self
                 .follow
                 .iter()

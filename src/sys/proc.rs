@@ -1,12 +1,15 @@
 //! Safe wrappers over libproc: process listing, descriptor tables and what a descriptor
 //! refers to.
+//!
+//! The rest of iotap asks only [`list_pids`], [`info`], [`exe_path`], [`cwd`], [`fds`] and
+//! [`fd_target`]; they are what another system has to provide.
 
 use std::ffi::{c_char, c_int};
 use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ptr;
 
-use crate::model::{Endpoint, Proto};
+use crate::model::{Endpoint, FdType, Proto, Target};
 
 const PROC_ALL_PIDS: u32 = 1;
 const SOCKINFO_IN: i32 = 1;
@@ -122,8 +125,56 @@ pub fn exe_path(pid: i32) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Open descriptors of a process and what each refers to; `None` if the process is gone.
+pub fn fds(pid: i32) -> Option<Vec<(i32, Target)>> {
+    let fds = list_fds(pid)?
+        .into_iter()
+        .filter_map(|(fd, fd_type)| describe_typed(pid, fd, fd_type).map(|target| (fd, target)))
+        .collect();
+    Some(fds)
+}
+
+/// What `fd` of `pid` refers to now; `None` if it is not open.
+pub fn fd_target(pid: i32, fd: i32) -> Option<Target> {
+    // Files and sockets answer directly; anything else needs the typed listing.
+    if let Ok(path) = fd_path(pid, fd) {
+        return Some(Target::File { path });
+    }
+    if let Ok(endpoint) = fd_socket(pid, fd) {
+        return Some(Target::Socket(endpoint));
+    }
+    let (_, fd_type) = list_fds(pid)?.into_iter().find(|&(open, _)| open == fd)?;
+    describe_typed(pid, fd, fd_type)
+}
+
+fn describe_typed(pid: i32, fd: i32, fd_type: u32) -> Option<Target> {
+    match i32::try_from(fd_type) {
+        Ok(libc::PROX_FDTYPE_VNODE) => fd_path(pid, fd).ok().map(|path| Target::File { path }),
+        Ok(libc::PROX_FDTYPE_SOCKET) => fd_socket(pid, fd).ok().map(Target::Socket),
+        _ => Some(Target::Other {
+            fd_type: other_type(fd_type),
+        }),
+    }
+}
+
+/// Maps a `PROX_FDTYPE_*` value other than a vnode or a socket.
+fn other_type(fd_type: u32) -> FdType {
+    match i32::try_from(fd_type).unwrap_or(-1) {
+        libc::PROX_FDTYPE_PIPE => FdType::Pipe,
+        libc::PROX_FDTYPE_KQUEUE => FdType::Kqueue,
+        libc::PROX_FDTYPE_PSHM => FdType::Pshm,
+        libc::PROX_FDTYPE_PSEM => FdType::Psem,
+        libc::PROX_FDTYPE_FSEVENTS => FdType::Fsevents,
+        libc::PROX_FDTYPE_NETPOLICY => FdType::Netpolicy,
+        libc::PROX_FDTYPE_CHANNEL => FdType::Channel,
+        libc::PROX_FDTYPE_NEXUS => FdType::Nexus,
+        libc::PROX_FDTYPE_ATALK => FdType::Atalk,
+        _ => FdType::Other,
+    }
+}
+
 /// Open descriptors of a process as (fd, `PROX_FDTYPE_*`) pairs.
-pub fn list_fds(pid: i32) -> Option<Vec<(i32, u32)>> {
+fn list_fds(pid: i32) -> Option<Vec<(i32, u32)>> {
     let entry = size_of::<libc::proc_fdinfo>();
     // SAFETY: a null buffer asks for the size the table needs.
     let needed = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, ptr::null_mut(), 0) };
@@ -151,7 +202,7 @@ pub fn list_fds(pid: i32) -> Option<Vec<(i32, u32)>> {
 }
 
 /// Path of the vnode behind `fd`; fails with an errno if `fd` is not an open vnode.
-pub fn fd_path(pid: i32, fd: i32) -> Result<String, i32> {
+fn fd_path(pid: i32, fd: i32) -> Result<String, i32> {
     let mut buf = vec![0u8; PATH_BUF];
     // SAFETY: `buf` provides `PATH_BUF` writable bytes; the shim always terminates it.
     let rc = unsafe { iotap_fd_path(pid, fd, buf.as_mut_ptr().cast(), buf.len()) };
@@ -163,7 +214,7 @@ pub fn fd_path(pid: i32, fd: i32) -> Result<String, i32> {
 }
 
 /// Endpoint of the socket behind `fd`; fails with an errno if `fd` is not an open socket.
-pub fn fd_socket(pid: i32, fd: i32) -> Result<Endpoint, i32> {
+fn fd_socket(pid: i32, fd: i32) -> Result<Endpoint, i32> {
     let mut sock = IotapSock::zeroed();
     // SAFETY: `sock` is a writable `struct iotap_sock` (layout checked by a test).
     let rc = unsafe { iotap_fd_socket(pid, fd, &raw mut sock) };
