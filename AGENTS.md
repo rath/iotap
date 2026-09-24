@@ -41,7 +41,7 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/main.rs` | Entry point; prints errors as `iotap: …` and sets the exit status |
 | `src/cli.rs` | Command line (clap derive) |
 | `src/app.rs` | Wiring: root check, kdebug setup, reader thread, output modes, signals, replay |
-| `src/reader.rs` | Reader thread: drains kdebug, watches processes for exit, exec and new names |
+| `src/reader.rs` | Reader thread: drains the kernel through the `Tracer` trait (kdebug implements it), watches processes for exit, exec and new names |
 | `src/session.rs` | Deterministic core: decoded records to I/O events, notices, statistics and the summary |
 | `src/trace/mod.rs` | Record batches of each format, what records tell once put together, and the `Decode` trait each format implements |
 | `src/trace/call.rs` | A syscall that returned, whatever format its records came in: its role, arguments, result and looked-up path |

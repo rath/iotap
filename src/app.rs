@@ -19,11 +19,9 @@ use crate::reader::{self, ReaderConfig};
 use crate::record::{self, Answers, Recorder, Recording};
 use crate::session::{Discard, Filter, Input, Session, SessionInfo, Sink, Summary};
 use crate::sys;
-use crate::sys::kdebug::{self, Kdebug, KdebugConfig, KdebugError, TypeFilter};
+use crate::sys::kdebug::{self, Kdebug, KdebugError};
 use crate::sys::time::{self, ClockAnchor, Timebase};
 use crate::target::{self, Spec, Tracked};
-use crate::trace::kdebug::codes;
-use crate::trace::kdebug::pairing::PathRecords;
 use crate::trace::procs::{Live, ProcSource};
 use crate::tui::state::{App, Tab};
 use crate::tui::{self, Feed};
@@ -103,16 +101,6 @@ fn tabs(cli: &Cli) -> &'static [Tab] {
     if cli.quiet { &Tab::TARGETS } else { &Tab::ALL }
 }
 
-/// Classes the kernel records: BSD syscalls, file-system lookups and process lifecycle.
-pub fn type_filter() -> TypeFilter {
-    let mut filter = TypeFilter::default();
-    filter
-        .allow(codes::CLASS_BSD, codes::SUBCLASS_BSD_SYSCALL)
-        .allow(codes::CLASS_FSYSTEM, codes::SUBCLASS_FSRW)
-        .allow(codes::CLASS_BSD, codes::SUBCLASS_BSD_PROC);
-    filter
-}
-
 fn trace_live(cli: &Cli) -> Result<ExitCode> {
     if !sys::is_root() {
         bail!(KdebugError::NotPermitted);
@@ -130,17 +118,13 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
 
     let timebase = Timebase::host();
     let anchor = ClockAnchor::now();
-    let pids = tracked.iter().map(|t| t.pid).collect();
-    let kd = Kdebug::start(&KdebugConfig {
-        buffer_events: cli.buffer,
-        filter: type_filter(),
-        pids,
-    })?;
+    let pids: Vec<i32> = tracked.iter().map(|t| t.pid).collect();
+    let mut kd = Kdebug::start(cli.buffer, &pids)?;
     let info = SessionInfo {
         timebase,
         anchor,
         processes: tracked.iter().map(Tracked::process).collect(),
-        path_records: sys::os_release().map_or_else(PathRecords::default, |r| PathRecords::for_release(&r)),
+        path_records: Kdebug::path_records(),
     };
     let recorder = match &cli.record {
         Some(path) => {
@@ -173,7 +157,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     };
 
     let (tx, rx) = mpsc::channel();
-    let (kd_ref, stop_ref, config_ref) = (&kd, &*stop, &config);
+    let (kd_ref, stop_ref, config_ref) = (&mut kd, &*stop, &config);
     let (consumed, read) = thread::scope(|scope| {
         let reader = thread::Builder::new()
             .name("kdebug-reader".into())

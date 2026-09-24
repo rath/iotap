@@ -10,7 +10,11 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::reader::Tracer;
+use crate::trace::Records;
 use crate::trace::kdebug::KdBuf;
+use crate::trace::kdebug::codes;
+use crate::trace::kdebug::pairing::PathRecords;
 
 /// `kbufinfo_t`: answer to `KERN_KDGETBUF`.
 #[repr(C)]
@@ -73,16 +77,6 @@ impl TypeFilter {
     }
 }
 
-/// What to trace.
-#[derive(Clone, Debug)]
-pub struct KdebugConfig {
-    /// Kernel buffer size in records; the kernel may clamp it.
-    pub buffer_events: u32,
-    pub filter: TypeFilter,
-    /// Only these processes are traced.
-    pub pids: Vec<i32>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum KdebugError {
     #[error("the kernel trace facility requires root; re-run with sudo")]
@@ -119,12 +113,16 @@ static OWNED: AtomicBool = AtomicBool::new(false);
 /// Handle to the running trace session. Dropping it stops tracing and releases the facility.
 #[derive(Debug)]
 pub struct Kdebug {
+    /// Number of records the kernel buffer holds; a read never returns more.
     capacity: usize,
+    /// Where records are read to; sized to `capacity` on the first read.
+    buf: Vec<KdBuf>,
 }
 
 impl Kdebug {
-    /// Takes ownership of the trace facility and starts tracing `config.pids`.
-    pub fn start(config: &KdebugConfig) -> Result<Self, KdebugError> {
+    /// Takes ownership of the trace facility and starts tracing `pids`, recording what the
+    /// kdebug decoder reads into a kernel buffer of about `buffer_events` records.
+    pub fn start(buffer_events: u32, pids: &[i32]) -> Result<Self, KdebugError> {
         if OWNED.load(Ordering::SeqCst) {
             return Err(KdebugError::AlreadyActive);
         }
@@ -132,51 +130,59 @@ impl Kdebug {
         remove().map_err(|e| KdebugError::from_os("KERN_KDREMOVE", e))?;
         OWNED.store(true, Ordering::SeqCst);
         // From here on, dropping `session` tears the configuration down again.
-        let mut session = Self { capacity: 0 };
+        let mut session = Self {
+            capacity: 0,
+            buf: Vec::new(),
+        };
 
-        let events = libc::c_int::try_from(config.buffer_events.max(1024)).unwrap_or(libc::c_int::MAX);
+        let events = libc::c_int::try_from(buffer_events.max(1024)).unwrap_or(libc::c_int::MAX);
         set_buffer_events(events).map_err(|e| KdebugError::from_os("KERN_KDSETBUF", e))?;
         setup().map_err(|e| KdebugError::from_os("KERN_KDSETUP", e))?;
         let info = buffer_info().map_err(|e| KdebugError::from_os("KERN_KDGETBUF", e))?;
         session.capacity = usize::try_from(info.nkdbufs).unwrap_or(0).max(1);
 
-        let mut filter = config.filter.clone();
+        let mut filter = TypeFilter::default();
+        for (class, subclass) in codes::TRACED_CLASSES {
+            filter.allow(class, subclass);
+        }
         set_typefilter(&mut filter).map_err(|e| KdebugError::from_os("KERN_KDSET_TYPEFILTER", e))?;
-        for &pid in &config.pids {
+        for &pid in pids {
             session.add_pid(pid)?;
         }
         enable(true).map_err(|e| KdebugError::from_os("KERN_KDENABLE", e))?;
         Ok(session)
     }
 
-    /// Number of records the kernel buffer holds; reads never return more.
-    pub fn capacity(&self) -> usize {
-        self.capacity
+    /// How this kernel lays out lookup paths in its records.
+    pub fn path_records() -> PathRecords {
+        os_release().map_or_else(PathRecords::default, |release| PathRecords::for_release(&release))
     }
+}
 
-    /// Flags `pid` for tracing. Calling it again for a flagged process is harmless, which is
-    /// how a process that replaced its image with `exec` is picked up again.
-    pub fn add_pid(&self, pid: i32) -> Result<(), KdebugError> {
-        set_pid(pid, true).map_err(|e| match e.raw_os_error() {
-            Some(libc::ESRCH | libc::EINVAL) => KdebugError::NoSuchProcess(pid),
-            _ => KdebugError::from_os("KERN_KDPIDTR", e),
-        })
-    }
+impl Tracer for Kdebug {
+    type Error = KdebugError;
 
-    /// Blocks until the kernel buffer is half full or `timeout` elapses. Returns true when
-    /// the buffer crossed the threshold.
-    pub fn wait(&self, timeout: Duration) -> Result<bool, KdebugError> {
+    /// Blocks until the kernel buffer is half full or `timeout` elapses.
+    fn wait(&mut self, timeout: Duration) -> Result<(), KdebugError> {
         let millis = usize::try_from(timeout.as_millis()).unwrap_or(usize::MAX).max(1);
         wait(millis).map_err(|e| KdebugError::from_os("KERN_KDBUFWAIT", e))
     }
 
-    /// Moves buffered records into `buf`, which is resized to [`Kdebug::capacity`] on first
-    /// use. Returns how many leading entries of `buf` were filled.
-    pub fn read(&self, buf: &mut Vec<KdBuf>) -> Result<usize, KdebugError> {
-        if buf.len() != self.capacity {
-            buf.resize(self.capacity, KdBuf::default());
+    fn read(&mut self) -> Result<Option<Records>, KdebugError> {
+        if self.buf.len() != self.capacity {
+            self.buf.resize(self.capacity, KdBuf::default());
         }
-        read(buf).map_err(|e| KdebugError::from_os("KERN_KDREADTR", e))
+        let count = read(&mut self.buf).map_err(|e| KdebugError::from_os("KERN_KDREADTR", e))?;
+        Ok((count > 0).then(|| Records::Kdebug(self.buf[..count].to_vec())))
+    }
+
+    /// Flags `pid` for tracing. Calling it again for a flagged process is harmless, which is
+    /// how a process that replaced its image with `exec` is picked up again.
+    fn add_pid(&mut self, pid: i32) -> Result<(), KdebugError> {
+        set_pid(pid, true).map_err(|e| match e.raw_os_error() {
+            Some(libc::ESRCH | libc::EINVAL) => KdebugError::NoSuchProcess(pid),
+            _ => KdebugError::from_os("KERN_KDPIDTR", e),
+        })
     }
 }
 
@@ -260,11 +266,33 @@ fn enable(on: bool) -> io::Result<()> {
     kd_sysctl(libc::KERN_KDENABLE, Some(value), ptr::null_mut(), &mut 0)
 }
 
-fn wait(timeout_ms: usize) -> io::Result<bool> {
-    // The timeout travels in the length word and the kernel answers in it.
+fn wait(timeout_ms: usize) -> io::Result<()> {
+    // The timeout travels in the length word.
     let mut len = timeout_ms;
-    kd_sysctl(libc::KERN_KDBUFWAIT, None, ptr::null_mut(), &mut len)?;
-    Ok(len != 0)
+    kd_sysctl(libc::KERN_KDBUFWAIT, None, ptr::null_mut(), &mut len)
+}
+
+/// The kernel release, such as `24.4.0` (`kern.osrelease`).
+fn os_release() -> Option<String> {
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    // SAFETY: the name is NUL-terminated, `buf` holds `len` writable bytes, and no new value
+    // is passed.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.osrelease".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let text = &buf[..len.min(buf.len())];
+    let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
+    String::from_utf8(text[..end].to_vec()).ok()
 }
 
 fn read(buf: &mut [KdBuf]) -> io::Result<usize> {
@@ -296,12 +324,7 @@ mod tests {
         if crate::sys::is_root() {
             return;
         }
-        let config = KdebugConfig {
-            buffer_events: 1024,
-            filter: TypeFilter::default(),
-            pids: vec![],
-        };
-        let err = Kdebug::start(&config).expect_err("non-root must not configure kdebug");
+        let err = Kdebug::start(1024, &[]).expect_err("non-root must not configure kdebug");
         assert!(
             matches!(err, KdebugError::NotPermitted | KdebugError::Busy),
             "{err:?}"

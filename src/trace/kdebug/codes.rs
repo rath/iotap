@@ -13,6 +13,14 @@ pub const SUBCLASS_FSRW: u8 = 0x01;
 pub const SUBCLASS_BSD_PROC: u8 = 0x01;
 pub const SUBCLASS_BSD_SYSCALL: u8 = 0x0c;
 
+/// The (class, subclass) pairs whose records the decoder reads: BSD syscalls, file-system path
+/// lookups and process exits.
+pub const TRACED_CLASSES: [(u8, u8); 3] = [
+    (CLASS_BSD, SUBCLASS_BSD_SYSCALL),
+    (CLASS_FSYSTEM, SUBCLASS_FSRW),
+    (CLASS_BSD, SUBCLASS_BSD_PROC),
+];
+
 /// Path of a name lookup, spread over one or more records (`VFS_LOOKUP`).
 pub const VFS_LOOKUP: u32 = 0x0301_0090;
 /// A process begins to exit; arg1 is its pid (`BSD_PROC_EXIT`).

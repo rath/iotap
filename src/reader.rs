@@ -2,13 +2,13 @@
 //! own thread and does nothing slow, so the kernel buffer is emptied promptly.
 
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session::Input;
-use crate::sys::kdebug::{Kdebug, KdebugError};
 use crate::sys::proc as libproc;
 use crate::sys::time;
 use crate::target::{self, Tracked};
@@ -17,6 +17,21 @@ use crate::trace::Records;
 /// How often an idle reader still says how far the trace has been read, so that the consumer
 /// can settle what it asked libproc about.
 const IDLE_WATERMARK: Duration = Duration::from_millis(100);
+
+/// A kernel trace facility while iotap owns it, such as kdebug.
+pub trait Tracer {
+    type Error: Error + Send + Sync + 'static;
+
+    /// Blocks until records wait or `timeout` passes.
+    fn wait(&mut self, timeout: Duration) -> Result<(), Self::Error>;
+
+    /// Takes the records waiting now; `None` when there are none.
+    fn read(&mut self) -> Result<Option<Records>, Self::Error>;
+
+    /// Traces `pid` too. Harmless for a process already traced; a facility that stops tracing a
+    /// process when it runs exec, as kdebug does, traces it again.
+    fn add_pid(&mut self, pid: i32) -> Result<(), Self::Error>;
+}
 
 #[derive(Clone, Debug)]
 pub struct ReaderConfig {
@@ -32,15 +47,14 @@ pub struct ReaderConfig {
 
 /// Reads until `stop` is set or every traced process is gone, then sends
 /// [`Input::Stopped`]. Returns early if the consumer hangs up.
-pub fn run(
-    kd: &Kdebug,
+pub fn run<T: Tracer>(
+    tracer: &mut T,
     tracked: Vec<Tracked>,
     config: &ReaderConfig,
     tx: &Sender<Input>,
     stop: &AtomicBool,
-) -> Result<(), KdebugError> {
+) -> Result<(), T::Error> {
     let mut watch = Watch::new(tracked, config);
-    let mut buf = Vec::new();
     let mut last_poll = Instant::now();
     let mut last_watermark = Instant::now();
     // Records went out after the last watermark.
@@ -48,13 +62,13 @@ pub fn run(
     loop {
         let stopping = stop.load(Ordering::SeqCst);
         if !stopping {
-            kd.wait(config.wait)?;
+            tracer.wait(config.wait)?;
         }
         let read_at = time::now_ticks();
-        let Some(count) = drain(kd, &mut buf, tx)? else {
+        let Some(read) = drain(tracer, tx)? else {
             return Ok(());
         };
-        if count > 0 {
+        if read {
             unmarked = true;
         } else if unmarked || last_watermark.elapsed() >= IDLE_WATERMARK {
             // The read found nothing, so every record before it has been sent.
@@ -69,7 +83,7 @@ pub fn run(
         }
         if last_poll.elapsed() >= config.poll {
             last_poll = Instant::now();
-            for input in watch.poll(kd) {
+            for input in watch.poll(tracer) {
                 if tx.send(input).is_err() {
                     return Ok(());
                 }
@@ -78,7 +92,7 @@ pub fn run(
                 // Records of the last moments may still be in per-CPU buffers.
                 for _ in 0..2 {
                     thread::sleep(Duration::from_millis(20));
-                    if drain(kd, &mut buf, tx)?.is_none() {
+                    if drain(tracer, tx)?.is_none() {
                         return Ok(());
                     }
                 }
@@ -92,22 +106,16 @@ pub fn run(
     Ok(())
 }
 
-/// Moves buffered records to the consumer. Returns how many there were, or `None` if the
+/// Moves waiting records to the consumer. Returns whether there were any, or `None` if the
 /// consumer is gone.
-fn drain(
-    kd: &Kdebug,
-    buf: &mut Vec<crate::trace::kdebug::KdBuf>,
-    tx: &Sender<Input>,
-) -> Result<Option<usize>, KdebugError> {
-    let count = kd.read(buf)?;
-    if count > 0
-        && tx
-            .send(Input::Records(Records::Kdebug(buf[..count].to_vec())))
-            .is_err()
-    {
+fn drain<T: Tracer>(tracer: &mut T, tx: &Sender<Input>) -> Result<Option<bool>, T::Error> {
+    let Some(records) = tracer.read()? else {
+        return Ok(Some(false));
+    };
+    if tx.send(Input::Records(records)).is_err() {
         return Ok(None);
     }
-    Ok(Some(count))
+    Ok(Some(true))
 }
 
 /// Liveness, exec and name-follow bookkeeping for the traced processes.
@@ -140,12 +148,13 @@ impl Watch {
         self.tracked.is_empty()
     }
 
-    fn poll(&mut self, kd: &Kdebug) -> Vec<Input> {
+    fn poll<T: Tracer>(&mut self, tracer: &mut T) -> Vec<Input> {
         let mut inputs = Vec::new();
         self.tracked.retain_mut(|process| {
             let alive = libproc::info(process.pid).is_some_and(|info| info.start == process.start)
-                // exec gives the process a new kernel proc without the trace flag; flag it again.
-                && kd.add_pid(process.pid).is_ok();
+                // kdebug loses a process at exec, which gives it a new kernel proc without the
+                // trace flag; tracing it again brings it back.
+                && tracer.add_pid(process.pid).is_ok();
             if !alive {
                 inputs.push(Input::Exited { pid: process.pid });
                 return false;
@@ -161,12 +170,12 @@ impl Watch {
             true
         });
         if !self.follow.is_empty() {
-            self.follow_new(kd, &mut inputs);
+            self.follow_new(tracer, &mut inputs);
         }
         inputs
     }
 
-    fn follow_new(&mut self, kd: &Kdebug, inputs: &mut Vec<Input>) {
+    fn follow_new<T: Tracer>(&mut self, tracer: &mut T, inputs: &mut Vec<Input>) {
         let pids = libproc::list_pids();
         self.seen.retain(|pid, _| pids.contains(pid));
         for pid in pids {
@@ -185,7 +194,7 @@ impl Watch {
             {
                 continue;
             }
-            if kd.add_pid(pid).is_ok() {
+            if tracer.add_pid(pid).is_ok() {
                 let process = Tracked {
                     pid,
                     name: info.name,
@@ -196,5 +205,139 @@ impl Watch {
                 self.tracked.push(process);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::mpsc::{self, Receiver};
+
+    use super::*;
+    use crate::trace::kdebug::synth::Synth;
+
+    /// Hands out scripted reads. Once they run out, reads find nothing and, when given `stop`,
+    /// ask the reader to stop.
+    struct Scripted<'a> {
+        reads: VecDeque<Option<Records>>,
+        stop: Option<&'a AtomicBool>,
+        added: Vec<i32>,
+    }
+
+    impl Tracer for Scripted<'_> {
+        type Error = io::Error;
+
+        fn wait(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read(&mut self) -> io::Result<Option<Records>> {
+            if let Some(read) = self.reads.pop_front() {
+                return Ok(read);
+            }
+            if let Some(stop) = self.stop {
+                stop.store(true, Ordering::SeqCst);
+            }
+            Ok(None)
+        }
+
+        fn add_pid(&mut self, pid: i32) -> io::Result<()> {
+            self.added.push(pid);
+            Ok(())
+        }
+    }
+
+    fn config(poll: Duration) -> ReaderConfig {
+        ReaderConfig {
+            follow: Vec::new(),
+            wait: Duration::ZERO,
+            poll,
+            own_pid: 0,
+        }
+    }
+
+    /// A process that is not running: no process has the largest pid.
+    fn gone() -> Tracked {
+        Tracked {
+            pid: i32::MAX,
+            name: "gone".into(),
+            start: (1, 0),
+            exe: None,
+        }
+    }
+
+    fn sent(rx: &Receiver<Input>) -> Vec<Input> {
+        rx.try_iter().collect()
+    }
+
+    #[test]
+    fn forwards_records_and_marks_what_was_read_until_stopped() {
+        let stop = AtomicBool::new(false);
+        let records = Records::Kdebug(Synth::new(0, 1).io(1, 2, 3, 4, 5, 5));
+        let mut tracer = Scripted {
+            reads: VecDeque::from([Some(records.clone()), None]),
+            stop: Some(&stop),
+            added: Vec::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        // It never polls the processes, so only the stop flag ends it.
+        run(&mut tracer, Vec::new(), &config(Duration::MAX), &tx, &stop).unwrap();
+        let got = sent(&rx);
+        assert_eq!(got.first(), Some(&Input::Records(records)));
+        // A read that finds nothing tells the session the trace has been read up to then.
+        assert!(matches!(got[1], Input::Watermark { .. }), "{got:?}");
+        assert!(matches!(got.last(), Some(Input::Stopped { .. })), "{got:?}");
+    }
+
+    #[test]
+    fn reports_exits_and_traces_running_processes_again() {
+        let stop = AtomicBool::new(false);
+        let me = Tracked::probe(i32::try_from(std::process::id()).unwrap()).unwrap();
+        let mut tracer = Scripted {
+            reads: VecDeque::from([None, None]),
+            stop: Some(&stop),
+            added: Vec::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        run(
+            &mut tracer,
+            vec![me.clone(), gone()],
+            &config(Duration::ZERO),
+            &tx,
+            &stop,
+        )
+        .unwrap();
+        let got = sent(&rx);
+        assert_eq!(got.first(), Some(&Input::Exited { pid: i32::MAX }));
+        assert!(matches!(got.last(), Some(Input::Stopped { .. })), "{got:?}");
+        // Every poll traces the running process again, in case it ran exec.
+        assert!(tracer.added.len() >= 2, "{:?}", tracer.added);
+        assert!(
+            tracer.added.iter().all(|&pid| pid == me.pid),
+            "{:?}",
+            tracer.added
+        );
+    }
+
+    #[test]
+    fn stops_by_itself_once_every_process_is_gone() {
+        let stop = AtomicBool::new(false);
+        let mut tracer = Scripted {
+            reads: VecDeque::new(),
+            stop: None,
+            added: Vec::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        run(&mut tracer, vec![gone()], &config(Duration::ZERO), &tx, &stop).unwrap();
+        let got = sent(&rx);
+        assert!(
+            matches!(&got[..], [Input::Exited { pid: i32::MAX }, Input::Stopped { .. }]),
+            "{got:?}"
+        );
+        assert!(
+            tracer.added.is_empty(),
+            "a process that is gone is not traced again"
+        );
     }
 }
