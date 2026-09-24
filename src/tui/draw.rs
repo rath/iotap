@@ -10,7 +10,6 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, Tabs};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{Drawn, Shown, Tab, View};
-use crate::model::Category;
 use crate::output::{bytes, count, text};
 use crate::stats::{self, Key, Second, SortBy};
 
@@ -25,6 +24,7 @@ const TITLE: Style = Style::new()
     .add_modifier(Modifier::BOLD)
     .add_modifier(Modifier::REVERSED);
 const SELECTED_TAB: Style = TITLE;
+const SELECTED_ROW: Style = Style::new().add_modifier(Modifier::REVERSED);
 const WARNING: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 const BANNER: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
 const BADGE: Style = Style::new()
@@ -175,10 +175,10 @@ fn alerts(shown: &Shown<'_>) -> Vec<Line<'static>> {
 
 fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, position: String) {
     let stats = shown.stats;
-    let titles = view.tabs.iter().enumerate().map(|(i, tab)| {
+    let titles = view.tabs.iter().enumerate().map(|(i, &tab)| {
         let (name, count) = match tab {
-            Tab::Files => ("Files", files_and_other(stats) as u64),
-            Tab::Network => ("Network", stats.targets(Category::Network) as u64),
+            Tab::Files => ("Files", tab.rows(stats) as u64),
+            Tab::Network => ("Network", tab.rows(stats) as u64),
             Tab::Events => ("Events", shown.events.end()),
         };
         format!("{} {name} ({})", i + 1, grouped(count))
@@ -208,30 +208,30 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, 
     frame.render_widget(Paragraph::new(indicators), right);
 }
 
-/// Draws the Files or Network table; returns which rows are visible, when not all fit.
+/// Draws the Files or Network table, scrolled so the selected row shows; returns which rows
+/// are visible, when not all fit.
 fn draw_targets(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown<'_>) -> String {
-    let files = view.tab == Tab::Files;
+    let tab = view.tab;
+    let files = tab == Tab::Files;
     let stats = shown.stats;
-    let (total, traced, words) = if files {
-        (
-            files_and_other(stats),
-            shown.filter.files || shown.filter.other,
-            ["READ", "WRITTEN"],
-        )
+    let total = tab.rows(stats);
+    let (traced, words) = if files {
+        (shown.filter.files || shown.filter.other, ["READ", "WRITTEN"])
     } else {
-        (
-            stats.targets(Category::Network),
-            shown.filter.network,
-            ["RECEIVED", "SENT"],
-        )
+        (shown.filter.network, ["RECEIVED", "SENT"])
     };
     let page = usize::from(area.height.saturating_sub(1));
-    let index = view.tab.index();
-    let offset = view.offsets[index].min(total.saturating_sub(page));
+    let index = tab.index();
+    let selected = view.selected_rank(stats);
+    let mut offset = view.offsets[index].min(total.saturating_sub(page));
+    if selected < offset {
+        offset = selected;
+    } else if page > 0 && selected >= offset + page {
+        offset = selected + 1 - page;
+    }
     view.offsets[index] = offset;
     view.drawn = Drawn {
         page,
-        rows: total,
         ..Drawn::default()
     };
     if total == 0 {
@@ -244,12 +244,7 @@ fn draw_targets(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Show
         frame.render_widget(Paragraph::new(Line::styled(format!(" {message}"), DIM)), area);
         return String::new();
     }
-    let wanted: fn(Category) -> bool = if files {
-        |category| category != Category::Network
-    } else {
-        |category| category == Category::Network
-    };
-    let rows = stats.page(wanted, view.sort, offset, page);
+    let rows = stats.page(|category| tab.lists(category), view.sort, offset, page);
 
     let widths = [
         Constraint::Length(10),
@@ -277,9 +272,14 @@ fn draw_targets(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Show
         Cell::from("TARGET"),
     ])
     .style(BOLD);
-    let body = rows
-        .iter()
-        .map(|(key, row)| target_row(key, row, shown.now_ns, target_width));
+    let body = rows.iter().enumerate().map(|(i, (key, row))| {
+        let drawn = target_row(key, row, shown.now_ns, target_width);
+        if offset + i == selected {
+            drawn.style(SELECTED_ROW)
+        } else {
+            drawn
+        }
+    });
     frame.render_widget(
         Table::new(body, widths).header(header).column_spacing(spacing),
         area,
@@ -335,7 +335,6 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
     let page = usize::from(area.height.saturating_sub(1));
     view.drawn = Drawn {
         page,
-        rows: 0,
         first: ring.first(),
         end: ring.end(),
     };
@@ -441,10 +440,6 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
         frame.render_widget(Paragraph::new(format!(" {status}")), left);
     }
     frame.render_widget(Paragraph::new(hints), right);
-}
-
-fn files_and_other(stats: &stats::Stats) -> usize {
-    stats.targets(Category::File) + stats.targets(Category::Other)
 }
 
 /// Bytes moved during the last complete second before `now_ns`.
@@ -559,6 +554,7 @@ fn fit_start(text: &str, width: usize) -> Cow<'_, str> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
 
     use super::*;
     use crate::model::{Endpoint, Proto, Target};
@@ -636,7 +632,7 @@ mod tests {
         (session, app)
     }
 
-    fn render(session: &Session, app: &mut App, width: u16, height: u16, now_ns: u64) -> Vec<String> {
+    fn render_buffer(session: &Session, app: &mut App, width: u16, height: u16, now_ns: u64) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
@@ -644,15 +640,27 @@ mod tests {
                 draw(frame, &mut app.view, &shown);
             })
             .unwrap();
-        let buffer = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    fn line(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    fn render(session: &Session, app: &mut App, width: u16, height: u16, now_ns: u64) -> Vec<String> {
+        let buffer = render_buffer(session, app, width, height, now_ns);
+        (0..buffer.area.height).map(|y| line(&buffer, y)).collect()
+    }
+
+    /// Lines highlighted from the tables' left edge to the right edge of the screen.
+    fn highlighted(buffer: &Buffer) -> Vec<String> {
         (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
-            })
+            .filter(|&y| (1..buffer.area.width).all(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED)))
+            .map(|y| line(buffer, y))
             .collect()
     }
 
@@ -737,6 +745,38 @@ mod tests {
         press(&mut app, &session, KeyCode::End);
         let lines = render(&session, &mut app, 100, 10, START_NS);
         assert!(!find(&lines, "3 Events (5)").contains("newer below"));
+    }
+
+    #[test]
+    fn the_selected_row_is_highlighted_and_kept_in_view() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        let buffer = render_buffer(&session, &mut app, 100, 20, START_NS);
+        let rows = highlighted(&buffer);
+        assert!(
+            rows.len() == 1 && rows[0].ends_with(" /Users/me/page.html"),
+            "the top row is selected at first: {rows:?}"
+        );
+        press(&mut app, &session, KeyCode::Down);
+        // One table row fits below the header.
+        let buffer = render_buffer(&session, &mut app, 100, 8, START_NS);
+        let rows = highlighted(&buffer);
+        assert!(rows.len() == 1 && rows[0].ends_with(" /dev/ttys004"), "{rows:?}");
+        let lines: Vec<String> = (0..buffer.area.height).map(|y| line(&buffer, y)).collect();
+        assert!(
+            find(&lines, "1 Files (2)").contains("2-2 of 2"),
+            "{}",
+            lines.join("\n")
+        );
+        press(&mut app, &session, KeyCode::Char('2'));
+        let rows = highlighted(&render_buffer(&session, &mut app, 100, 20, START_NS));
+        assert!(
+            rows.len() == 1 && rows[0].ends_with(" tcp 93.184.216.34:443"),
+            "each table has its own selection: {rows:?}"
+        );
+        press(&mut app, &session, KeyCode::Char('3'));
+        let rows = highlighted(&render_buffer(&session, &mut app, 100, 20, START_NS));
+        assert!(rows.is_empty(), "events are not selected: {rows:?}");
     }
 
     #[test]

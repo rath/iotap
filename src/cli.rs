@@ -28,8 +28,9 @@ pub struct Cli {
     /// Keys: 1, 2 and 3 switch between the Files, Network and Events tabs; s changes the sort
     /// order; p pauses the view while tracing goes on; r resets the view to zero, though the
     /// summary still covers the whole trace; the arrow keys, Page Up, Page Down, Home and End
-    /// scroll; q quits and prints the summary. The UI stays open after tracing stops. With
-    /// --quiet it has no Events tab.
+    /// select a row of the Files and Network tables and scroll the Events tab; q quits and
+    /// prints the summary. The UI stays open after tracing stops. With --quiet it has no
+    /// Events tab.
     #[arg(long, conflicts_with = "json")]
     pub tui: bool,
 

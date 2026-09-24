@@ -342,6 +342,21 @@ impl Stats {
         rows
     }
 
+    /// Position of `key` in `sort` order among the rows of the categories `wanted` accepts.
+    pub fn rank(&self, wanted: impl Fn(Category) -> bool, sort: SortBy, key: &Key) -> Option<usize> {
+        let this = self.rows.get_key_value(key)?;
+        if !wanted(key.category()) {
+            return None;
+        }
+        let before = self
+            .rows
+            .iter()
+            .filter(|(other, _)| wanted(other.category()))
+            .filter(|other| compare(sort, other, &this) == Ordering::Less)
+            .count();
+        Some(before)
+    }
+
     /// Every row of one category as summary rows, largest first.
     pub fn summary_rows(&self, category: Category) -> Vec<SummaryRow> {
         self.rows(category, SortBy::Bytes)
@@ -588,6 +603,11 @@ mod tests {
                     .collect();
                 assert_eq!(got, expected, "{sort:?} {skip}+{take}");
             }
+            for (rank, (key, _)) in full.iter().enumerate() {
+                assert_eq!(stats.rank(local, sort, key), Some(rank), "{sort:?} {key}");
+            }
+            assert_eq!(stats.rank(|c| c == Category::Network, sort, full[0].0), None);
+            assert_eq!(stats.rank(local, sort, &Key::File("/none".into())), None);
         }
     }
 

@@ -6,10 +6,10 @@ use std::io;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::model::IoEvent;
+use crate::model::{Category, IoEvent};
 use crate::output::text;
 use crate::session::{Filter, Notice, ProcessStatus, Session, Sink};
-use crate::stats::{SortBy, Stats};
+use crate::stats::{Key, SortBy, Stats};
 use crate::sys::time::LocalClock;
 
 /// Events kept for the Events tab.
@@ -91,6 +91,24 @@ impl Tab {
             Self::Events => 2,
         }
     }
+
+    /// True when the tab's table lists targets of `category`.
+    pub fn lists(self, category: Category) -> bool {
+        match self {
+            Self::Files => category != Category::Network,
+            Self::Network => category == Category::Network,
+            Self::Events => false,
+        }
+    }
+
+    /// Rows of the tab's table.
+    pub fn rows(self, stats: &Stats) -> usize {
+        [Category::File, Category::Network, Category::Other]
+            .into_iter()
+            .filter(|&category| self.lists(category))
+            .map(|category| stats.targets(category))
+            .sum()
+    }
 }
 
 /// What the last frame drew, so keys can scroll by pages and stop at the ends.
@@ -98,8 +116,6 @@ impl Tab {
 pub struct Drawn {
     /// Table rows that fit on screen.
     pub page: usize,
-    /// Rows of the Files or Network table.
-    pub rows: usize,
     /// Sequence numbers of the oldest kept event and of the next event.
     pub first: u64,
     pub end: u64,
@@ -113,7 +129,7 @@ enum Motion {
     Bottom,
 }
 
-/// Navigation: the tab, the sort order and where each table is scrolled to.
+/// Navigation: the tab, the sort order, the selected rows and where each table is scrolled to.
 #[derive(Debug)]
 pub struct View {
     /// The tabs shown, in order; the first is shown first.
@@ -122,6 +138,9 @@ pub struct View {
     pub sort: SortBy,
     /// First visible row of the Files and Network tables.
     pub offsets: [usize; 2],
+    /// Selected target of the Files and Network tables. The selection stays with its target
+    /// as the order changes; `None` selects the top row, whichever target that is.
+    pub selected: [Option<Key>; 2],
     /// Sequence number of the lowest visible event; `None` follows the newest.
     pub bottom: Option<u64>,
     pub drawn: Drawn,
@@ -142,6 +161,7 @@ impl View {
             tab: tabs.first().copied().unwrap_or_default(),
             sort: SortBy::default(),
             offsets: [0; 2],
+            selected: [None, None],
             bottom: None,
             drawn: Drawn::default(),
             clock: LocalClock::default(),
@@ -175,19 +195,43 @@ impl View {
         }
     }
 
-    fn scroll(&mut self, motion: Motion) {
+    /// Position of the selected row in the current table, whose rows `stats` holds. A
+    /// selected target no longer there, as after a reset, gives way to the top row.
+    pub fn selected_rank(&mut self, stats: &Stats) -> usize {
+        let tab = self.tab;
+        let Some(selected) = self.selected.get_mut(tab.index()) else {
+            return 0;
+        };
+        let rank = selected
+            .as_ref()
+            .and_then(|key| stats.rank(|category| tab.lists(category), self.sort, key));
+        if rank.is_none() {
+            *selected = None;
+        }
+        rank.unwrap_or(0)
+    }
+
+    /// Moves the selection of a table, or scrolls the Events tab.
+    fn scroll(&mut self, motion: Motion, stats: &Stats) {
         let page = self.drawn.page.max(1);
         match self.tab {
-            Tab::Files | Tab::Network => {
-                let max = self.drawn.rows.saturating_sub(page);
-                let offset = &mut self.offsets[self.tab.index()];
-                let current = (*offset).min(max);
-                *offset = match motion {
-                    Motion::Up(n) => current.saturating_sub(n),
-                    Motion::Down(n) => current.saturating_add(n).min(max),
-                    Motion::Top => 0,
-                    Motion::Bottom => max,
+            tab @ (Tab::Files | Tab::Network) => {
+                let Some(last) = tab.rows(stats).checked_sub(1) else {
+                    self.selected[tab.index()] = None;
+                    return;
                 };
+                let current = self.selected_rank(stats).min(last);
+                let wanted = match motion {
+                    Motion::Up(n) => current.saturating_sub(n),
+                    Motion::Down(n) => current.saturating_add(n).min(last),
+                    Motion::Top => {
+                        self.selected[tab.index()] = None;
+                        return;
+                    }
+                    Motion::Bottom => last,
+                };
+                let row = stats.page(|category| tab.lists(category), self.sort, wanted, 1);
+                self.selected[tab.index()] = row.first().map(|&(key, _)| key.clone());
             }
             Tab::Events => {
                 let Drawn { first, end, .. } = self.drawn;
@@ -322,6 +366,11 @@ impl Model {
         session.lost_events().saturating_sub(self.lost_before)
     }
 
+    /// The statistics shown: live, or the copy taken when the view was paused.
+    fn stats(&self) -> &Stats {
+        self.frozen.as_ref().map_or(&self.stats, |frozen| &frozen.stats)
+    }
+
     fn toggle_pause(&mut self, session: &Session, now_ns: u64) {
         self.frozen = match self.frozen.take() {
             Some(_) => None,
@@ -401,14 +450,15 @@ impl App {
             KeyCode::Char('r') => {
                 self.model.reset(session, now_ns);
                 view.offsets = [0; 2];
+                view.selected = [None, None];
                 view.bottom = None;
             }
-            KeyCode::Up | KeyCode::Char('k') => view.scroll(Motion::Up(1)),
-            KeyCode::Down | KeyCode::Char('j') => view.scroll(Motion::Down(1)),
-            KeyCode::PageUp => view.scroll(Motion::Up(page)),
-            KeyCode::PageDown => view.scroll(Motion::Down(page)),
-            KeyCode::Home | KeyCode::Char('g') => view.scroll(Motion::Top),
-            KeyCode::End | KeyCode::Char('G') => view.scroll(Motion::Bottom),
+            KeyCode::Up | KeyCode::Char('k') => view.scroll(Motion::Up(1), self.model.stats()),
+            KeyCode::Down | KeyCode::Char('j') => view.scroll(Motion::Down(1), self.model.stats()),
+            KeyCode::PageUp => view.scroll(Motion::Up(page), self.model.stats()),
+            KeyCode::PageDown => view.scroll(Motion::Down(page), self.model.stats()),
+            KeyCode::Home | KeyCode::Char('g') => view.scroll(Motion::Top, self.model.stats()),
+            KeyCode::End | KeyCode::Char('G') => view.scroll(Motion::Bottom, self.model.stats()),
             _ => {}
         }
     }
@@ -495,54 +545,90 @@ mod tests {
         assert_eq!(ring.range(4, 3).count(), 0);
     }
 
+    /// A write of `bytes` to `path`.
+    fn write(path: &str, bytes: u64, time_ns: u64) -> IoEvent {
+        IoEvent {
+            op: Op::Write,
+            syscall: "write",
+            bytes: Some(bytes),
+            target: Arc::new(Target::File { path: path.into() }),
+            ..event(time_ns)
+        }
+    }
+
     #[test]
-    fn tables_scroll_within_their_rows() {
+    fn table_selection_moves_by_rank_and_stays_with_its_target() {
+        let mut stats = Stats::default();
+        for (path, bytes) in [("/a", 50), ("/b", 40), ("/c", 30), ("/d", 20), ("/e", 10)] {
+            stats.record(&write(path, bytes, 0));
+        }
         let mut view = View {
             drawn: Drawn {
-                page: 10,
-                rows: 25,
+                page: 2,
                 ..Drawn::default()
             },
             ..View::default()
         };
-        view.scroll(Motion::Down(1));
-        assert_eq!(view.offsets, [1, 0]);
-        view.scroll(Motion::Down(100));
-        assert_eq!(view.offsets, [15, 0]);
-        view.scroll(Motion::Up(10));
-        assert_eq!(view.offsets, [5, 0]);
+        let selected = |view: &View| view.selected[0].as_ref().map(ToString::to_string);
+        assert_eq!(view.selected_rank(&stats), 0);
+        view.scroll(Motion::Down(1), &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/b"));
+        view.scroll(Motion::Down(2), &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/d"));
+        view.scroll(Motion::Down(9), &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/e"), "stops at the last row");
+        view.scroll(Motion::Up(1), &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/d"));
+
+        stats.record(&write("/d", 1_000, 1));
+        assert_eq!(
+            view.selected_rank(&stats),
+            0,
+            "the selection moves with its target"
+        );
+        view.scroll(Motion::Down(1), &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/a"));
+        view.scroll(Motion::Bottom, &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/e"));
+        view.scroll(Motion::Top, &stats);
+        assert_eq!(view.selected[0], None, "the top row is selected, whichever it is");
+
         view.tab = Tab::Network;
-        view.scroll(Motion::Bottom);
-        assert_eq!(view.offsets, [5, 15]);
-        view.drawn.rows = 3;
-        view.scroll(Motion::Up(1));
-        assert_eq!(view.offsets, [5, 0], "an offset past the end is clamped first");
+        view.scroll(Motion::Down(1), &stats);
+        assert_eq!(view.selected, [None, None], "an empty table selects nothing");
+        view.tab = Tab::Files;
+        view.selected[0] = Some(Key::File("/gone".into()));
+        assert_eq!(view.selected_rank(&stats), 0);
+        assert_eq!(
+            view.selected[0], None,
+            "a target no longer listed gives way to the top row"
+        );
     }
 
     #[test]
     fn events_follow_the_newest_until_scrolled_back() {
+        let stats = Stats::default();
         let mut view = View {
             tab: Tab::Events,
             drawn: Drawn {
                 page: 10,
-                rows: 0,
                 first: 100,
                 end: 150,
             },
             ..View::default()
         };
-        view.scroll(Motion::Down(1));
+        view.scroll(Motion::Down(1), &stats);
         assert_eq!(view.bottom, None);
-        view.scroll(Motion::Up(1));
+        view.scroll(Motion::Up(1), &stats);
         assert_eq!(view.bottom, Some(148));
-        view.scroll(Motion::Top);
+        view.scroll(Motion::Top, &stats);
         assert_eq!(view.bottom, Some(109), "the top page stays full");
-        view.scroll(Motion::Up(5));
+        view.scroll(Motion::Up(5), &stats);
         assert_eq!(view.bottom, Some(109));
-        view.scroll(Motion::Down(100));
+        view.scroll(Motion::Down(100), &stats);
         assert_eq!(view.bottom, None, "reaching the newest follows again");
         view.drawn.end = 105;
-        view.scroll(Motion::Up(1));
+        view.scroll(Motion::Up(1), &stats);
         assert_eq!(view.bottom, None, "fewer events than a page cannot scroll");
     }
 
@@ -625,6 +711,7 @@ mod tests {
         app.view.tab = Tab::Events;
         app.view.bottom = Some(0);
         app.view.offsets = [3, 4];
+        app.view.selected = [Some(Key::File("/a".into())), None];
         assert_eq!(app.model.shown(&session, 0).lost_events, 1);
 
         app.key(press(KeyCode::Char('r')), &session, 5_000_000_000);
@@ -637,6 +724,7 @@ mod tests {
         assert_eq!(shown.start_ns, 5_000_000_000);
         assert!(shown.status.is_some_and(|s| s.starts_with("view reset at ")));
         assert_eq!((app.view.bottom, app.view.offsets), (None, [0, 0]));
+        assert_eq!(app.view.selected, [None, None]);
         assert_eq!(
             session.stats().totals().events,
             1,

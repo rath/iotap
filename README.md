@@ -153,7 +153,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | `s` | Sort by bytes, read, write, calls or most recent |
 | `p` or Space | Pause the view; tracing goes on |
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
-| Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | Scroll; End follows new events again |
+| Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, move the selected row. The selection stays with its target as the rows re-sort; Home selects the top row, whichever target that is. In the Events tab, scroll; End follows new events again |
 | `q`, Esc, Ctrl-C | Quit and print the summary |
 
 The UI stays open after tracing stops and says why it stopped.
