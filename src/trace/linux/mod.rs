@@ -4,6 +4,7 @@
 //! is up to `sys::ebpf`; everything here is plain data handling.
 
 pub mod codes;
+pub mod order;
 pub mod synth;
 
 use super::call::{Completed, Lookup, PathForm, Syscall};

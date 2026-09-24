@@ -53,6 +53,7 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/trace/kdebug/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
 | `src/trace/linux/mod.rs` | The record format of iotap's Linux eBPF program, one record per call that returned, and its decoder |
 | `src/trace/linux/codes.rs` | The Linux syscall tables for aarch64 and x86-64, and what the eBPF program reads for each call |
+| `src/trace/linux/order.rs` | Puts records from the ring buffer in time order and marks where the program dropped some |
 | `src/trace/linux/synth.rs` | Builds records exactly as the eBPF program writes them, for tests |
 | `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks libproc's answers against the trace |
 | `src/trace/procs.rs` | `ProcSource`: libproc when live, fixed answers in tests |
