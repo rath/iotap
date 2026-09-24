@@ -25,7 +25,8 @@ use crate::target::{self, Spec, Tracked};
 use crate::trace::codes;
 use crate::trace::pairing::PathRecords;
 use crate::trace::procs::{Live, ProcSource};
-use crate::tui::{self, Feed, state::App};
+use crate::tui::state::{App, Tab};
+use crate::tui::{self, Feed};
 
 /// Process source of a live trace: libproc, optionally recorded to a file.
 type LiveSource = Recording<Live, BufWriter<File>>;
@@ -95,6 +96,11 @@ pub fn filter(cli: &Cli) -> Filter {
         network: !cli.files_only,
         other: !cli.files_only && !cli.net_only,
     }
+}
+
+/// The terminal UI's tabs: `--quiet` leaves out individual events there too.
+fn tabs(cli: &Cli) -> &'static [Tab] {
+    if cli.quiet { &Tab::TARGETS } else { &Tab::ALL }
 }
 
 /// Classes the kernel records: BSD syscalls, file-system lookups and process lifecycle.
@@ -185,7 +191,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         };
         let consumed = match printer.as_mut() {
             Some(printer) => consume(&mut input, &mut session, printer.sink()),
-            None => watch_live(&mut input, &mut session, &interrupted),
+            None => watch_live(&mut input, &mut session, &interrupted, tabs(cli)),
         };
         stop_ref.store(true, Ordering::SeqCst);
         let read = reader.join().map_err(|_| anyhow!("the kernel reader panicked"))?;
@@ -282,13 +288,18 @@ fn consume(input: &mut LiveInput<'_>, session: &mut Session, sink: &mut dyn Sink
 
 /// Shows live input in the terminal UI until the user quits, then takes in what the reader
 /// still delivers so the summary covers every record read from the kernel.
-fn watch_live(input: &mut LiveInput<'_>, session: &mut Session, interrupted: &AtomicBool) -> io::Result<()> {
+fn watch_live(
+    input: &mut LiveInput<'_>,
+    session: &mut Session,
+    interrupted: &AtomicBool,
+    tabs: &'static [Tab],
+) -> io::Result<()> {
     let mut feed = LiveFeed {
         input,
         interrupted,
         ended: false,
     };
-    let shown = tui::run(session, &mut feed);
+    let shown = tui::run(session, &mut feed, tabs);
     let ended = feed.ended;
     input.stop.store(true, Ordering::SeqCst);
     let drained = if ended {
@@ -414,7 +425,7 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
             answers,
             interrupted: &interrupted,
         };
-        if finish_output(tui::run(&mut session, &mut feed), TUI_FAILED)? {
+        if finish_output(tui::run(&mut session, &mut feed, tabs(cli)), TUI_FAILED)? {
             // The summary covers the whole recording, as it does without --tui.
             for input in feed.inputs.by_ref() {
                 session.handle(&input, &mut feed.answers, &mut Discard)?;

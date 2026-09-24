@@ -15,7 +15,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::{cursor, execute, terminal};
 
-use self::state::App;
+use self::state::{App, Tab};
 use crate::session::Session;
 
 /// Time between frames while input arrives.
@@ -41,8 +41,8 @@ pub trait Feed {
     }
 }
 
-/// Runs the UI until the user quits, restoring the terminal on every path.
-pub fn run(session: &mut Session, feed: &mut dyn Feed) -> io::Result<()> {
+/// Runs the UI, showing `tabs`, until the user quits, restoring the terminal on every path.
+pub fn run(session: &mut Session, feed: &mut dyn Feed, tabs: &'static [Tab]) -> io::Result<()> {
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -54,7 +54,7 @@ pub fn run(session: &mut Session, feed: &mut dyn Feed) -> io::Result<()> {
     // Frames are drawn as differences from a blank screen. `Terminal::clear` would also work
     // but asks the terminal for the cursor position, which not every terminal answers.
     let result = execute!(io::stdout(), terminal::Clear(terminal::ClearType::All))
-        .and_then(|()| run_loop(&mut terminal, session, feed));
+        .and_then(|()| run_loop(&mut terminal, session, feed, tabs));
     // Dropping the terminal shows the cursor again.
     drop(terminal);
     ACTIVE.store(false, Ordering::SeqCst);
@@ -74,8 +74,13 @@ pub fn emergency_restore() {
     }
 }
 
-fn run_loop(terminal: &mut DefaultTerminal, session: &mut Session, feed: &mut dyn Feed) -> io::Result<()> {
-    let mut app = App::default();
+fn run_loop(
+    terminal: &mut DefaultTerminal,
+    session: &mut Session,
+    feed: &mut dyn Feed,
+    tabs: &'static [Tab],
+) -> io::Result<()> {
+    let mut app = App::new(tabs);
     let mut dirty = true;
     loop {
         if !app.has_ended() {

@@ -63,6 +63,7 @@ that name. At least one process must match when iotap starts. `-n` makes numeric
 sudo iotap 1234                        # one process
 sudo iotap Safari                      # every Safari process, and new ones
 sudo iotap --tui 1234                  # live terminal UI
+sudo iotap --tui -q 1234               # the same without the Events tab
 sudo iotap --json curl | jq -c 'select(.type == "event")'
 sudo iotap -q -d 10 Finder             # summary only, after 10 seconds
 sudo iotap --net-only --record t.iotaprec 1234
@@ -73,7 +74,7 @@ iotap --replay t.iotaprec              # the same output again, without root
 |---|---|
 | `--tui` | Live terminal UI instead of the event stream |
 | `--json` | JSON Lines instead of text |
-| `-q`, `--quiet` | No event lines; notices and the summary remain |
+| `-q`, `--quiet` | No event lines; notices and the summary remain. With `--tui`, no Events tab |
 | `--files-only`, `--net-only` | Report one kind of I/O |
 | `-d`, `--duration SECS` | Stop after this many seconds |
 | `--top N` | Rows per table in the text summary; default 30 |
@@ -129,8 +130,8 @@ A file `path` that starts with `…` is only the end of a longer path (see
 ### Terminal UI
 
 `--tui` shows throughput for the last complete second and in total, then three tabs: files,
-network endpoints, and the latest 10,000 events. This is the Files tab after replaying a recorded
-download:
+network endpoints, and the latest 10,000 events. With `-q` the Events tab is left out, and
+events are not kept for it. This is the Files tab after replaying a recorded download:
 
 ```
  iotap  4242 curl (exited)                                                               0:00:12

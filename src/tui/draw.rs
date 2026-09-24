@@ -63,7 +63,7 @@ pub fn draw(frame: &mut Frame<'_>, view: &mut View, shown: &Shown<'_>) {
         Tab::Events => draw_events(frame, body, view, shown),
     };
     draw_tabs(frame, tabs, view, shown, position);
-    draw_footer(frame, footer, shown);
+    draw_footer(frame, footer, view, shown);
 }
 
 fn draw_title(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
@@ -175,11 +175,14 @@ fn alerts(shown: &Shown<'_>) -> Vec<Line<'static>> {
 
 fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, position: String) {
     let stats = shown.stats;
-    let titles = [
-        format!("1 Files ({})", grouped(files_and_other(stats) as u64)),
-        format!("2 Network ({})", grouped(stats.targets(Category::Network) as u64)),
-        format!("3 Events ({})", grouped(shown.events.end())),
-    ];
+    let titles = view.tabs.iter().enumerate().map(|(i, tab)| {
+        let (name, count) = match tab {
+            Tab::Files => ("Files", files_and_other(stats) as u64),
+            Tab::Network => ("Network", stats.targets(Category::Network) as u64),
+            Tab::Events => ("Events", shown.events.end()),
+        };
+        format!("{} {name} ({})", i + 1, grouped(count))
+    });
     let mut spans = Vec::new();
     if !position.is_empty() {
         spans.push(Span::styled(position, DIM));
@@ -198,7 +201,7 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, 
     ])
     .areas(area);
     let tabs = Tabs::new(titles)
-        .select(view.tab.index())
+        .select(view.position())
         .highlight_style(SELECTED_TAB)
         .divider(" ");
     frame.render_widget(tabs, left);
@@ -424,10 +427,11 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
     }
 }
 
-fn draw_footer(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
+fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>) {
     let pause = if shown.paused { "p resume" } else { "p pause" };
+    let tabs = view.tabs.len();
     let hints = Line::styled(
-        format!("q quit  1-3 tabs  s sort  {pause}  r reset  ↑↓ PgUp PgDn scroll "),
+        format!("q quit  1-{tabs} tabs  s sort  {pause}  r reset  ↑↓ PgUp PgDn scroll "),
         DIM,
     )
     .right_aligned();
@@ -744,6 +748,23 @@ mod tests {
         assert!(find(&lines, "every traced process has exited.").contains("Press q for the summary."));
         assert!(find(&lines, "sort: bytes").ends_with("PAUSED"));
         assert!(lines.last().unwrap().contains("p resume"));
+    }
+
+    #[test]
+    fn quiet_leaves_out_the_events_tab() {
+        use crate::tui::state::Tab;
+        let (session, traced_app) = traced();
+        let mut app = App::new(&Tab::TARGETS);
+        app.model = traced_app.model;
+        press(&mut app, &session, ratatui::crossterm::event::KeyCode::Char('2'));
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        let tabs = find(&lines, "1 Files (2)");
+        assert!(
+            tabs.contains("2 Network (1)") && !tabs.contains("Events"),
+            "{tabs}"
+        );
+        assert!(find(&lines, "tcp 93.184.216.34:443").contains("517 B"));
+        assert!(lines.last().unwrap().contains("q quit  1-2 tabs"));
     }
 
     #[test]

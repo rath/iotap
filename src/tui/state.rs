@@ -81,6 +81,8 @@ pub enum Tab {
 
 impl Tab {
     pub const ALL: [Self; 3] = [Self::Files, Self::Network, Self::Events];
+    /// The tabs that list targets, for `--quiet`, which leaves out individual events.
+    pub const TARGETS: [Self; 2] = [Self::Files, Self::Network];
 
     pub fn index(self) -> usize {
         match self {
@@ -88,14 +90,6 @@ impl Tab {
             Self::Network => 1,
             Self::Events => 2,
         }
-    }
-
-    fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
-    }
-
-    fn previous(self) -> Self {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -120,8 +114,10 @@ enum Motion {
 }
 
 /// Navigation: the tab, the sort order and where each table is scrolled to.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct View {
+    /// The tabs shown, in order; the first is shown first.
+    pub tabs: &'static [Tab],
     pub tab: Tab,
     pub sort: SortBy,
     /// First visible row of the Files and Network tables.
@@ -133,7 +129,52 @@ pub struct View {
     pub clock: LocalClock,
 }
 
+impl Default for View {
+    fn default() -> Self {
+        Self::new(&Tab::ALL)
+    }
+}
+
 impl View {
+    pub fn new(tabs: &'static [Tab]) -> Self {
+        Self {
+            tabs,
+            tab: tabs.first().copied().unwrap_or_default(),
+            sort: SortBy::default(),
+            offsets: [0; 2],
+            bottom: None,
+            drawn: Drawn::default(),
+            clock: LocalClock::default(),
+        }
+    }
+
+    /// Position of the current tab among the tabs shown.
+    pub fn position(&self) -> usize {
+        self.tabs.iter().position(|&tab| tab == self.tab).unwrap_or(0)
+    }
+
+    /// Shows the tab labelled `digit`, if there is one.
+    fn select(&mut self, digit: char) {
+        let index = digit.to_digit(10).and_then(|n| n.checked_sub(1));
+        if let Some(&tab) = index.and_then(|i| self.tabs.get(i as usize)) {
+            self.tab = tab;
+        }
+    }
+
+    fn next_tab(&mut self) {
+        let count = self.tabs.len().max(1);
+        if let Some(&tab) = self.tabs.get((self.position() + 1) % count) {
+            self.tab = tab;
+        }
+    }
+
+    fn previous_tab(&mut self) {
+        let count = self.tabs.len().max(1);
+        if let Some(&tab) = self.tabs.get((self.position() + count - 1) % count) {
+            self.tab = tab;
+        }
+    }
+
     fn scroll(&mut self, motion: Motion) {
         let page = self.drawn.page.max(1);
         match self.tab {
@@ -312,6 +353,18 @@ pub struct App {
 }
 
 impl App {
+    /// An app showing `tabs`; without the Events tab, events are not kept at all.
+    pub fn new(tabs: &'static [Tab]) -> Self {
+        Self {
+            view: View::new(tabs),
+            ..Self::default()
+        }
+    }
+
+    fn keeps_events(&self) -> bool {
+        self.view.tabs.contains(&Tab::Events)
+    }
+
     /// Shows `text` in the status line.
     pub fn message(&mut self, text: String) {
         self.model.status = Some(text);
@@ -340,11 +393,9 @@ impl App {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            KeyCode::Char('1') => view.tab = Tab::Files,
-            KeyCode::Char('2') => view.tab = Tab::Network,
-            KeyCode::Char('3') => view.tab = Tab::Events,
-            KeyCode::Tab | KeyCode::Right => view.tab = view.tab.next(),
-            KeyCode::BackTab | KeyCode::Left => view.tab = view.tab.previous(),
+            KeyCode::Char(digit @ '1'..='9') => view.select(digit),
+            KeyCode::Tab | KeyCode::Right => view.next_tab(),
+            KeyCode::BackTab | KeyCode::Left => view.previous_tab(),
             KeyCode::Char('s') => view.sort = view.sort.next(),
             KeyCode::Char('p' | ' ') => self.model.toggle_pause(session, now_ns),
             KeyCode::Char('r') => {
@@ -366,7 +417,9 @@ impl App {
 impl Sink for App {
     fn event(&mut self, event: &IoEvent) -> io::Result<()> {
         self.model.stats.record(event);
-        self.model.events.push(event.clone());
+        if self.keeps_events() {
+            self.model.events.push(event.clone());
+        }
         Ok(())
     }
 
@@ -533,6 +586,30 @@ mod tests {
             0,
         );
         assert!(app.wants_quit());
+    }
+
+    #[test]
+    fn without_the_events_tab_keys_skip_it_and_events_are_not_kept() {
+        let (mut session, mut src) = session();
+        let mut app = App::new(&Tab::TARGETS);
+        app.key(press(KeyCode::Char('3')), &session, 0);
+        assert_eq!(app.view.tab, Tab::Files);
+        app.key(press(KeyCode::Char('2')), &session, 0);
+        assert_eq!(app.view.tab, Tab::Network);
+        app.key(press(KeyCode::Tab), &session, 0);
+        assert_eq!(app.view.tab, Tab::Files);
+        app.key(press(KeyCode::Left), &session, 0);
+        assert_eq!(app.view.tab, Tab::Network);
+        app.key(press(KeyCode::Right), &session, 0);
+        assert_eq!(app.view.tab, Tab::Files);
+
+        let mut synth = Synth::new(2_000, 10);
+        let records = synth.io(1, 7, 4, 1, 5, 5);
+        session
+            .handle(&Input::Records(records), &mut src, &mut app)
+            .unwrap();
+        let shown = app.model.shown(&session, 0);
+        assert_eq!((shown.events.len(), shown.stats.totals().events), (0, 1));
     }
 
     #[test]

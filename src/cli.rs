@@ -28,15 +28,16 @@ pub struct Cli {
     /// Keys: 1, 2 and 3 switch between the Files, Network and Events tabs; s changes the sort
     /// order; p pauses the view while tracing goes on; r resets the view to zero, though the
     /// summary still covers the whole trace; the arrow keys, Page Up, Page Down, Home and End
-    /// scroll; q quits and prints the summary. The UI stays open after tracing stops.
-    #[arg(long, conflicts_with_all = ["json", "quiet"])]
+    /// scroll; q quits and prints the summary. The UI stays open after tracing stops. With
+    /// --quiet it has no Events tab.
+    #[arg(long, conflicts_with = "json")]
     pub tui: bool,
 
     /// Write JSON Lines: one object per event and notice, then a summary object.
     #[arg(long)]
     pub json: bool,
 
-    /// Print only the summary, not individual events.
+    /// Print only the summary, not individual events; with --tui, leave out the Events tab.
     #[arg(short, long)]
     pub quiet: bool,
 
@@ -92,6 +93,7 @@ mod tests {
         assert!(cli.tui);
         assert!(Cli::try_parse_from(["iotap"]).is_err());
         assert!(Cli::try_parse_from(["iotap", "--tui", "--json", "1"]).is_err());
+        assert!(Cli::try_parse_from(["iotap", "--tui", "-q", "1"]).is_ok());
         assert!(Cli::try_parse_from(["iotap", "--files-only", "--net-only", "1"]).is_err());
         assert!(Cli::try_parse_from(["iotap", "--replay", "x.iotaprec"]).is_ok());
     }
