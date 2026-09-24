@@ -4,6 +4,7 @@
 #![allow(unsafe_code)]
 
 pub mod kdebug;
+pub mod proc;
 pub mod time;
 
 /// Returns true when the effective user is root.
