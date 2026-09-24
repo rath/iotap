@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Category, Endpoint, IoEvent, Op, Proto, Provenance, ResultUnit, Target};
 use crate::stats::{Stats, SummaryRow, Totals};
-use crate::sys::kdebug::KdBuf;
 use crate::sys::time::{ClockAnchor, Timebase};
-use crate::trace::codes::Role;
-use crate::trace::decode::{Event, Kind, decode};
+use crate::trace::call::{Completed, Role};
 use crate::trace::fdtable::{FdTable, Found, Verdict};
-use crate::trace::pairing::{Completed, Pairer, PathRecords};
+use crate::trace::kdebug::KdBuf;
+use crate::trace::kdebug::decode::{Event, Kind, decode};
+use crate::trace::kdebug::pairing::{Pairer, PathRecords};
 use crate::trace::procs::ProcSource;
 
 /// A traced process.
@@ -549,8 +549,8 @@ impl Sink for Collect {
 mod tests {
     use super::*;
     use crate::model::{Endpoint, Proto};
+    use crate::trace::kdebug::synth::{Call, Synth};
     use crate::trace::procs::{Fixed, Snapshot};
-    use crate::trace::synth::{Call, Synth};
 
     const PID: i32 = 501;
 

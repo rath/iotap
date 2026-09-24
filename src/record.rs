@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Target;
 use crate::session::{Input, Process, SessionInfo};
-use crate::sys::kdebug::KdBuf;
+use crate::trace::kdebug::KdBuf;
 use crate::trace::procs::{Described, ProcSource, Snapshot};
 
 const MAGIC: &[u8; 8] = b"IOTAPREC";
@@ -409,9 +409,9 @@ mod tests {
     use crate::model::{Endpoint, Proto};
     use crate::session::{Collect, Filter, Session};
     use crate::sys::time::{ClockAnchor, Timebase};
-    use crate::trace::pairing::PathRecords;
+    use crate::trace::kdebug::pairing::PathRecords;
+    use crate::trace::kdebug::synth::Synth;
     use crate::trace::procs::Fixed;
-    use crate::trace::synth::Synth;
 
     fn fixture() -> (SessionInfo, Fixed, Vec<Input>) {
         let info = SessionInfo {

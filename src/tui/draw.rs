@@ -653,9 +653,9 @@ mod tests {
     use crate::model::{Endpoint, Proto, Target};
     use crate::session::{Filter, Input, Process, Session, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
-    use crate::trace::pairing::PathRecords;
+    use crate::trace::kdebug::pairing::PathRecords;
+    use crate::trace::kdebug::synth::{Call, Synth};
     use crate::trace::procs::{Fixed, Snapshot};
-    use crate::trace::synth::{Call, Synth};
     use crate::tui::state::App;
 
     const PID: i32 = 4242;

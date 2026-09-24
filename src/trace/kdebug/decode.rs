@@ -1,7 +1,8 @@
 //! Classifies raw kernel records into the few kinds of events iotap acts on.
 
-use super::codes::{self, Syscall};
-use crate::sys::kdebug::KdBuf;
+use super::KdBuf;
+use super::codes;
+use crate::trace::call::{Syscall, low_i32};
 
 /// Position of a record within an interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,16 +86,12 @@ pub fn decode(rec: &KdBuf) -> Option<Event> {
     })
 }
 
-/// Reads a C `int` the kernel stored in a 64-bit record slot.
-pub fn low_i32(value: u64) -> i32 {
-    (value as u32).cast_signed()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Op;
-    use crate::trace::codes::{Role, syscall_debugid};
+    use crate::trace::call::Role;
+    use crate::trace::kdebug::codes::syscall_debugid;
 
     fn rec(debugid: u32, args: [u64; 4]) -> KdBuf {
         KdBuf {

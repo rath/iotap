@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::codes::Syscall;
-use super::decode::{Event, Kind, Phase, low_i32};
+use super::decode::{Event, Kind, Phase};
+use crate::trace::call::{Completed, Lookup, Syscall, low_i32};
 
 /// Most path bytes a lookup reports in the [`PathRecords::Tail`] format: `NUMPARMS` (23)
 /// words.
@@ -42,98 +42,6 @@ impl PathRecords {
 }
 /// Bound on threads with an open call, so threads that die mid-call cannot grow the map.
 const MAX_PENDING: usize = 1 << 16;
-
-/// A syscall whose END record was seen.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Completed {
-    pub call: Syscall,
-    pub tid: u64,
-    pub pid: i32,
-    /// Entry timestamp and the first four arguments; `None` when the call began before tracing
-    /// did or its START record was lost.
-    pub start: Option<(u64, [u64; 4])>,
-    pub end_ts: u64,
-    /// 0 on success.
-    pub errno: i32,
-    /// `uu_rval[0]` and `uu_rval[1]`.
-    pub rval: [u32; 2],
-    /// The first path looked up during the call.
-    pub lookup: Option<Lookup>,
-}
-
-/// A path as the kernel reports a name lookup: once, when the lookup is complete.
-///
-/// Following a symbolic link replaces the path with the link's text followed by the rest of
-/// the path. So the reported path is what the process passed only when no link was followed.
-/// After a link with a relative target, it is relative to the directory holding that link:
-/// `/etc/hosts` is reported as `private/etc/hosts`, because `/etc` links to `private/etc`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lookup {
-    pub path: String,
-    /// Only the last [`TAIL_PATH_BYTES`] bytes were reported. In that format a path of exactly
-    /// that length looks the same, so it counts as truncated too.
-    pub truncated: bool,
-    /// The kernel's identifier for the vnode found, 0 when nothing was. Lookups that find the
-    /// same file report the same identifier while its vnode lives, whatever path they took.
-    pub vnode: u64,
-}
-
-impl Lookup {
-    /// Absolute, and reported whole.
-    pub fn is_absolute(&self) -> bool {
-        !self.truncated && self.path.starts_with('/')
-    }
-
-    /// Parses the bytes of one lookup's records.
-    fn parse(bytes: &[u8], format: PathRecords) -> Option<Self> {
-        let (path, truncated) = match (bytes.iter().position(|&b| b == 0), format) {
-            (Some(len), _) => (&bytes[..len], false),
-            (None, PathRecords::Whole) => (bytes, false),
-            (None, PathRecords::Tail) => {
-                let len = bytes.iter().rposition(|&b| b != b'>').map_or(0, |last| last + 1);
-                (&bytes[..len], len == TAIL_PATH_BYTES)
-            }
-        };
-        (!path.is_empty()).then(|| Self {
-            path: String::from_utf8_lossy(path).into_owned(),
-            truncated,
-            vnode: 0,
-        })
-    }
-}
-
-impl Completed {
-    pub fn is_ok(&self) -> bool {
-        self.errno == 0
-    }
-
-    /// Return value of a call that returns a descriptor or an `int`.
-    pub fn ret_i32(&self) -> i32 {
-        self.rval[0].cast_signed()
-    }
-
-    /// Return value of a call that returns `ssize_t`; the kernel stores it across both slots.
-    pub fn ret_u64(&self) -> u64 {
-        (u64::from(self.rval[1]) << 32) | u64::from(self.rval[0])
-    }
-
-    pub fn arg(&self, index: usize) -> Option<u64> {
-        self.start.map(|(_, args)| args[index])
-    }
-
-    /// Argument `index` read as a C `int`, such as a descriptor.
-    pub fn arg_i32(&self, index: usize) -> Option<i32> {
-        self.arg(index).map(low_i32)
-    }
-
-    pub fn start_ts(&self) -> Option<u64> {
-        self.start.map(|(ts, _)| ts)
-    }
-
-    pub fn latency_ticks(&self) -> Option<u64> {
-        self.start_ts().map(|ts| self.end_ts.saturating_sub(ts))
-    }
-}
 
 #[derive(Debug)]
 struct Pending {
@@ -264,7 +172,7 @@ impl Pairer {
             && let Some((vnode, bytes)) = open.partial.take()
             && open.lookup.is_none()
         {
-            open.lookup = Lookup::parse(&bytes, self.format).map(|lookup| Lookup { vnode, ..lookup });
+            open.lookup = parse_lookup(&bytes, self.format).map(|lookup| Lookup { vnode, ..lookup });
         }
     }
 
@@ -278,12 +186,29 @@ impl Pairer {
     }
 }
 
+/// Parses the bytes of one lookup's records.
+fn parse_lookup(bytes: &[u8], format: PathRecords) -> Option<Lookup> {
+    let (path, truncated) = match (bytes.iter().position(|&b| b == 0), format) {
+        (Some(len), _) => (&bytes[..len], false),
+        (None, PathRecords::Whole) => (bytes, false),
+        (None, PathRecords::Tail) => {
+            let len = bytes.iter().rposition(|&b| b != b'>').map_or(0, |last| last + 1);
+            (&bytes[..len], len == TAIL_PATH_BYTES)
+        }
+    };
+    (!path.is_empty()).then(|| Lookup {
+        path: String::from_utf8_lossy(path).into_owned(),
+        truncated,
+        vnode: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sys::kdebug::KdBuf;
-    use crate::trace::decode::decode;
-    use crate::trace::synth::{Call, Synth};
+    use crate::trace::kdebug::KdBuf;
+    use crate::trace::kdebug::decode::decode;
+    use crate::trace::kdebug::synth::{Call, Synth};
 
     fn run(pairer: &mut Pairer, records: &[KdBuf]) -> Vec<Completed> {
         records

@@ -20,8 +20,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use super::codes::{NewFd, Role};
-use super::pairing::{Completed, Lookup};
+use super::call::{Completed, Lookup, NewFd, Role};
 use super::procs::{Described, ProcSource};
 use crate::model::{Endpoint, FdType, Proto, Provenance, Target};
 
@@ -901,7 +900,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::trace::codes::syscall;
+    use crate::trace::kdebug::codes::syscall;
     use crate::trace::procs::Snapshot;
 
     #[derive(Debug, Default)]

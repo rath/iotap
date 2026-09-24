@@ -596,9 +596,9 @@ mod tests {
     use crate::model::{Op, Provenance, Target};
     use crate::session::{Input, Process, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
-    use crate::trace::pairing::PathRecords;
+    use crate::trace::kdebug::pairing::PathRecords;
+    use crate::trace::kdebug::synth::Synth;
     use crate::trace::procs::Fixed;
-    use crate::trace::synth::Synth;
 
     fn event(time_ns: u64) -> IoEvent {
         IoEvent {

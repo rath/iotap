@@ -9,9 +9,9 @@ use iotap::model::{Endpoint, Proto, Target};
 use iotap::record::{Recorder, Recording};
 use iotap::session::{Collect, Filter, Input, Process, Session, SessionInfo};
 use iotap::sys::time::{ClockAnchor, Timebase};
-use iotap::trace::pairing::PathRecords;
+use iotap::trace::kdebug::pairing::PathRecords;
+use iotap::trace::kdebug::synth::{Call, Synth};
 use iotap::trace::procs::{Fixed, Snapshot};
-use iotap::trace::synth::{Call, Synth};
 
 const PID: i32 = 4242;
 

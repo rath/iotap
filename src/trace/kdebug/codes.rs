@@ -5,6 +5,7 @@
 //! syscall number as the code (`sys/syscall.h`).
 
 use crate::model::Op;
+use crate::trace::call::{NewFd, Role, Syscall};
 
 pub const CLASS_FSYSTEM: u8 = 3;
 pub const CLASS_BSD: u8 = 4;
@@ -42,58 +43,6 @@ pub fn syscall_debugid(number: u16, func: u32) -> u32 {
 /// Syscall number of a BSD syscall record, if it is one.
 pub fn syscall_number(debugid: u32) -> Option<u16> {
     (debugid & 0xffff_0000 == BSD_SYSCALL_PREFIX).then_some(((debugid >> 2) & 0x3fff) as u16)
-}
-
-/// Kind of descriptor a syscall returns when iotap cannot learn more from the trace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NewFd {
-    Kqueue,
-    Pshm,
-    Necp,
-    /// Resolved through libproc when first used.
-    Unknown,
-}
-
-/// The part a syscall plays in tracking descriptors and I/O. Argument indices refer to the
-/// four arguments recorded at syscall entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Role {
-    /// Transfers data through the descriptor in `fd_arg`; `len_arg` holds the requested size
-    /// when the call takes a single buffer.
-    Io {
-        op: Op,
-        fd_arg: usize,
-        len_arg: Option<usize>,
-    },
-    /// Opens the looked-up path and returns a descriptor; `dirfd_arg` is set for `*at` calls.
-    Open {
-        dirfd_arg: Option<usize>,
-    },
-    Close,
-    Dup,
-    Dup2,
-    Fcntl,
-    Socket,
-    Accept,
-    Connect,
-    Pipe,
-    NewFd(NewFd),
-    Chdir,
-    Fchdir,
-}
-
-impl Role {
-    /// True when the paths looked up during the call matter.
-    pub fn takes_path(self) -> bool {
-        matches!(self, Self::Open { .. } | Self::Chdir | Self::Connect)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Syscall {
-    pub number: u16,
-    pub name: &'static str,
-    pub role: Role,
 }
 
 const fn io(op: Op, fd_arg: usize, len_arg: Option<usize>) -> Role {

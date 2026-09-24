@@ -1,9 +1,9 @@
 //! Builds kernel trace records exactly as XNU emits them, so tests and fixtures can exercise the
 //! whole pipeline without root.
 
+use super::KdBuf;
 use super::codes::{self, FUNC_END, FUNC_START};
 use super::pairing::{PathRecords, TAIL_PATH_BYTES};
-use crate::sys::kdebug::KdBuf;
 
 /// Emits records with strictly increasing timestamps.
 #[derive(Debug)]

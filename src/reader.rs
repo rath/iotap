@@ -95,7 +95,7 @@ pub fn run(
 /// consumer is gone.
 fn drain(
     kd: &Kdebug,
-    buf: &mut Vec<crate::sys::kdebug::KdBuf>,
+    buf: &mut Vec<crate::trace::kdebug::KdBuf>,
     tx: &Sender<Input>,
 ) -> Result<Option<usize>, KdebugError> {
     let count = kd.read(buf)?;

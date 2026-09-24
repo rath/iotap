@@ -1,8 +1,6 @@
 //! Kernel record decoding and the state that turns records into I/O events.
 
-pub mod codes;
-pub mod decode;
+pub mod call;
 pub mod fdtable;
-pub mod pairing;
+pub mod kdebug;
 pub mod procs;
-pub mod synth;

@@ -30,9 +30,9 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
   the live terminal UI reads the host clock for its elapsed time and its current second, and its
   details panel reads a file's metadata (`lstat`) as it is now.
 - Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams built
-  with `trace::synth`, the TUI by rendering into ratatui's `TestBackend`. After changing anything
-  under `src/sys/`, `src/reader.rs`, the syscall table or `csrc/`, run the root-only checks in
-  README.md ("Checking against a live kernel") and say which ones you ran.
+  with `trace::kdebug::synth`, the TUI by rendering into ratatui's `TestBackend`. After changing
+  anything under `src/sys/`, `src/reader.rs`, the syscall table or `csrc/`, run the root-only
+  checks in README.md ("Checking against a live kernel") and say which ones you ran.
 
 ## Module map
 
@@ -43,12 +43,14 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/app.rs` | Wiring: root check, kdebug setup, reader thread, output modes, signals, replay |
 | `src/reader.rs` | Reader thread: drains kdebug, watches processes for exit, exec and new names |
 | `src/session.rs` | Deterministic core: records to I/O events, notices, statistics and the summary |
-| `src/trace/codes.rs` | kdebug event IDs and the syscall table |
-| `src/trace/decode.rs` | Raw `kd_buf` records to typed events |
-| `src/trace/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |
+| `src/trace/call.rs` | A syscall that returned, whatever format its records came in: its role, arguments, result and looked-up path |
+| `src/trace/kdebug/mod.rs` | The kdebug record format: the `kd_buf` record |
+| `src/trace/kdebug/codes.rs` | kdebug event IDs and the syscall table |
+| `src/trace/kdebug/decode.rs` | Raw `kd_buf` records to typed events |
+| `src/trace/kdebug/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |
+| `src/trace/kdebug/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
 | `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks libproc's answers against the trace |
 | `src/trace/procs.rs` | `ProcSource`: libproc when live, fixed answers in tests |
-| `src/trace/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
 | `src/stats.rs` | Per-target and per-second aggregation |
 | `src/record.rs` | `--record` and `--replay` file format |
 | `src/output/` | Text and JSON Lines output, shared formatting |
