@@ -67,7 +67,10 @@ pub fn draw(frame: &mut Frame<'_>, view: &mut View, shown: &Shown<'_>) {
 }
 
 fn draw_title(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
-    let elapsed = clock(shown.now_ns.saturating_sub(shown.start_ns));
+    let mut elapsed = clock(shown.now_ns.saturating_sub(shown.start_ns));
+    if shown.reset {
+        elapsed.push_str(" since reset");
+    }
     let [left, right] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(width(&elapsed) + 1)]).areas(area);
     let mut spans = vec![Span::styled(" iotap ", TITLE), Span::raw(" ")];
@@ -424,7 +427,7 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
     let pause = if shown.paused { "p resume" } else { "p pause" };
     let hints = Line::styled(
-        format!("q quit  1-3 tabs  s sort  {pause}  ↑↓ PgUp PgDn scroll "),
+        format!("q quit  1-3 tabs  s sort  {pause}  r reset  ↑↓ PgUp PgDn scroll "),
         DIM,
     )
     .right_aligned();
@@ -741,6 +744,26 @@ mod tests {
         assert!(find(&lines, "every traced process has exited.").contains("Press q for the summary."));
         assert!(find(&lines, "sort: bytes").ends_with("PAUSED"));
         assert!(lines.last().unwrap().contains("p resume"));
+    }
+
+    #[test]
+    fn reset_shows_an_empty_view_timed_from_the_reset() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (session, mut app) = traced();
+        app.key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &session,
+            START_NS + 2_000_000_000,
+        );
+        let lines = render(&session, &mut app, 100, 20, START_NS + 5_500_000_000);
+        assert!(lines[0].ends_with("0:00:03 since reset"), "{}", lines[0]);
+        let total: Vec<&str> = find(&lines, " total").split_whitespace().collect();
+        assert_eq!(total, ["total", "0", "B", "0", "B", "0", "B", "0", "B"]);
+        assert!(find(&lines, "1 Files (0)").contains("3 Events (0)"));
+        assert!(find(&lines, "No file I/O yet.").starts_with(' '));
+        let footer = lines.last().unwrap();
+        assert!(footer.starts_with(" view reset at "), "{footer}");
+        assert!(footer.contains("r reset"), "{footer}");
     }
 
     #[test]

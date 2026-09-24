@@ -143,7 +143,7 @@ download:
         0 B       0   14.1 MiB    3601      0  <1s /Users/me/big.iso
         0 B       0       20 B       1      0  <1s /dev/ttys004
 
- 4242 (curl) exited                      q quit  1-3 tabs  s sort  p pause  ↑↓ PgUp PgDn scroll
+ 4242 (curl) exited             q quit  1-3 tabs  s sort  p pause  r reset  ↑↓ PgUp PgDn scroll
 ```
 
 | Key | Action |
@@ -151,6 +151,7 @@ download:
 | `1` `2` `3`, Tab, Left, Right | Switch tabs |
 | `s` | Sort by bytes, read, write, calls or most recent |
 | `p` or Space | Pause the view; tracing goes on |
+| `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
 | Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | Scroll; End follows new events again |
 | `q`, Esc, Ctrl-C | Quit and print the summary |
 

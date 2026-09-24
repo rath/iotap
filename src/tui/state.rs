@@ -179,6 +179,18 @@ struct Frozen {
     now_ns: u64,
 }
 
+impl Frozen {
+    fn of(model: &Model, session: &Session, now_ns: u64) -> Self {
+        Self {
+            stats: model.stats.clone(),
+            events: model.events.clone(),
+            processes: session.processes(),
+            lost_events: model.lost_events(session),
+            now_ns,
+        }
+    }
+}
+
 /// What one frame shows.
 #[derive(Debug)]
 pub struct Shown<'a> {
@@ -186,9 +198,11 @@ pub struct Shown<'a> {
     pub events: &'a Ring,
     pub processes: Cow<'a, [ProcessStatus]>,
     pub lost_events: u64,
-    /// Unix nanoseconds now and when tracing started.
+    /// Unix nanoseconds now and when tracing started, or when the view was last reset.
     pub now_ns: u64,
     pub start_ns: u64,
+    /// True once the view has been reset.
+    pub reset: bool,
     pub filter: Filter,
     pub paused: bool,
     /// The latest notice.
@@ -197,10 +211,17 @@ pub struct Shown<'a> {
     pub ended: Option<&'a str>,
 }
 
-/// Where the screen's data comes from: the session, or a copy while paused.
+/// Where the screen's data comes from: what arrived since the view was last reset, or a copy
+/// while paused. The session keeps its own statistics for the summary, which a reset leaves
+/// alone.
 #[derive(Debug)]
 pub struct Model {
+    stats: Stats,
     events: Ring,
+    /// Records the kernel had dropped when the view was last reset.
+    lost_before: u64,
+    /// Unix nanoseconds of the last reset.
+    reset_ns: Option<u64>,
     frozen: Option<Frozen>,
     status: Option<String>,
     ended: Option<String>,
@@ -210,7 +231,10 @@ pub struct Model {
 impl Default for Model {
     fn default() -> Self {
         Self {
+            stats: Stats::default(),
             events: Ring::new(EVENT_CAPACITY),
+            lost_before: 0,
+            reset_ns: None,
             frozen: None,
             status: None,
             ended: None,
@@ -230,10 +254,10 @@ impl Model {
                 frozen.now_ns,
             ),
             None => (
-                session.stats(),
+                &self.stats,
                 &self.events,
                 Cow::Owned(session.processes()),
-                session.lost_events(),
+                self.lost_events(session),
                 now_ns,
             ),
         };
@@ -243,7 +267,8 @@ impl Model {
             processes,
             lost_events,
             now_ns,
-            start_ns: session.info().anchor.unix_nanos,
+            start_ns: self.reset_ns.unwrap_or(session.info().anchor.unix_nanos),
+            reset: self.reset_ns.is_some(),
             filter: session.filter(),
             paused: self.frozen.is_some(),
             status: self.status.as_deref(),
@@ -251,17 +276,30 @@ impl Model {
         }
     }
 
+    /// Records the kernel dropped since the view was last reset.
+    fn lost_events(&self, session: &Session) -> u64 {
+        session.lost_events().saturating_sub(self.lost_before)
+    }
+
     fn toggle_pause(&mut self, session: &Session, now_ns: u64) {
         self.frozen = match self.frozen.take() {
             Some(_) => None,
-            None => Some(Frozen {
-                stats: session.stats().clone(),
-                events: self.events.clone(),
-                processes: session.processes(),
-                lost_events: session.lost_events(),
-                now_ns,
-            }),
+            None => Some(Frozen::of(self, session, now_ns)),
         };
+    }
+
+    /// Forgets the statistics and events shown so far; a paused view stays paused, now empty.
+    fn reset(&mut self, session: &Session, now_ns: u64) {
+        self.stats = Stats::default();
+        self.events = Ring::new(EVENT_CAPACITY);
+        self.lost_before = session.lost_events();
+        self.reset_ns = Some(now_ns);
+        if self.frozen.is_some() {
+            self.frozen = Some(Frozen::of(self, session, now_ns));
+        }
+        let mut time = self.clock.format(now_ns);
+        time.truncate(8);
+        self.status = Some(format!("view reset at {time}"));
     }
 }
 
@@ -309,6 +347,11 @@ impl App {
             KeyCode::BackTab | KeyCode::Left => view.tab = view.tab.previous(),
             KeyCode::Char('s') => view.sort = view.sort.next(),
             KeyCode::Char('p' | ' ') => self.model.toggle_pause(session, now_ns),
+            KeyCode::Char('r') => {
+                self.model.reset(session, now_ns);
+                view.offsets = [0; 2];
+                view.bottom = None;
+            }
             KeyCode::Up | KeyCode::Char('k') => view.scroll(Motion::Up(1)),
             KeyCode::Down | KeyCode::Char('j') => view.scroll(Motion::Down(1)),
             KeyCode::PageUp => view.scroll(Motion::Up(page)),
@@ -322,6 +365,7 @@ impl App {
 
 impl Sink for App {
     fn event(&mut self, event: &IoEvent) -> io::Result<()> {
+        self.model.stats.record(event);
         self.model.events.push(event.clone());
         Ok(())
     }
@@ -489,6 +533,77 @@ mod tests {
             0,
         );
         assert!(app.wants_quit());
+    }
+
+    #[test]
+    fn reset_empties_the_view_but_not_the_session() {
+        let (mut session, mut src) = session();
+        let mut app = App::default();
+        let mut synth = Synth::new(2_000, 10);
+        let mut records = synth.io(1, 7, 4, 1, 5, 5);
+        records.push(synth.lost_events());
+        session
+            .handle(&Input::Records(records), &mut src, &mut app)
+            .unwrap();
+        app.view.tab = Tab::Events;
+        app.view.bottom = Some(0);
+        app.view.offsets = [3, 4];
+        assert_eq!(app.model.shown(&session, 0).lost_events, 1);
+
+        app.key(press(KeyCode::Char('r')), &session, 5_000_000_000);
+        let shown = app.model.shown(&session, 7_000_000_000);
+        assert_eq!(
+            (shown.events.len(), shown.stats.totals().events, shown.lost_events),
+            (0, 0, 0)
+        );
+        assert!(shown.reset);
+        assert_eq!(shown.start_ns, 5_000_000_000);
+        assert!(shown.status.is_some_and(|s| s.starts_with("view reset at ")));
+        assert_eq!((app.view.bottom, app.view.offsets), (None, [0, 0]));
+        assert_eq!(
+            session.stats().totals().events,
+            1,
+            "the summary keeps every event"
+        );
+
+        let records = synth.io(1, 7, 3, 1, 8, 8);
+        session
+            .handle(&Input::Records(records), &mut src, &mut app)
+            .unwrap();
+        let shown = app.model.shown(&session, 0);
+        assert_eq!((shown.events.len(), shown.stats.totals().events), (1, 1));
+        assert_eq!(shown.events.range(0, 1).next().unwrap().bytes, Some(8));
+        assert_eq!(session.stats().totals().events, 2);
+    }
+
+    #[test]
+    fn reset_while_paused_stays_paused_and_empty() {
+        let (mut session, mut src) = session();
+        let mut app = App::default();
+        let mut synth = Synth::new(2_000, 10);
+        let records = synth.io(1, 7, 4, 1, 5, 5);
+        session
+            .handle(&Input::Records(records), &mut src, &mut app)
+            .unwrap();
+        app.key(press(KeyCode::Char('p')), &session, 10);
+        app.key(press(KeyCode::Char('r')), &session, 20);
+        let records = synth.io(1, 7, 4, 1, 6, 6);
+        session
+            .handle(&Input::Records(records), &mut src, &mut app)
+            .unwrap();
+        let shown = app.model.shown(&session, 30);
+        assert!(shown.paused);
+        assert_eq!(
+            (shown.now_ns, shown.events.len(), shown.stats.totals().events),
+            (20, 0, 0)
+        );
+        app.key(press(KeyCode::Char('p')), &session, 30);
+        let shown = app.model.shown(&session, 30);
+        assert_eq!(
+            (shown.events.len(), shown.stats.totals().events),
+            (1, 1),
+            "what arrived while paused after the reset shows on resume"
+        );
     }
 
     #[test]
