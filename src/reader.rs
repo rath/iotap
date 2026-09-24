@@ -188,7 +188,11 @@ impl Watch {
                 // trace flag; tracing it again brings it back.
                 && tracer.add_pid(process.pid).is_ok();
             if !alive {
-                inputs.push(Input::Exited { pid: process.pid });
+                // Every record of the process was stamped before now.
+                inputs.push(Input::Exited {
+                    pid: process.pid,
+                    ticks: time::now_ticks(),
+                });
                 return false;
             }
             let exe = proc::exe_path(process.pid);
@@ -393,6 +397,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let me = Tracked::probe(i32::try_from(std::process::id()).unwrap()).unwrap();
         let mut tracer = Scripted::new([complete(1), complete(2)], Some(&stop));
+        let before = time::now_ticks();
         let (tx, rx) = mpsc::channel();
         run(
             &mut tracer,
@@ -403,7 +408,11 @@ mod tests {
         )
         .unwrap();
         let got = sent(&rx);
-        assert_eq!(got.first(), Some(&Input::Exited { pid: i32::MAX }));
+        // It was gone when the reader looked, which was after `before`.
+        assert!(
+            matches!(got.first(), Some(&Input::Exited { pid: i32::MAX, ticks }) if ticks >= before),
+            "{got:?}"
+        );
         assert!(matches!(got.last(), Some(Input::Stopped { .. })), "{got:?}");
         // Every poll traces the running process again, in case it ran exec.
         assert!(tracer.added.len() >= 2, "{:?}", tracer.added);
@@ -422,7 +431,10 @@ mod tests {
         run(&mut tracer, vec![gone()], &config(Duration::ZERO), &tx, &stop).unwrap();
         let got = sent(&rx);
         assert!(
-            matches!(&got[..], [Input::Exited { pid: i32::MAX }, Input::Stopped { .. }]),
+            matches!(
+                &got[..],
+                [Input::Exited { pid: i32::MAX, .. }, Input::Stopped { .. }]
+            ),
             "{got:?}"
         );
         assert!(

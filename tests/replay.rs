@@ -98,7 +98,10 @@ fn write_recording(path: &Path) {
     let mut sink = Collect::default();
     for input in [
         Input::Records(Records::Kdebug(records)),
-        Input::Exited { pid: PID },
+        Input::Exited {
+            pid: PID,
+            ticks: synth.now(),
+        },
         Input::Stopped { ticks: stop },
     ] {
         recording.input(&input);

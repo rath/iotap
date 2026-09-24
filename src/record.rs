@@ -51,8 +51,12 @@ struct ExecFrame {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PidFrame {
+struct ExitedFrame {
     pid: i32,
+    /// Absent from recordings made before exits carried a time; 0 applies the exit at once,
+    /// as iotap did then.
+    #[serde(default)]
+    ticks: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,7 +136,13 @@ impl<W: Write> Recorder<W> {
                     path: path.clone(),
                 },
             ),
-            Input::Exited { pid } => self.json(TAG_EXITED, &PidFrame { pid: *pid }),
+            Input::Exited { pid, ticks } => self.json(
+                TAG_EXITED,
+                &ExitedFrame {
+                    pid: *pid,
+                    ticks: *ticks,
+                },
+            ),
             Input::Stopped { ticks } => self.json(TAG_STOPPED, &StoppedFrame { ticks: *ticks }),
             Input::Watermark { ticks } => self.json(TAG_WATERMARK, &WatermarkFrame { ticks: *ticks }),
         }
@@ -350,9 +360,13 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
                     path: frame.path,
                 });
             }
-            TAG_EXITED => inputs.push(Input::Exited {
-                pid: json::<PidFrame>(&payload).map_err(corrupt)?.pid,
-            }),
+            TAG_EXITED => {
+                let frame: ExitedFrame = json(&payload).map_err(corrupt)?;
+                inputs.push(Input::Exited {
+                    pid: frame.pid,
+                    ticks: frame.ticks,
+                });
+            }
             TAG_STOPPED => {
                 inputs.push(Input::Stopped {
                     ticks: json::<StoppedFrame>(&payload).map_err(corrupt)?.ticks,
@@ -493,11 +507,14 @@ mod tests {
         records.extend(synth.io(2, 300, 133, 5, 517, 517));
         records.extend(synth.io(2, 300, 29, 5, 65_536, 1_256));
         records.extend(synth.io(1, 300, 4, 4, 1_256, 1_256));
-        let stop = synth.now() + 24_000;
+        let gone = synth.now();
         let inputs = vec![
             Input::Records(Records::Kdebug(records)),
-            Input::Exited { pid: 300 },
-            Input::Stopped { ticks: stop },
+            Input::Exited {
+                pid: 300,
+                ticks: gone,
+            },
+            Input::Stopped { ticks: gone + 24_000 },
         ];
         (info, procs, inputs)
     }
@@ -561,6 +578,26 @@ mod tests {
         assert_eq!(replay.answers.describe(300, 5), answer);
         assert_eq!(answer.at, 77_000);
         assert_eq!(replay.answers.describe(300, 5), Described::settled(None));
+    }
+
+    #[test]
+    fn exits_keep_their_time_and_older_ones_count_at_once() {
+        let (info, _, _) = fixture();
+        let mut recorder = Recorder::new(Vec::new(), &info).unwrap();
+        let exit = Input::Exited {
+            pid: 300,
+            ticks: 77_000,
+        };
+        recorder.input(&exit).unwrap();
+        let mut bytes = recorder.finish().unwrap();
+        // An exit frame from before exits carried a time.
+        let old = br#"{"pid":301}"#;
+        bytes.push(TAG_EXITED);
+        bytes.extend_from_slice(&u32::try_from(old.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(old);
+
+        let replay = parse(bytes.as_slice()).unwrap();
+        assert_eq!(replay.inputs, [exit, Input::Exited { pid: 301, ticks: 0 }]);
     }
 
     #[test]

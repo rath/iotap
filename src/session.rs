@@ -60,9 +60,11 @@ pub enum Input {
         pid: i32,
         path: String,
     },
-    /// A traced process is gone.
+    /// The reader found a traced process gone at trace time `ticks`. Records it made before
+    /// exiting may still be on their way, so the exit counts once the trace reaches `ticks`.
     Exited {
         pid: i32,
+        ticks: u64,
     },
     /// Tracing stopped at this mach time.
     Stopped {
@@ -209,6 +211,9 @@ pub struct Session {
     some_socket: Arc<Target>,
     /// Events and notices waiting, in order, for the first of them to be settled.
     held: VecDeque<Held>,
+    /// Processes the reader found gone, by the trace time it looked, waiting for the trace to
+    /// get there.
+    exits: VecDeque<(u64, i32)>,
 }
 
 impl Session {
@@ -227,6 +232,7 @@ impl Session {
             unknown: Arc::new(Target::Unknown),
             some_socket: Arc::new(Target::Socket(Endpoint::unresolved(Proto::Other))),
             held: VecDeque::new(),
+            exits: VecDeque::new(),
             info,
         };
         for process in session.info.processes.clone() {
@@ -336,13 +342,17 @@ impl Session {
                 };
                 self.hold(Held::Notice(exec), sink)?;
             }
-            Input::Exited { pid } => self.exited(*pid, sink)?,
+            Input::Exited { pid, ticks } => {
+                self.exits.push_back((*ticks, *pid));
+                self.reach(self.last_ticks, sink)?;
+            }
             Input::Stopped { ticks } => {
                 self.stopped_ticks = Some((*ticks).max(self.last_ticks));
                 self.finish(sink)?;
             }
             Input::Watermark { ticks } => {
                 self.last_ticks = self.last_ticks.max(*ticks);
+                self.reach(*ticks, sink)?;
                 self.fds.advance(*ticks);
                 self.settle(sink)?;
             }
@@ -350,9 +360,10 @@ impl Session {
         Ok(())
     }
 
-    /// Settles every answer still unconfirmed and emits what waited for it. Call it when no
-    /// more input will come; a `Stopped` input does it too.
+    /// Settles every answer still unconfirmed and emits what waited for it, exits included.
+    /// Call it when no more input will come; a `Stopped` input does it too.
     pub fn finish(&mut self, sink: &mut dyn Sink) -> io::Result<()> {
+        self.reach(u64::MAX, sink)?;
         self.fds.advance(u64::MAX);
         self.settle(sink)
     }
@@ -386,6 +397,8 @@ impl Session {
 
     /// Applies what one record tells.
     fn step(&mut self, step: Step, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
+        // A process found gone before this record made no more calls after it.
+        self.reach(step.ts, sink)?;
         self.last_ticks = self.last_ticks.max(step.ts);
         match step.traced {
             Some(Traced::Call(done)) => self.completed(&done, src, sink)?,
@@ -536,6 +549,18 @@ impl Session {
             provenance,
         };
         (event, answer)
+    }
+
+    /// Applies the exits the reader saw by trace time `ticks`, which the trace has reached.
+    fn reach(&mut self, ticks: u64, sink: &mut dyn Sink) -> io::Result<()> {
+        while let Some(&(seen, pid)) = self.exits.front() {
+            if seen > ticks {
+                break;
+            }
+            self.exits.pop_front();
+            self.exited(pid, sink)?;
+        }
+        Ok(())
     }
 
     fn exited(&mut self, pid: i32, sink: &mut dyn Sink) -> io::Result<()> {
@@ -887,7 +912,7 @@ mod tests {
             )
             .unwrap();
         session
-            .handle(&Input::Exited { pid: PID }, &mut src, &mut sink)
+            .handle(&Input::Exited { pid: PID, ticks: 0 }, &mut src, &mut sink)
             .unwrap();
         assert_eq!(
             sink.notices,
@@ -907,6 +932,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.summary().duration_ns, 5_000_000_000);
+    }
+
+    #[test]
+    fn an_exit_the_reader_saw_waits_for_the_trace_to_reach_it() {
+        let mut src = procs();
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        let mut sink = Collect::default();
+        // The reader looked at 2_500 and found the process gone; its last write, stamped
+        // earlier, arrives after that.
+        session
+            .handle(
+                &Input::Exited {
+                    pid: PID,
+                    ticks: 2_500,
+                },
+                &mut src,
+                &mut sink,
+            )
+            .unwrap();
+        assert!(!session.all_exited());
+        let write = synth.io(7, PID, 4, 1, 5, 5);
+        session
+            .handle(&Input::Records(Records::Kdebug(write)), &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(sink.events.len(), 1);
+        assert_eq!(
+            *sink.events[0].target,
+            Target::File {
+                path: "/dev/ttys001".into()
+            },
+            "the descriptor table still held the process"
+        );
+        assert!(sink.notices.is_empty());
+        session
+            .handle(&Input::Watermark { ticks: 2_499 }, &mut src, &mut sink)
+            .unwrap();
+        assert!(sink.notices.is_empty());
+        session
+            .handle(&Input::Watermark { ticks: 2_500 }, &mut src, &mut sink)
+            .unwrap();
+        assert!(matches!(
+            sink.notices[..],
+            [Notice::Exited(Process { pid: PID, .. })]
+        ));
+        assert!(session.all_exited());
+
+        // Once no more input comes, every exit counts.
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        session
+            .handle(
+                &Input::Exited {
+                    pid: PID,
+                    ticks: 9_000,
+                },
+                &mut src,
+                &mut Discard,
+            )
+            .unwrap();
+        session
+            .handle(&Input::Stopped { ticks: 3_000 }, &mut src, &mut Discard)
+            .unwrap();
+        assert!(session.all_exited());
     }
 
     /// Linux records whose numbers mean the same on any host.
@@ -1067,7 +1155,7 @@ mod tests {
         assert_eq!(sink.notices[0], Notice::Attached(child));
         assert!(!session.all_exited());
         session
-            .handle(&Input::Exited { pid: 777 }, &mut src, &mut Discard)
+            .handle(&Input::Exited { pid: 777, ticks: 0 }, &mut src, &mut Discard)
             .unwrap();
         let status = |pid, name: &str, alive| ProcessStatus {
             pid,
