@@ -24,7 +24,10 @@ const TITLE: Style = Style::new()
     .add_modifier(Modifier::BOLD)
     .add_modifier(Modifier::REVERSED);
 const SELECTED_TAB: Style = TITLE;
-const SELECTED_ROW: Style = Style::new().add_modifier(Modifier::REVERSED);
+/// The selected row: bold, with a mark in the gutter to its left.
+const SELECTED_ROW: Style = BOLD;
+const SELECTED_MARK: &str = "▌";
+const SELECTED_MARK_STYLE: Style = Style::new().fg(Color::Cyan);
 const WARNING: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 const BANNER: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
 const BADGE: Style = Style::new()
@@ -56,10 +59,11 @@ pub fn draw(frame: &mut Frame<'_>, view: &mut View, shown: &Shown<'_>) {
     draw_title(frame, title, shown);
     draw_rates(frame, rates, shown);
     frame.render_widget(Paragraph::new(alerts), alert_area);
-    // Tables start one column in, like the lines above them.
-    let [_, body] = Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+    // Tables start one column in, like the lines above them; that gutter marks the selected
+    // row.
+    let [gutter, body] = Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
     let position = match view.tab {
-        Tab::Files | Tab::Network => draw_table_tab(frame, body, view, shown),
+        Tab::Files | Tab::Network => draw_table_tab(frame, gutter, body, view, shown),
         Tab::Events => draw_events(frame, body, view, shown),
     };
     draw_tabs(frame, tabs, view, shown, position);
@@ -210,24 +214,31 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, 
 
 /// Draws the Files or Network table and, when asked for, the details of its selected row
 /// below it; returns which rows are visible, when not all fit.
-fn draw_table_tab(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown<'_>) -> String {
+fn draw_table_tab(
+    frame: &mut Frame<'_>,
+    gutter: Rect,
+    area: Rect,
+    view: &mut View,
+    shown: &Shown<'_>,
+) -> String {
     let tab = view.tab;
     let stats = shown.stats;
     let selected = view.selected_rank(stats);
-    let lines = if view.details {
-        let row = stats.page(|category| tab.lists(category), view.sort, selected, 1);
-        row.first()
-            .map(|&(key, row)| details::lines(key, row, usize::from(area.width), view, shown))
-    } else {
-        None
+    let lines = match selected {
+        Some(rank) if view.details => {
+            let row = stats.page(|category| tab.lists(category), view.sort, rank, 1);
+            row.first()
+                .map(|&(key, row)| details::lines(key, row, usize::from(area.width), view, shown))
+        }
+        _ => None,
     };
     let Some(lines) = lines else {
-        return draw_targets(frame, area, view, shown, selected);
+        return draw_targets(frame, gutter, area, view, shown, selected);
     };
     // The table keeps its header and a few rows; the panel gives up its last lines first.
     let height = u16::try_from(lines.len() + 1).unwrap_or(u16::MAX);
     let [table, panel] = Layout::vertical([Constraint::Min(4), Constraint::Length(height)]).areas(area);
-    let position = draw_targets(frame, table, view, shown, selected);
+    let position = draw_targets(frame, gutter, table, view, shown, selected);
     let block = Block::new()
         .borders(Borders::TOP)
         .border_style(DIM)
@@ -236,14 +247,16 @@ fn draw_table_tab(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Sh
     position
 }
 
-/// Draws the Files or Network table, scrolled so the row ranked `selected` shows; returns
-/// which rows are visible, when not all fit.
+/// Draws the Files or Network table, scrolled so the row ranked `selected` shows and marked in
+/// `gutter`, or showing the top rows when none is selected; returns which rows are visible,
+/// when not all fit.
 fn draw_targets(
     frame: &mut Frame<'_>,
+    gutter: Rect,
     area: Rect,
     view: &mut View,
     shown: &Shown<'_>,
-    selected: usize,
+    selected: Option<usize>,
 ) -> String {
     let tab = view.tab;
     let files = tab == Tab::Files;
@@ -257,10 +270,11 @@ fn draw_targets(
     let page = usize::from(area.height.saturating_sub(1));
     let index = tab.index();
     let mut offset = view.offsets[index].min(total.saturating_sub(page));
-    if selected < offset {
-        offset = selected;
-    } else if page > 0 && selected >= offset + page {
-        offset = selected + 1 - page;
+    match selected {
+        Some(rank) if rank < offset => offset = rank,
+        Some(rank) if page > 0 && rank >= offset + page => offset = rank + 1 - page,
+        Some(_) => {}
+        None => offset = 0,
     }
     view.offsets[index] = offset;
     view.drawn = Drawn {
@@ -308,7 +322,7 @@ fn draw_targets(
     .style(BOLD);
     let body = rows.iter().enumerate().map(|(i, (key, row))| {
         let drawn = target_row(key, row, shown.now_ns, target_width, home);
-        if offset + i == selected {
+        if selected == Some(offset + i) {
             drawn.style(SELECTED_ROW)
         } else {
             drawn
@@ -318,6 +332,17 @@ fn draw_targets(
         Table::new(body, widths).header(header).column_spacing(spacing),
         area,
     );
+    // The mark goes in the gutter beside the selected row; rows start below the header.
+    let visible = selected
+        .and_then(|rank| rank.checked_sub(offset))
+        .filter(|&i| i < rows.len());
+    if let Some(i) = visible.and_then(|i| u16::try_from(i).ok()) {
+        let y = area.y.saturating_add(1).saturating_add(i);
+        if y < area.bottom() {
+            let mark = Paragraph::new(Span::styled(SELECTED_MARK, SELECTED_MARK_STYLE));
+            frame.render_widget(mark, Rect::new(gutter.x, y, gutter.width.min(1), 1));
+        }
+    }
     if total > page {
         format!(
             "{}-{} of {}",
@@ -481,10 +506,11 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
     }
     hints.push(if shown.paused { "p resume" } else { "p pause" });
     hints.push("r reset");
-    hints.extend(match (table, view.details) {
-        (true, false) => ["enter details", "y copy"].as_slice(),
-        (true, true) => &["esc close", "y copy"],
-        (false, _) => &["↑↓ scroll"],
+    hints.extend(match (table, view.has_selection(), view.details) {
+        (false, ..) => ["↑↓ scroll"].as_slice(),
+        (true, false, _) => &["↑↓ select", "enter details"],
+        (true, true, false) => &["enter details", "y copy", "esc deselect"],
+        (true, true, true) => &["y copy", "esc close"],
     });
     let hints = Line::styled(format!("{} ", hints.join("  ")), DIM).right_aligned();
     let [left, right] =
@@ -723,10 +749,14 @@ mod tests {
         (0..buffer.area.height).map(|y| line(&buffer, y)).collect()
     }
 
-    /// Lines highlighted from the tables' left edge to the right edge of the screen.
-    fn highlighted(buffer: &Buffer) -> Vec<String> {
+    /// Lines marked as selected in the gutter; each must also be bold across the table.
+    fn marked(buffer: &Buffer) -> Vec<String> {
         (0..buffer.area.height)
-            .filter(|&y| (1..buffer.area.width).all(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED)))
+            .filter(|&y| buffer[(0, y)].symbol() == SELECTED_MARK)
+            .inspect(|&y| {
+                let bold = (1..buffer.area.width).all(|x| buffer[(x, y)].modifier.contains(Modifier::BOLD));
+                assert!(bold, "a marked row is bold: {}", line(buffer, y));
+            })
             .map(|y| line(buffer, y))
             .collect()
     }
@@ -815,19 +845,32 @@ mod tests {
     }
 
     #[test]
-    fn the_selected_row_is_highlighted_and_kept_in_view() {
+    fn the_selected_row_is_marked_and_kept_in_view() {
         use ratatui::crossterm::event::KeyCode;
         let (session, mut app) = traced();
         let buffer = render_buffer(&session, &mut app, 100, 20, START_NS);
-        let rows = highlighted(&buffer);
+        let rows = marked(&buffer);
+        assert!(rows.is_empty(), "nothing is selected at first: {rows:?}");
+        let lines: Vec<String> = (0..buffer.area.height).map(|y| line(&buffer, y)).collect();
+        assert!(lines.last().unwrap().ends_with("↑↓ select  enter details"));
+        press(&mut app, &session, KeyCode::Down);
+        let buffer = render_buffer(&session, &mut app, 100, 20, START_NS);
+        let rows = marked(&buffer);
         assert!(
             rows.len() == 1 && rows[0].ends_with(" /Users/me/page.html"),
-            "the top row is selected at first: {rows:?}"
+            "the first key selects the top row: {rows:?}"
+        );
+        let lines: Vec<String> = (0..buffer.area.height).map(|y| line(&buffer, y)).collect();
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .ends_with("enter details  y copy  esc deselect")
         );
         press(&mut app, &session, KeyCode::Down);
         // One table row fits below the header.
         let buffer = render_buffer(&session, &mut app, 100, 8, START_NS);
-        let rows = highlighted(&buffer);
+        let rows = marked(&buffer);
         assert!(rows.len() == 1 && rows[0].ends_with(" /dev/ttys004"), "{rows:?}");
         let lines: Vec<String> = (0..buffer.area.height).map(|y| line(&buffer, y)).collect();
         assert!(
@@ -836,14 +879,22 @@ mod tests {
             lines.join("\n")
         );
         press(&mut app, &session, KeyCode::Char('2'));
-        let rows = highlighted(&render_buffer(&session, &mut app, 100, 20, START_NS));
+        let rows = marked(&render_buffer(&session, &mut app, 100, 20, START_NS));
+        assert!(rows.is_empty(), "each table has its own selection: {rows:?}");
+        press(&mut app, &session, KeyCode::End);
+        let rows = marked(&render_buffer(&session, &mut app, 100, 20, START_NS));
         assert!(
             rows.len() == 1 && rows[0].ends_with(" tcp 93.184.216.34:443"),
-            "each table has its own selection: {rows:?}"
+            "{rows:?}"
         );
         press(&mut app, &session, KeyCode::Char('3'));
-        let rows = highlighted(&render_buffer(&session, &mut app, 100, 20, START_NS));
+        let rows = marked(&render_buffer(&session, &mut app, 100, 20, START_NS));
         assert!(rows.is_empty(), "events are not selected: {rows:?}");
+        press(&mut app, &session, KeyCode::Char('1'));
+        press(&mut app, &session, KeyCode::Esc);
+        let buffer = render_buffer(&session, &mut app, 100, 20, START_NS);
+        assert!(marked(&buffer).is_empty(), "Esc lets go of the selection");
+        assert!(!app.wants_quit());
     }
 
     #[test]
@@ -876,6 +927,12 @@ mod tests {
 
         press(&mut app, &session, KeyCode::Char('2'));
         let lines = render(&session, &mut app, 100, 30, now);
+        assert!(
+            !lines.iter().any(|line| line.contains("details ─")),
+            "no row is selected there yet"
+        );
+        press(&mut app, &session, KeyCode::Down);
+        let lines = render(&session, &mut app, 100, 30, now);
         assert!(lines.iter().any(|line| line == " tcp 93.184.216.34:443"));
         assert!(find(&lines, " received ").contains(" sent 517 B in 1 call   failed 1"));
         assert!(find(&lines, " local ").ends_with(" 192.168.1.20:61000"));
@@ -901,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_closes_the_details_before_quitting() {
+    fn esc_backs_out_before_quitting() {
         use ratatui::crossterm::event::KeyCode;
         let (session, mut app) = traced();
         press(&mut app, &session, KeyCode::Char('3'));
@@ -909,9 +966,21 @@ mod tests {
         assert!(!app.view.details, "Enter does nothing in the Events tab");
         press(&mut app, &session, KeyCode::Char('1'));
         press(&mut app, &session, KeyCode::Enter);
-        assert!(app.view.details);
+        assert!(
+            app.view.details && app.view.has_selection(),
+            "Enter selects the top row"
+        );
         press(&mut app, &session, KeyCode::Esc);
-        assert!(!app.view.details && !app.wants_quit());
+        assert!(!app.view.details && app.view.has_selection() && !app.wants_quit());
+        press(&mut app, &session, KeyCode::Enter);
+        assert!(
+            app.view.details,
+            "Enter on a selected row shows its details again"
+        );
+        press(&mut app, &session, KeyCode::Enter);
+        assert!(!app.view.details, "and hides them");
+        press(&mut app, &session, KeyCode::Esc);
+        assert!(!app.view.has_selection() && !app.wants_quit());
         press(&mut app, &session, KeyCode::Esc);
         assert!(app.wants_quit());
     }

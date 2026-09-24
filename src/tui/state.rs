@@ -142,8 +142,8 @@ pub struct View {
     pub sort: SortBy,
     /// First visible row of the Files and Network tables.
     pub offsets: [usize; 2],
-    /// Selected target of the Files and Network tables. The selection stays with its target
-    /// as the order changes; `None` selects the top row, whichever target that is.
+    /// Selected target of the Files and Network tables, which stays with its target as the
+    /// order changes. Without one, a table shows its top rows as they change.
     pub selected: [Option<Key>; 2],
     /// True while the details of the selected row show below the Files and Network tables.
     pub details: bool,
@@ -208,31 +208,49 @@ impl View {
         }
     }
 
-    /// Position of the selected row in the current table, whose rows `stats` holds. A
-    /// selected target no longer there, as after a reset, gives way to the top row.
-    pub fn selected_rank(&mut self, stats: &Stats) -> usize {
+    /// Position of the selected row in the current table, whose rows `stats` holds, if a row
+    /// is selected. A selected target no longer listed, as after a reset, is let go.
+    pub fn selected_rank(&mut self, stats: &Stats) -> Option<usize> {
         let tab = self.tab;
-        let Some(selected) = self.selected.get_mut(tab.index()) else {
-            return 0;
-        };
+        let selected = self.selected.get_mut(tab.index())?;
         let rank = selected
             .as_ref()
             .and_then(|key| stats.rank(|category| tab.lists(category), self.sort, key));
         if rank.is_none() {
             *selected = None;
         }
-        rank.unwrap_or(0)
+        rank
     }
 
-    /// The selected row of the current table, when the tab has a table with rows.
+    /// The selected row of the current table, if a row is selected.
     pub fn selected_row<'s>(&mut self, stats: &'s Stats) -> Option<(&'s Key, &'s Row)> {
         let tab = self.tab;
-        if tab == Tab::Events {
-            return None;
+        let rank = self.selected_rank(stats)?;
+        stats
+            .page(|category| tab.lists(category), self.sort, rank, 1)
+            .pop()
+    }
+
+    /// True when the current tab's table has a selected row.
+    pub fn has_selection(&self) -> bool {
+        self.selected.get(self.tab.index()).is_some_and(Option::is_some)
+    }
+
+    /// Selects the row ranked `rank` in the current table.
+    fn select_rank(&mut self, stats: &Stats, rank: usize) {
+        let tab = self.tab;
+        let row = stats.page(|category| tab.lists(category), self.sort, rank, 1);
+        if let Some(selected) = self.selected.get_mut(tab.index()) {
+            *selected = row.first().map(|&(key, _)| key.clone());
         }
-        let rank = self.selected_rank(stats);
-        let mut row = stats.page(|category| tab.lists(category), self.sort, rank, 1);
-        row.pop()
+    }
+
+    /// Lets go of the current table's selection, and of its details.
+    fn deselect(&mut self) {
+        if let Some(selected) = self.selected.get_mut(self.tab.index()) {
+            *selected = None;
+        }
+        self.details = false;
     }
 
     /// Moves the selection of a table, or scrolls the Events tab.
@@ -244,18 +262,14 @@ impl View {
                     self.selected[tab.index()] = None;
                     return;
                 };
-                let current = self.selected_rank(stats).min(last);
-                let wanted = match motion {
-                    Motion::Up(n) => current.saturating_sub(n),
-                    Motion::Down(n) => current.saturating_add(n).min(last),
-                    Motion::Top => {
-                        self.selected[tab.index()] = None;
-                        return;
-                    }
-                    Motion::Bottom => last,
+                let wanted = match (self.selected_rank(stats), motion) {
+                    (_, Motion::Bottom) => last,
+                    // Without a selection, the first key selects the top row.
+                    (None, _) | (Some(_), Motion::Top) => 0,
+                    (Some(rank), Motion::Up(n)) => rank.saturating_sub(n),
+                    (Some(rank), Motion::Down(n)) => rank.saturating_add(n).min(last),
                 };
-                let row = stats.page(|category| tab.lists(category), self.sort, wanted, 1);
-                self.selected[tab.index()] = row.first().map(|&(key, _)| key.clone());
+                self.select_rank(stats, wanted);
             }
             Tab::Events => {
                 let Drawn { first, end, .. } = self.drawn;
@@ -481,29 +495,43 @@ impl App {
         }
         let page = self.view.drawn.page.max(1);
         let view = &mut self.view;
+        let table = view.tab != Tab::Events;
+        let selected = view.selected_rank(self.model.stats()).is_some();
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Enter if view.tab != Tab::Events => view.details = !view.details,
-            KeyCode::Esc if view.details && view.tab != Tab::Events => view.details = false,
+            KeyCode::Enter if table && selected => view.details = !view.details,
+            // Enter on a table without a selection shows the details of its top row.
+            KeyCode::Enter if table && view.tab.rows(self.model.stats()) > 0 => {
+                view.select_rank(self.model.stats(), 0);
+                view.details = true;
+            }
+            // Esc backs out a step at a time: the details, the selection, then iotap.
+            KeyCode::Esc if table && selected && view.details => view.details = false,
+            KeyCode::Esc if table && selected => view.deselect(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char(digit @ '1'..='9') => view.select(digit),
             KeyCode::Tab | KeyCode::Right => view.next_tab(),
             KeyCode::BackTab | KeyCode::Left => view.previous_tab(),
             KeyCode::Char('s') => view.sort = view.sort.next(),
             KeyCode::Char('p' | ' ') => self.model.toggle_pause(session, now_ns),
-            KeyCode::Char('y') => {
+            KeyCode::Char('y') if table => {
                 let key = view.selected_row(self.model.stats()).map(|(key, _)| key.clone());
-                if let Some(key) = key {
-                    match copy_text(&key) {
+                match key {
+                    Some(key) => match copy_text(&key) {
                         Some(text) => self.copy = Some(text),
                         None => self.model.status = Some(format!("nothing to copy for {key}")),
+                    },
+                    None if view.tab.rows(self.model.stats()) > 0 => {
+                        self.model.status = Some("select a row to copy with ↑ or ↓".to_owned());
                     }
+                    None => {}
                 }
             }
             KeyCode::Char('r') => {
                 self.model.reset(session, now_ns);
                 view.offsets = [0; 2];
                 view.selected = [None, None];
+                view.details = false;
                 view.bottom = None;
             }
             KeyCode::Up | KeyCode::Char('k') => view.scroll(Motion::Up(1), self.model.stats()),
@@ -650,7 +678,14 @@ mod tests {
             ..View::default()
         };
         let selected = |view: &View| view.selected[0].as_ref().map(ToString::to_string);
-        assert_eq!(view.selected_rank(&stats), 0);
+        assert_eq!(view.selected_rank(&stats), None, "nothing is selected at first");
+        assert!(!view.has_selection());
+        view.scroll(Motion::Down(1), &stats);
+        assert_eq!(
+            selected(&view).as_deref(),
+            Some("/a"),
+            "the first key selects the top row"
+        );
         view.scroll(Motion::Down(1), &stats);
         assert_eq!(selected(&view).as_deref(), Some("/b"));
         view.scroll(Motion::Down(2), &stats);
@@ -663,7 +698,7 @@ mod tests {
         stats.record(&write("/d", 1_000, 1));
         assert_eq!(
             view.selected_rank(&stats),
-            0,
+            Some(0),
             "the selection moves with its target"
         );
         view.scroll(Motion::Down(1), &stats);
@@ -671,18 +706,23 @@ mod tests {
         view.scroll(Motion::Bottom, &stats);
         assert_eq!(selected(&view).as_deref(), Some("/e"));
         view.scroll(Motion::Top, &stats);
-        assert_eq!(view.selected[0], None, "the top row is selected, whichever it is");
+        assert_eq!(selected(&view).as_deref(), Some("/d"), "Home selects the top row");
+
+        view.deselect();
+        assert!(!view.has_selection());
+        view.scroll(Motion::Bottom, &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/e"), "End selects the last row");
+        view.deselect();
+        view.scroll(Motion::Up(1), &stats);
+        assert_eq!(selected(&view).as_deref(), Some("/d"));
 
         view.tab = Tab::Network;
         view.scroll(Motion::Down(1), &stats);
-        assert_eq!(view.selected, [None, None], "an empty table selects nothing");
+        assert_eq!(view.selected[1], None, "an empty table selects nothing");
         view.tab = Tab::Files;
         view.selected[0] = Some(Key::File("/gone".into()));
-        assert_eq!(view.selected_rank(&stats), 0);
-        assert_eq!(
-            view.selected[0], None,
-            "a target no longer listed gives way to the top row"
-        );
+        assert_eq!(view.selected_rank(&stats), None);
+        assert_eq!(view.selected[0], None, "a target no longer listed is let go");
     }
 
     #[test]
@@ -792,6 +832,7 @@ mod tests {
         app.view.bottom = Some(0);
         app.view.offsets = [3, 4];
         app.view.selected = [Some(Key::File("/a".into())), None];
+        app.view.details = true;
         assert_eq!(app.model.shown(&session, 0).lost_events, 1);
 
         app.key(press(KeyCode::Char('r')), &session, 5_000_000_000);
@@ -805,6 +846,7 @@ mod tests {
         assert!(shown.status.is_some_and(|s| s.starts_with("view reset at ")));
         assert_eq!((app.view.bottom, app.view.offsets), (None, [0, 0]));
         assert_eq!(app.view.selected, [None, None]);
+        assert!(!app.view.details, "a reset closes the details");
         assert_eq!(
             session.stats().totals().events,
             1,
@@ -878,6 +920,10 @@ mod tests {
         .unwrap();
 
         app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy(), None, "nothing is selected yet");
+        assert_eq!(status(&app).as_deref(), Some("select a row to copy with ↑ or ↓"));
+        app.key(press(KeyCode::Down), &session, 0);
+        app.key(press(KeyCode::Char('y')), &session, 0);
         assert_eq!(app.take_copy().as_deref(), Some("/a"));
         assert_eq!(app.take_copy(), None, "each press asks once");
         app.key(press(KeyCode::Down), &session, 0);
@@ -888,6 +934,7 @@ mod tests {
         assert_eq!(app.take_copy(), None);
         assert_eq!(status(&app).as_deref(), Some("nothing to copy for <pipe>"));
         app.key(press(KeyCode::Char('2')), &session, 0);
+        app.key(press(KeyCode::Down), &session, 0);
         app.key(press(KeyCode::Char('y')), &session, 0);
         assert_eq!(app.take_copy().as_deref(), Some("1.2.3.4:443"));
         app.key(press(KeyCode::Char('3')), &session, 0);

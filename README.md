@@ -144,7 +144,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
         0 B       0   14.1 MiB    3601      0  <1s /Users/me/big.iso
         0 B       0       20 B       1      0  <1s /dev/ttys004
 
- 4242 (curl) exited                             q quit  s sort  p pause  r reset  enter details
+ 4242 (curl) exited                  q quit  s sort  p pause  r reset  ↑↓ select  enter details
 ```
 
 | Key | Action |
@@ -152,13 +152,18 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | `1` `2` `3`, Tab, Left, Right | Switch tabs |
 | `s` | Sort by bytes, read, write, calls or most recent |
 | `p` or Space | Pause the view; tracing goes on |
-| Enter | Show or hide the details of the selected row |
+| Enter | Show or hide the details of the selected row; with none selected, select the top row and show its details |
 | `y` | Copy the selected row's path, or its socket's address |
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
-| Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, move the selected row. The selection stays with its target as the rows re-sort; Home selects the top row, whichever target that is. In the Events tab, scroll; End follows new events again |
-| `q`, Esc, Ctrl-C | Quit and print the summary; Esc closes the details first |
+| Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, select a row and move the selection; the first key selects the top row, or the last row for End. In the Events tab, scroll; End follows new events again |
+| Esc | Back out a step: close the details, then let go of the selection, then quit |
+| `q`, Ctrl-C | Quit and print the summary |
 
 The UI stays open after tracing stops and says why it stopped.
+
+Nothing is selected at first, and each table shows its top rows as they change. A selected row is
+bold, with a mark in the left margin, and the selection stays with its target as the rows
+re-sort.
 
 Tables write the home directory of the user who ran sudo as `~`. A path too long for its column
 loses directory names from the left, each cut to its first letter as in the fish shell's prompt,
