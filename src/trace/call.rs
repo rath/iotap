@@ -33,10 +33,16 @@ pub enum Role {
     Dup2,
     Fcntl,
     Socket,
+    /// Creates two connected sockets and returns their descriptors in the two return slots.
+    SocketPair,
     Accept,
     Connect,
+    /// Creates a pipe and returns its descriptors in the two return slots.
     Pipe,
     NewFd(NewFd),
+    /// Closes every descriptor from the first argument to the second, unless the third only
+    /// asks to mark them close-on-exec (Linux's `close_range`).
+    CloseRange,
     Chdir,
     Fchdir,
 }

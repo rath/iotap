@@ -7,6 +7,7 @@
 pub mod call;
 pub mod fdtable;
 pub mod kdebug;
+pub mod linux;
 pub mod procs;
 
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,8 @@ impl System {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Records {
     Kdebug(Vec<kdebug::KdBuf>),
+    /// Records of iotap's Linux eBPF program, in time order.
+    Linux(Vec<linux::Record>),
 }
 
 /// What the trace shows once records are put together.

@@ -30,9 +30,10 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
   the live terminal UI reads the host clock for its elapsed time and its current second, and its
   details panel reads a file's metadata (`lstat`) as it is now.
 - Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams built
-  with `trace::kdebug::synth`, the TUI by rendering into ratatui's `TestBackend`. After changing
-  anything under `src/sys/`, `src/reader.rs`, the syscall table or `csrc/`, run the root-only
-  checks in README.md ("Checking against a live kernel") and say which ones you ran.
+  with `trace::kdebug::synth` and `trace::linux::synth`, the TUI by rendering into ratatui's
+  `TestBackend`. After changing anything under `src/sys/`, `src/reader.rs`, the syscall tables or
+  `csrc/`, run the root-only checks in README.md ("Checking against a live kernel") and say which
+  ones you ran.
 
 ## Module map
 
@@ -50,6 +51,9 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/trace/kdebug/decode.rs` | Raw `kd_buf` records to typed events |
 | `src/trace/kdebug/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |
 | `src/trace/kdebug/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
+| `src/trace/linux/mod.rs` | The record format of iotap's Linux eBPF program, one record per call that returned, and its decoder |
+| `src/trace/linux/codes.rs` | The Linux syscall tables for aarch64 and x86-64, and what the eBPF program reads for each call |
+| `src/trace/linux/synth.rs` | Builds records exactly as the eBPF program writes them, for tests |
 | `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks libproc's answers against the trace |
 | `src/trace/procs.rs` | `ProcSource`: libproc when live, fixed answers in tests |
 | `src/stats.rs` | Per-target and per-second aggregation |

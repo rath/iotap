@@ -2,7 +2,8 @@
 //!
 //! Layout: the magic `IOTAPREC`, a little-endian `u32` version, then frames of
 //! `[tag: u8][length: u32 LE][payload]`. Batches of kdebug records carry the raw 64-byte records
-//! in little-endian order; every other payload is JSON. The header names the system the
+//! in little-endian order, and batches of Linux records the records one after another as the
+//! eBPF program lays them out; every other payload is JSON. The header names the system the
 //! recording comes from; version 1 recordings, which do not, all come from macOS. A recording
 //! replays only on the operating system it was made on, whose numbers its calls use.
 
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::Target;
 use crate::session::{Input, Process, SessionInfo};
 use crate::trace::kdebug::KdBuf;
+use crate::trace::linux;
 use crate::trace::procs::{Described, ProcSource, Snapshot};
 use crate::trace::{Records, System};
 
@@ -34,6 +36,7 @@ const TAG_STOPPED: u8 = 6;
 const TAG_SNAPSHOT: u8 = 7;
 const TAG_DESCRIBE: u8 = 8;
 const TAG_WATERMARK: u8 = 9;
+const TAG_LINUX_RECORDS: u8 = 10;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -113,6 +116,13 @@ impl<W: Write> Recorder<W> {
                     payload.extend_from_slice(&record.to_le_bytes());
                 }
                 self.frame(TAG_KDEBUG_RECORDS, &payload)
+            }
+            Input::Records(Records::Linux(records)) => {
+                let mut payload = Vec::with_capacity(records.len() * linux::HEADER);
+                for record in records {
+                    record.write(&mut payload);
+                }
+                self.frame(TAG_LINUX_RECORDS, &payload)
             }
             Input::Attached(process) => self.json(TAG_ATTACHED, process),
             Input::Exec { pid, path } => self.json(
@@ -326,23 +336,12 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         let corrupt = |reason: String| ReplayError::Corrupt { index, tag, reason };
         match tag {
             TAG_HEADER => header = Some(json(&payload).map_err(corrupt)?),
-            TAG_KDEBUG_RECORDS => {
-                if payload.len() % KdBuf::SIZE != 0 {
-                    return Err(corrupt(format!(
-                        "{} bytes is not a whole number of records",
-                        payload.len()
-                    )));
-                }
-                let records = payload
-                    .chunks_exact(KdBuf::SIZE)
-                    .map(|chunk| {
-                        let mut bytes = [0u8; KdBuf::SIZE];
-                        bytes.copy_from_slice(chunk);
-                        KdBuf::from_le_bytes(&bytes)
-                    })
-                    .collect();
-                inputs.push(Input::Records(Records::Kdebug(records)));
-            }
+            TAG_KDEBUG_RECORDS => inputs.push(Input::Records(Records::Kdebug(
+                kdebug_records(&payload).map_err(corrupt)?,
+            ))),
+            TAG_LINUX_RECORDS => inputs.push(Input::Records(Records::Linux(
+                linux_records(&payload).map_err(corrupt)?,
+            ))),
             TAG_ATTACHED => inputs.push(Input::Attached(json::<Process>(&payload).map_err(corrupt)?)),
             TAG_EXEC => {
                 let frame: ExecFrame = json(&payload).map_err(corrupt)?;
@@ -394,6 +393,36 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         answers,
         truncated,
     })
+}
+
+fn kdebug_records(payload: &[u8]) -> Result<Vec<KdBuf>, String> {
+    if !payload.len().is_multiple_of(KdBuf::SIZE) {
+        return Err(format!(
+            "{} bytes is not a whole number of records",
+            payload.len()
+        ));
+    }
+    Ok(payload
+        .chunks_exact(KdBuf::SIZE)
+        .map(|chunk| {
+            let mut bytes = [0u8; KdBuf::SIZE];
+            bytes.copy_from_slice(chunk);
+            KdBuf::from_le_bytes(&bytes)
+        })
+        .collect())
+}
+
+fn linux_records(payload: &[u8]) -> Result<Vec<linux::Record>, String> {
+    let mut records = Vec::new();
+    let mut rest = payload;
+    while !rest.is_empty() {
+        let at = payload.len() - rest.len();
+        let (record, len) =
+            linux::Record::parse(rest).ok_or_else(|| format!("no whole record at byte {at}"))?;
+        records.push(record);
+        rest = &rest[len..];
+    }
+    Ok(records)
 }
 
 /// Reads one frame; `Ok(None)` at a clean end of file.
@@ -581,6 +610,44 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&[System::LinuxAarch64, System::LinuxX86_64]).unwrap(),
             r#"["linux_aarch64","linux_x86_64"]"#
+        );
+    }
+
+    #[test]
+    fn linux_records_survive_a_recording() {
+        let (mut info, _, _) = fixture();
+        info.system = System::LinuxAarch64;
+        let mut synth = linux::synth::Synth::new(info.system, 20_000, 240);
+        let records = vec![
+            synth.open(1, 300, "/tmp/out.html", 4),
+            synth.io(1, 300, "write", 4, 10, 10),
+            synth.lost(2),
+            synth.exit(300),
+        ];
+        let inputs = vec![
+            Input::Records(Records::Linux(records)),
+            Input::Watermark { ticks: synth.now() },
+        ];
+        let mut recorder = Recorder::new(Vec::new(), &info).unwrap();
+        for input in &inputs {
+            recorder.input(input).unwrap();
+        }
+        let mut bytes = recorder.finish().unwrap();
+        let replay = parse(bytes.as_slice()).unwrap();
+        assert_eq!((replay.info, replay.inputs), (info, inputs));
+
+        // A batch whose last record is cut short.
+        let mut cut = Vec::new();
+        synth.open(1, 300, "/tmp/x", 5).write(&mut cut);
+        let whole = cut.len();
+        cut.pop();
+        bytes.push(TAG_LINUX_RECORDS);
+        bytes.extend_from_slice(&u32::try_from(cut.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&cut);
+        let err = parse(bytes.as_slice()).unwrap_err();
+        assert!(
+            err.to_string().ends_with("no whole record at byte 0"),
+            "{err} ({whole} bytes)"
         );
     }
 

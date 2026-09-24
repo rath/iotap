@@ -15,6 +15,7 @@ use crate::sys::time::{ClockAnchor, Timebase};
 use crate::trace::call::{Completed, Role};
 use crate::trace::fdtable::{FdTable, Found, Verdict};
 use crate::trace::kdebug::{self, pairing::PathRecords};
+use crate::trace::linux;
 use crate::trace::procs::ProcSource;
 use crate::trace::{Decode, Records, Step, System, Traced};
 
@@ -162,12 +163,41 @@ impl Held {
     }
 }
 
+/// Puts the records of the session's system together.
+#[derive(Debug)]
+enum Decoder {
+    Kdebug(kdebug::Decoder),
+    Linux(linux::Decoder),
+}
+
+impl Decoder {
+    fn new(info: &SessionInfo) -> Self {
+        match info.system {
+            System::Macos => Self::Kdebug(kdebug::Decoder::new(info.path_records)),
+            System::LinuxAarch64 | System::LinuxX86_64 => Self::Linux(linux::Decoder::new(info.system)),
+        }
+    }
+
+    fn unfinished_calls(&self) -> u64 {
+        match self {
+            Self::Kdebug(decoder) => decoder.unfinished_calls(),
+            Self::Linux(decoder) => decoder.unfinished_calls(),
+        }
+    }
+
+    fn calls_started_before_trace(&self) -> u64 {
+        match self {
+            Self::Kdebug(decoder) => decoder.calls_started_before_trace(),
+            Self::Linux(decoder) => decoder.calls_started_before_trace(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Session {
     info: SessionInfo,
     filter: Filter,
-    /// Puts kdebug records together.
-    kdebug: kdebug::Decoder,
+    decoder: Decoder,
     fds: FdTable,
     stats: Stats,
     processes: BTreeMap<i32, ProcessState>,
@@ -187,7 +217,7 @@ impl Session {
         let retry_ticks = info.timebase.nanos_to_ticks(1_000_000_000);
         let mut session = Self {
             filter,
-            kdebug: kdebug::Decoder::new(info.path_records),
+            decoder: Decoder::new(&info),
             fds: FdTable::new(retry_ticks),
             stats: Stats::default(),
             processes: BTreeMap::new(),
@@ -258,10 +288,26 @@ impl Session {
     }
 
     pub fn handle(&mut self, input: &Input, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
+        // Records only ever come in the format of the session's system.
         match input {
             Input::Records(Records::Kdebug(records)) => {
                 for record in records {
-                    if let Some(step) = self.kdebug.decode(record) {
+                    let step = match &mut self.decoder {
+                        Decoder::Kdebug(decoder) => decoder.decode(record),
+                        Decoder::Linux(_) => None,
+                    };
+                    if let Some(step) = step {
+                        self.step(step, src, sink)?;
+                    }
+                }
+            }
+            Input::Records(Records::Linux(records)) => {
+                for record in records {
+                    let step = match &mut self.decoder {
+                        Decoder::Linux(decoder) => decoder.decode(record),
+                        Decoder::Kdebug(_) => None,
+                    };
+                    if let Some(step) = step {
                         self.step(step, src, sink)?;
                     }
                 }
@@ -330,8 +376,8 @@ impl Session {
             processes,
             totals: *self.stats.totals(),
             lost_events: self.lost_events,
-            unfinished_calls: self.kdebug.unfinished_calls(),
-            calls_started_before_trace: self.kdebug.calls_started_before_trace(),
+            unfinished_calls: self.decoder.unfinished_calls(),
+            calls_started_before_trace: self.decoder.calls_started_before_trace(),
             files: self.stats.summary_rows(Category::File),
             network: self.stats.summary_rows(Category::Network),
             other: self.stats.summary_rows(Category::Other),
@@ -550,6 +596,8 @@ mod tests {
     use super::*;
     use crate::model::{Endpoint, Proto};
     use crate::trace::kdebug::synth::{Call, Synth};
+    use crate::trace::linux::synth::{self as linux_synth, Synth as LinuxSynth};
+    use crate::trace::linux::{Event, Memory, Record};
     use crate::trace::procs::{Fixed, Snapshot};
 
     const PID: i32 = 501;
@@ -859,6 +907,116 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.summary().duration_ns, 5_000_000_000);
+    }
+
+    /// Linux records whose numbers mean the same on any host.
+    #[test]
+    fn traces_linux_records() {
+        let mut src = procs();
+        let info = SessionInfo {
+            system: System::LinuxX86_64,
+            ..info()
+        };
+        let mut session = Session::new(info, Filter::ALL, &mut src);
+        let mut synth = LinuxSynth::new(System::LinuxX86_64, 2_000, 10);
+        let call = linux_synth::Call::new;
+        let records = vec![
+            synth.open(7, PID, "/srv/data.txt", 3),
+            synth.io(7, PID, "read", 3, 4096, 1000),
+            // pipe2 and socketpair store their descriptors in memory.
+            synth.call(linux_synth::Call {
+                memory: Memory::Fds([4, 5]),
+                ..call(7, PID, "pipe2", [0xffff_f000, 0, 0, 0, 0, 0])
+            }),
+            synth.io(7, PID, "write", 5, 3, 3),
+            // AF_UNIX, SOCK_STREAM.
+            synth.call(linux_synth::Call {
+                memory: Memory::Fds([6, 7]),
+                ..call(7, PID, "socketpair", [1, 1, 0, 0xffff_e000, 0, 0])
+            }),
+            synth.io(7, PID, "sendto", 6, 2, 2),
+            // Everything from descriptor 3 up.
+            synth.call(call(7, PID, "close_range", [3, u64::from(u32::MAX), 0, 0, 0, 0])),
+            synth.io(7, PID, "read", 3, 10, 10),
+            synth.lost(40),
+            Record {
+                ts: synth.now() + 1,
+                dropped: 40,
+                event: Event::InProgress { calls: 2 },
+            },
+            synth.exit(PID),
+        ];
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Linux(records)), &mut src, &mut sink)
+            .unwrap();
+        let shown: Vec<String> = sink
+            .events
+            .iter()
+            .map(|e| format!("{} {:?} {}", e.syscall, e.bytes, e.target))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "read Some(1000) /srv/data.txt",
+                "write Some(3) <pipe>",
+                "sendto Some(2) unix",
+                "read Some(10) <unknown>"
+            ]
+        );
+        assert_eq!(sink.events[0].latency_ns, Some(10));
+        assert!(matches!(
+            sink.notices[..],
+            [Notice::LostEvents { .. }, Notice::Exited(_)]
+        ));
+        let summary = session.summary();
+        assert_eq!((summary.lost_events, summary.unfinished_calls), (1, 2));
+        assert!(session.all_exited());
+    }
+
+    /// Linux records whose numbers are Linux's own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_numbers_mean_what_they_mean_on_linux() {
+        let mut src = procs();
+        let peer = Target::Socket(Endpoint {
+            local: Some("10.0.0.2:5000".parse().unwrap()),
+            remote: Some("93.184.216.34:443".parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Tcp)
+        });
+        src.targets.insert((PID, 4), peer);
+        let info = SessionInfo {
+            system: System::HOST,
+            ..info()
+        };
+        let mut session = Session::new(info, Filter::ALL, &mut src);
+        let mut synth = LinuxSynth::new(System::HOST, 2_000, 10);
+        let call = linux_synth::Call::new;
+        let cloexec = u64::try_from(libc::F_DUPFD_CLOEXEC).unwrap();
+        let sock_type = u64::try_from(libc::SOCK_STREAM | libc::SOCK_CLOEXEC).unwrap();
+        let records = vec![
+            // Relative to the working directory.
+            synth.open(7, PID, "data.txt", 3),
+            synth.call(linux_synth::Call {
+                ret: 10,
+                ..call(7, PID, "fcntl", [3, cloexec, 10, 0, 0, 0])
+            }),
+            synth.io(7, PID, "read", 10, 5, 5),
+            synth.call(linux_synth::Call {
+                ret: 4,
+                ..call(7, PID, "socket", [2, sock_type, 0, 0, 0, 0])
+            }),
+            synth.io(7, PID, "sendto", 4, 9, 9),
+        ];
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Linux(records)), &mut src, &mut sink)
+            .unwrap();
+        let targets: Vec<String> = sink.events.iter().map(|e| e.target.to_string()).collect();
+        assert_eq!(
+            targets,
+            ["/work/data.txt", "tcp 10.0.0.2:5000 -> 93.184.216.34:443"]
+        );
     }
 
     #[test]

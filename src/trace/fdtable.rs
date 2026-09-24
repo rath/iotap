@@ -24,8 +24,8 @@ use super::call::{Completed, Lookup, NewFd, PathForm, Role};
 use super::procs::{Described, ProcSource};
 use crate::model::{Endpoint, FdType, Proto, Provenance, Target};
 
-const F_DUPFD: i32 = 0;
-const F_DUPFD_CLOEXEC: i32 = 67;
+/// The `close_range` flag that only marks the descriptors close-on-exec, on Linux.
+const CLOSE_RANGE_CLOEXEC: u64 = 1 << 2;
 
 #[derive(Clone, Debug)]
 struct FdEntry {
@@ -287,19 +287,14 @@ impl FdTable {
                 }
             }
             Role::Fcntl => {
-                if matches!(done.arg_i32(1), Some(F_DUPFD | F_DUPFD_CLOEXEC))
+                if matches!(done.arg_i32(1), Some(libc::F_DUPFD | libc::F_DUPFD_CLOEXEC))
                     && let Some(old) = done.arg_i32(0)
                 {
                     self.copy(pid, old, done.ret_i32(), (ts, since), src);
                 }
             }
             Role::Socket => {
-                let proto = match (done.arg_i32(0), done.arg_i32(1), done.arg_i32(2)) {
-                    (Some(family), Some(sock_type), Some(protocol)) => {
-                        Proto::classify(family, sock_type, protocol)
-                    }
-                    _ => Proto::Other,
-                };
+                let proto = socket_proto(done);
                 let fd = done.ret_i32();
                 let entry = FdEntry {
                     refresh_at: Some(0),
@@ -311,6 +306,12 @@ impl FdTable {
                 };
                 self.insert(pid, fd, entry, since);
             }
+            Role::SocketPair => {
+                // Neither end has an address to learn later.
+                let socket = Target::Socket(Endpoint::unresolved(socket_proto(done)));
+                self.insert_pair(pid, done.rval, &socket, (ts, since));
+            }
+            Role::CloseRange => self.close_range(done),
             Role::Accept => self.accept(pid, done, src),
             Role::Connect => {
                 if let Some(fd) = done.arg_i32(0) {
@@ -319,17 +320,10 @@ impl FdTable {
                 }
             }
             Role::Pipe => {
-                for fd in done.rval {
-                    let pipe = Target::Other {
-                        fd_type: FdType::Pipe,
-                    };
-                    self.insert(
-                        pid,
-                        fd.cast_signed(),
-                        FdEntry::new(pipe, Provenance::Traced, ts),
-                        since,
-                    );
-                }
+                let pipe = Target::Other {
+                    fd_type: FdType::Pipe,
+                };
+                self.insert_pair(pid, done.rval, &pipe, (ts, since));
             }
             Role::NewFd(kind) => {
                 let fd = done.ret_i32();
@@ -644,6 +638,46 @@ impl FdTable {
         }
     }
 
+    /// Puts the two ends of a pipe or socket pair, both `target`, in the table.
+    fn insert_pair(&mut self, pid: i32, fds: [u32; 2], target: &Target, (ts, since): (u64, u64)) {
+        for fd in fds {
+            let entry = FdEntry::new(target.clone(), Provenance::Traced, ts);
+            self.insert(pid, fd.cast_signed(), entry, since);
+        }
+    }
+
+    /// Applies a `close_range`: it closes every descriptor numbered from its first argument to
+    /// its second, unless its flags only mark them close-on-exec.
+    fn close_range(&mut self, done: &Completed) {
+        let (Some(first), Some(last), Some(flags), Some(start)) =
+            (done.arg(0), done.arg(1), done.arg(2), done.start_ts())
+        else {
+            return;
+        };
+        if flags & CLOSE_RANGE_CLOEXEC != 0 {
+            return;
+        }
+        let (pid, call) = (done.pid, (start, done.end_ts));
+        // The arguments are C `unsigned int`s.
+        let (first, last) = (first as u32, last as u32);
+        let in_range = |fd: &i32| u32::try_from(*fd).is_ok_and(|fd| (first..=last).contains(&fd));
+        let mut fds: Vec<i32> = self
+            .orphans
+            .keys()
+            .filter(|(owner, _)| *owner == pid)
+            .map(|&(_, fd)| fd)
+            .collect();
+        if let Some(proc_fds) = self.procs.get(&pid) {
+            fds.extend(proc_fds.fds.keys().chain(proc_fds.misses.keys()));
+        }
+        fds.retain(in_range);
+        fds.sort_unstable();
+        fds.dedup();
+        for fd in fds {
+            self.close(pid, fd, call);
+        }
+    }
+
     fn copy(&mut self, pid: i32, old: i32, new: i32, (ts, since): (u64, u64), src: &mut dyn ProcSource) {
         if old == new {
             return;
@@ -828,6 +862,14 @@ impl FdTable {
     }
 }
 
+/// The protocol of a socket from the arguments of the call that created it.
+fn socket_proto(done: &Completed) -> Proto {
+    match (done.arg_i32(0), done.arg_i32(1), done.arg_i32(2)) {
+        (Some(family), Some(sock_type), Some(protocol)) => Proto::classify(family, sock_type, protocol),
+        _ => Proto::Other,
+    }
+}
+
 /// Whether an entry from traced calls survives a new snapshot: the snapshot agrees, or only
 /// lacks the name of a file that was unlinked since.
 fn keeps(prev: &FdEntry, target: &Target) -> bool {
@@ -908,6 +950,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::trace::call::Syscall;
     use crate::trace::kdebug::codes::syscall;
     use crate::trace::procs::Snapshot;
 
@@ -1210,7 +1253,7 @@ mod tests {
         table.apply(&done(41, 3, 4, [3, 0, 0, 0], 8, &[]), &mut src);
         table.apply(&done(90, 5, 6, [3, 1, 0, 0], 1, &[]), &mut src);
         table.apply(
-            &done(92, 7, 8, [3, i64::from(F_DUPFD_CLOEXEC), 10, 0], 11, &[]),
+            &done(92, 7, 8, [3, i64::from(libc::F_DUPFD_CLOEXEC), 10, 0], 11, &[]),
             &mut src,
         );
         table.apply(&done(92, 9, 10, [3, 3, 0, 0], 0, &[]), &mut src);
@@ -1498,6 +1541,58 @@ mod tests {
             target_of(&mut table, 6, 9, &mut src),
             (file("/from/fileport"), Provenance::Lazy)
         );
+    }
+
+    /// A call playing `role`, which only Linux's table has, over `span`.
+    fn linux_call(role: Role, name: &'static str, span: (u64, u64), args: [i64; 4], ret: i64) -> Completed {
+        Completed {
+            call: Syscall {
+                number: 0,
+                name,
+                role,
+            },
+            ..done(3, span.0, span.1, args, ret, &[])
+        }
+    }
+
+    #[test]
+    fn socket_pairs_are_sockets_with_nothing_to_learn() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let (af_unix, stream) = (i64::from(libc::AF_UNIX), i64::from(libc::SOCK_STREAM));
+        let mut pair = linux_call(Role::SocketPair, "socketpair", (1, 2), [af_unix, stream, 0, 0], 0);
+        pair.rval = [7, 8];
+        table.apply(&pair, &mut src);
+        for fd in [7, 8] {
+            assert_eq!(
+                target_of(&mut table, fd, 3, &mut src),
+                (unix(None), Provenance::Traced)
+            );
+        }
+        // Not even a second later is either end looked up.
+        target_of(&mut table, 7, 5_000, &mut src);
+        assert_eq!(src.describes, 0);
+    }
+
+    #[test]
+    fn close_range_closes_what_it_spans_unless_it_only_marks_them() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        for (fd, path) in [(3, "/a"), (4, "/b"), (9, "/c")] {
+            table.apply(&open_of(1, 2, path, 0, fd), &mut src);
+        }
+        let cloexec = i64::try_from(CLOSE_RANGE_CLOEXEC).unwrap();
+        let mark = linux_call(Role::CloseRange, "close_range", (3, 4), [3, 8, cloexec, 0], 0);
+        table.apply(&mark, &mut src);
+        assert_eq!(target_of(&mut table, 4, 5, &mut src).0, file("/b"));
+        // Up to the largest number there is.
+        let everything = i64::from(u32::MAX);
+        let close = linux_call(Role::CloseRange, "close_range", (6, 7), [4, everything, 0, 0], 0);
+        table.apply(&close, &mut src);
+        assert_eq!(target_of(&mut table, 3, 8, &mut src).0, file("/a"));
+        for fd in [4, 9] {
+            assert_eq!(target_of(&mut table, fd, 8, &mut src).0, Target::Unknown);
+        }
     }
 
     #[test]
