@@ -1,5 +1,6 @@
 //! Output formats and the formatting helpers they share.
 
+pub mod json;
 pub mod text;
 
 /// Human-readable size with binary units rounded to one decimal, e.g. `4.0 MiB`.

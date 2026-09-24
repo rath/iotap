@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::Cli;
+use crate::output::json::JsonSink;
 use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
 use crate::record::{self, Recorder, Recording};
-use crate::session::{Filter, Input, Session, SessionInfo, Sink};
+use crate::session::{Filter, Input, Session, SessionInfo, Sink, Summary};
 use crate::sys;
 use crate::sys::kdebug::{self, Kdebug, KdebugConfig, KdebugError, TypeFilter};
 use crate::sys::time::{ClockAnchor, Timebase};
@@ -26,6 +27,45 @@ use crate::trace::procs::{Live, ProcSource};
 
 /// Process source of a live trace: libproc, optionally recorded to a file.
 type LiveSource = Recording<Live, BufWriter<File>>;
+
+type Stdout = BufWriter<io::StdoutLock<'static>>;
+
+/// The stdout format chosen on the command line.
+enum Printer {
+    Text(TextSink<Stdout>),
+    Json(JsonSink<Stdout>),
+}
+
+impl Printer {
+    fn new(cli: &Cli, info: &SessionInfo) -> io::Result<Self> {
+        let out = BufWriter::with_capacity(1 << 16, io::stdout().lock());
+        if cli.json {
+            let mut sink = JsonSink::new(out, cli.quiet);
+            sink.start(info)?;
+            Ok(Self::Json(sink))
+        } else {
+            Ok(Self::Text(TextSink::new(out, cli.quiet)))
+        }
+    }
+
+    fn sink(&mut self) -> &mut dyn Sink {
+        match self {
+            Self::Text(sink) => sink,
+            Self::Json(sink) => sink,
+        }
+    }
+
+    fn summary(self, summary: &Summary, cli: &Cli) -> io::Result<()> {
+        match self {
+            Self::Text(sink) => {
+                let mut out = sink.into_inner();
+                text::write_summary(&mut out, summary, cli.top, filter(cli))?;
+                out.flush()
+            }
+            Self::Json(mut sink) => sink.summary(summary),
+        }
+    }
+}
 
 /// Runs iotap as the command line asks.
 pub fn run(cli: &Cli) -> Result<ExitCode> {
@@ -107,7 +147,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let deadline = cli
         .duration
         .map(|secs| Instant::now() + Duration::from_secs(secs));
-    let mut sink = TextSink::new(BufWriter::with_capacity(1 << 16, io::stdout().lock()), cli.quiet);
+    let mut printer = Printer::new(cli, session.info())?;
 
     let (tx, rx) = mpsc::channel();
     let (kd_ref, stop_ref, config_ref) = (&kd, &*stop, &config);
@@ -118,7 +158,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
                 reader::run(kd_ref, tracked, config_ref, &tx, stop_ref)
             })
             .context("cannot start the kernel reader")?;
-        let consumed = consume(&rx, &mut session, &mut src, &mut sink, stop_ref, deadline);
+        let consumed = consume(&rx, &mut session, &mut src, printer.sink(), stop_ref, deadline);
         stop_ref.store(true, Ordering::SeqCst);
         let read = reader.join().map_err(|_| anyhow!("the kernel reader panicked"))?;
         anyhow::Ok((consumed, read))
@@ -127,12 +167,9 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     drop(kd);
 
     let saved = src.finish();
-    if !finish_output(consumed)? {
+    if !finish_output(consumed)? || !finish_output(printer.summary(&session.summary(), cli))? {
         return Ok(ExitCode::SUCCESS);
     }
-    let mut out = sink.into_inner();
-    text::write_summary(&mut out, &session.summary(), cli.top, filter(cli))?;
-    out.flush()?;
     read?;
     if let Some(path) = &cli.record {
         saved.with_context(|| format!("the recording {} is incomplete", path.display()))?;
@@ -197,17 +234,15 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
     );
     let mut answers = replay.answers;
     let mut session = Session::new(replay.info, filter(cli), &mut answers);
-    let mut sink = TextSink::new(BufWriter::with_capacity(1 << 16, io::stdout().lock()), cli.quiet);
+    let mut printer = Printer::new(cli, session.info())?;
+    let sink = printer.sink();
     let fed = replay.inputs.iter().try_for_each(|input| {
-        session.handle(input, &mut answers, &mut sink)?;
+        session.handle(input, &mut answers, sink)?;
         sink.flush()
     });
-    if !finish_output(fed)? {
-        return Ok(ExitCode::SUCCESS);
+    if finish_output(fed)? {
+        finish_output(printer.summary(&session.summary(), cli))?;
     }
-    let mut out = sink.into_inner();
-    text::write_summary(&mut out, &session.summary(), cli.top, filter(cli))?;
-    out.flush()?;
     Ok(ExitCode::SUCCESS)
 }
 

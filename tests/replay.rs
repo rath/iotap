@@ -186,3 +186,35 @@ fn replay_rejects_other_files() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("not an iotap recording"), "{stderr}");
 }
+
+#[test]
+fn replay_writes_json_lines() {
+    let dir = TempDir::new("json");
+    let path = dir.0.join("curl.iotaprec");
+    write_recording(&path);
+    let output = iotap(&["--replay", path.to_str().unwrap(), "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let lines: Vec<serde_json::Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let types: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        [
+            "start", "event", "event", "event", "event", "event", "exited", "summary"
+        ]
+    );
+    assert_eq!(lines[0]["processes"][0]["name"], "curl");
+    assert_eq!(lines[2]["bytes"], 4096);
+    assert_eq!(lines[2]["target"]["remote"], "93.184.216.34:443");
+    assert_eq!(lines[3]["error"], "EAGAIN");
+    assert_eq!(
+        lines[4]["target"],
+        serde_json::json!({"kind": "file", "path": "/Users/me/page.html"})
+    );
+    let summary = &lines[7];
+    assert_eq!(summary["totals"]["net_read"]["bytes"], 4096);
+    assert_eq!(summary["network"][0]["target"], "tcp 93.184.216.34:443");
+    assert_eq!(summary["files"].as_array().unwrap().len(), 2);
+}
