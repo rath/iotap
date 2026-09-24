@@ -1,6 +1,8 @@
 //! Where the descriptor table learns what descriptors refer to: libproc when tracing live,
 //! a recording when replaying.
 
+use std::collections::HashMap;
+
 use crate::model::{FdType, Target};
 use crate::sys::proc as libproc;
 
@@ -47,6 +49,23 @@ impl ProcSource for Live {
             .into_iter()
             .find(|&(open, _)| open == fd)?;
         describe_typed(pid, fd, fd_type)
+    }
+}
+
+/// Answers from fixed tables; for tests and synthetic fixtures.
+#[derive(Clone, Debug, Default)]
+pub struct Fixed {
+    pub snapshots: HashMap<i32, Snapshot>,
+    pub targets: HashMap<(i32, i32), Target>,
+}
+
+impl ProcSource for Fixed {
+    fn snapshot(&mut self, pid: i32) -> Option<Snapshot> {
+        self.snapshots.get(&pid).cloned()
+    }
+
+    fn describe(&mut self, pid: i32, fd: i32) -> Option<Target> {
+        self.targets.get(&(pid, fd)).cloned()
     }
 }
 

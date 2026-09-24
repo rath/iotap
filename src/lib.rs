@@ -5,5 +5,7 @@
 compile_error!("iotap only supports macOS");
 
 pub mod model;
+pub mod session;
+pub mod stats;
 pub mod sys;
 pub mod trace;

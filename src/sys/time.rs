@@ -2,6 +2,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct MachTimebaseInfo {
@@ -16,7 +18,7 @@ unsafe extern "C" {
 }
 
 /// Ratio that converts `mach_absolute_time` ticks to nanoseconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timebase {
     pub numer: u32,
     pub denom: u32,
@@ -25,10 +27,8 @@ pub struct Timebase {
 impl Timebase {
     /// The timebase of this machine.
     pub fn host() -> Self {
-        let mut info = MachTimebaseInfo::default();
-        // SAFETY: `info` is a valid, writable `mach_timebase_info` structure.
-        let rc = unsafe { mach_timebase_info(&raw mut info) };
-        if rc != 0 || info.numer == 0 || info.denom == 0 {
+        let info = host_timebase();
+        if info.numer == 0 || info.denom == 0 {
             return Self { numer: 1, denom: 1 };
         }
         Self {
@@ -48,9 +48,20 @@ impl Timebase {
     }
 }
 
+fn host_timebase() -> MachTimebaseInfo {
+    let mut info = MachTimebaseInfo::default();
+    // SAFETY: `info` is a valid, writable `mach_timebase_info` structure.
+    let rc = unsafe { mach_timebase_info(&raw mut info) };
+    if rc == 0 {
+        info
+    } else {
+        MachTimebaseInfo::default()
+    }
+}
+
 /// A mach tick count and the wall-clock time read at the same moment, used to place trace
 /// timestamps on the wall clock.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockAnchor {
     pub ticks: u64,
     pub unix_nanos: u64,
