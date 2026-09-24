@@ -2,7 +2,7 @@
 //! whole pipeline without root.
 
 use super::codes::{self, FUNC_END, FUNC_START};
-use super::pairing::KERNEL_PATH_BYTES;
+use super::pairing::{PathRecords, TAIL_PATH_BYTES};
 use crate::sys::kdebug::KdBuf;
 
 /// Emits records with strictly increasing timestamps.
@@ -11,16 +11,26 @@ pub struct Synth {
     ts: u64,
     step: u64,
     vnode: u64,
+    paths: PathRecords,
 }
 
 impl Synth {
-    /// Records start after `start_ts` and are `step` ticks apart.
+    /// Records start after `start_ts` and are `step` ticks apart. Paths are laid out as a
+    /// current kernel does.
     pub fn new(start_ts: u64, step: u64) -> Self {
         Self {
             ts: start_ts,
             step: step.max(1),
             vnode: 0xfeed_0000,
+            paths: PathRecords::Whole,
         }
+    }
+
+    /// Lays out lookup paths as a kernel using `paths` does.
+    #[must_use]
+    pub fn with_path_records(mut self, paths: PathRecords) -> Self {
+        self.paths = paths;
+        self
     }
 
     /// Timestamp of the most recent record.
@@ -65,11 +75,15 @@ impl Synth {
         self.record(tid, codes::syscall_debugid(number, FUNC_END), args)
     }
 
-    /// Records of one path lookup as `kdebug_lookup` emits them: the last
-    /// [`KERNEL_PATH_BYTES`] bytes of the path at most, padded with NUL bytes.
+    /// Records of one completed path lookup as `kdebug_lookup` emits them: the whole path, or
+    /// in the older format its last [`TAIL_PATH_BYTES`] bytes, padded with NUL bytes.
     pub fn lookup(&mut self, tid: u64, path: &str) -> Vec<KdBuf> {
         let bytes = path.as_bytes();
-        self.lookup_bytes(tid, &bytes[bytes.len().saturating_sub(KERNEL_PATH_BYTES)..], 0)
+        let kept = match self.paths {
+            PathRecords::Whole => bytes,
+            PathRecords::Tail => &bytes[bytes.len().saturating_sub(TAIL_PATH_BYTES)..],
+        };
+        self.lookup_bytes(tid, kept, 0)
     }
 
     /// Records carrying `bytes` and then `pad`, split as `kdebug_vfs_lookup` does: 24 bytes
@@ -204,9 +218,12 @@ mod tests {
         // 24 + 32 = 56 bytes fit in two records; 57 need three.
         assert_eq!(synth.lookup(9, &"x".repeat(56)).len(), 2);
         assert_eq!(synth.lookup(9, &"x".repeat(57)).len(), 3);
-        // The kernel reports at most 184 bytes: six records.
-        assert_eq!(synth.lookup(9, &"x".repeat(184)).len(), 6);
-        assert_eq!(synth.lookup(9, &"x".repeat(1000)).len(), 6);
+        // 400 bytes: 24 + 12 * 32.
+        assert_eq!(synth.lookup(9, &"x".repeat(400)).len(), 13);
+        // Before macOS 15.4 the kernel reports at most 184 bytes: six records.
+        let mut old = Synth::new(0, 1).with_path_records(PathRecords::Tail);
+        assert_eq!(old.lookup(9, &"x".repeat(184)).len(), 6);
+        assert_eq!(old.lookup(9, &"x".repeat(1000)).len(), 6);
     }
 
     #[test]

@@ -385,6 +385,7 @@ mod tests {
     use crate::model::{Endpoint, Proto};
     use crate::session::{Collect, Filter, Session};
     use crate::sys::time::{ClockAnchor, Timebase};
+    use crate::trace::pairing::PathRecords;
     use crate::trace::procs::Fixed;
     use crate::trace::synth::Synth;
 
@@ -399,6 +400,7 @@ mod tests {
                 pid: 300,
                 name: "curl".into(),
             }],
+            path_records: PathRecords::Whole,
         };
         let mut procs = Fixed::default();
         procs.snapshots.insert(

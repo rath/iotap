@@ -23,6 +23,7 @@ use crate::sys::kdebug::{self, Kdebug, KdebugConfig, KdebugError, TypeFilter};
 use crate::sys::time::{self, ClockAnchor, Timebase};
 use crate::target::{self, Spec, Tracked};
 use crate::trace::codes;
+use crate::trace::pairing::PathRecords;
 use crate::trace::procs::{Live, ProcSource};
 use crate::tui::{self, Feed, state::App};
 
@@ -134,6 +135,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         timebase,
         anchor,
         processes: tracked.iter().map(Tracked::process).collect(),
+        path_records: sys::os_release().map_or_else(PathRecords::default, |r| PathRecords::for_release(&r)),
     };
     let recorder = match &cli.record {
         Some(path) => {

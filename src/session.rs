@@ -16,7 +16,7 @@ use crate::sys::time::{ClockAnchor, Timebase};
 use crate::trace::codes::Role;
 use crate::trace::decode::{Kind, decode};
 use crate::trace::fdtable::FdTable;
-use crate::trace::pairing::{Completed, Pairer};
+use crate::trace::pairing::{Completed, Pairer, PathRecords};
 use crate::trace::procs::ProcSource;
 
 /// A traced process.
@@ -41,6 +41,9 @@ pub struct SessionInfo {
     /// Read before tracing was enabled.
     pub anchor: ClockAnchor,
     pub processes: Vec<Process>,
+    /// How the kernel that made the records lays out lookup paths.
+    #[serde(default)]
+    pub path_records: PathRecords,
 }
 
 /// What the kernel reader delivers, in order.
@@ -158,7 +161,7 @@ impl Session {
         let retry_ticks = info.timebase.nanos_to_ticks(1_000_000_000);
         let mut session = Self {
             filter,
-            pairer: Pairer::default(),
+            pairer: Pairer::new(info.path_records),
             fds: FdTable::new(retry_ticks),
             stats: Stats::default(),
             processes: BTreeMap::new(),
@@ -453,6 +456,7 @@ mod tests {
                 pid: PID,
                 name: "demo".into(),
             }],
+            path_records: PathRecords::Whole,
         }
     }
 

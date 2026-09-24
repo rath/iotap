@@ -5,14 +5,41 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use super::codes::Syscall;
 use super::decode::{Event, Kind, Phase, low_i32};
 
-/// Most path bytes one lookup reports. XNU's `kdebug_lookup` copies at most `NUMPARMS` (23)
-/// words and keeps the end of a longer path.
-pub const KERNEL_PATH_BYTES: usize = 23 * 8;
+/// Most path bytes a lookup reports in the [`PathRecords::Tail`] format: `NUMPARMS` (23)
+/// words.
+pub const TAIL_PATH_BYTES: usize = 23 * 8;
 /// Bound on the bytes gathered for one lookup, in case its END record is lost.
 const MAX_PATH_BYTES: usize = 1024;
+
+/// How the kernel lays out the path of a lookup in its records. XNU changed it in macOS 15.4
+/// (xnu-11417), so the format is chosen from the kernel release and kept with a recording.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathRecords {
+    /// The whole path, with NUL bytes after it to the end of the last record.
+    #[default]
+    Whole,
+    /// Only the last [`TAIL_PATH_BYTES`] bytes of the path, followed by NUL bytes, or by `>`
+    /// when the lookup ended before the end of the path.
+    Tail,
+}
+
+impl PathRecords {
+    /// The format of a kernel release such as `24.4.0` (macOS 15.4). An unreadable release is
+    /// taken to be a current one.
+    pub fn for_release(release: &str) -> Self {
+        let mut parts = release.split('.').map(str::parse::<u32>);
+        match (parts.next(), parts.next()) {
+            (Some(Ok(major)), Some(Ok(minor))) if (major, minor) < (24, 4) => Self::Tail,
+            _ => Self::Whole,
+        }
+    }
+}
 /// Bound on threads with an open call, so threads that die mid-call cannot grow the map.
 const MAX_PENDING: usize = 1 << 16;
 
@@ -43,8 +70,8 @@ pub struct Completed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lookup {
     pub path: String,
-    /// Only the last [`KERNEL_PATH_BYTES`] bytes were reported. A path of exactly that length
-    /// looks the same, so it counts as truncated too.
+    /// Only the last [`TAIL_PATH_BYTES`] bytes were reported. In that format a path of exactly
+    /// that length looks the same, so it counts as truncated too.
     pub truncated: bool,
 }
 
@@ -54,14 +81,15 @@ impl Lookup {
         !self.truncated && self.path.starts_with('/')
     }
 
-    /// Parses the bytes of one lookup's records. The kernel pads the path to the end of its
-    /// last record with NUL bytes, or with `>` when the name goes on past the part looked up.
-    fn parse(bytes: &[u8]) -> Option<Self> {
-        let (path, truncated) = if let Some(len) = bytes.iter().position(|&b| b == 0) {
-            (&bytes[..len], false)
-        } else {
-            let len = bytes.iter().rposition(|&b| b != b'>').map_or(0, |last| last + 1);
-            (&bytes[..len], len == KERNEL_PATH_BYTES)
+    /// Parses the bytes of one lookup's records.
+    fn parse(bytes: &[u8], format: PathRecords) -> Option<Self> {
+        let (path, truncated) = match (bytes.iter().position(|&b| b == 0), format) {
+            (Some(len), _) => (&bytes[..len], false),
+            (None, PathRecords::Whole) => (bytes, false),
+            (None, PathRecords::Tail) => {
+                let len = bytes.iter().rposition(|&b| b != b'>').map_or(0, |last| last + 1);
+                (&bytes[..len], len == TAIL_PATH_BYTES)
+            }
         };
         (!path.is_empty()).then(|| Self {
             path: String::from_utf8_lossy(path).into_owned(),
@@ -115,12 +143,20 @@ struct Pending {
 /// Pairs START and END records per thread.
 #[derive(Debug, Default)]
 pub struct Pairer {
+    format: PathRecords,
     pending: HashMap<u64, Pending>,
     orphan_starts: u64,
     orphan_ends: u64,
 }
 
 impl Pairer {
+    pub fn new(format: PathRecords) -> Self {
+        Self {
+            format,
+            ..Self::default()
+        }
+    }
+
     /// Feeds one event; returns the completed call when `event` ends one.
     pub fn push(&mut self, event: &Event) -> Option<Completed> {
         match event.kind {
@@ -223,7 +259,7 @@ impl Pairer {
             && let Some(bytes) = open.partial.take()
             && open.lookup.is_none()
         {
-            open.lookup = Lookup::parse(&bytes);
+            open.lookup = Lookup::parse(&bytes, self.format);
         }
     }
 
@@ -276,36 +312,58 @@ mod tests {
 
     #[test]
     fn reassembles_paths_of_every_length() {
-        let mut pairer = Pairer::default();
-        for len in [1, 23, 24, 25, 56, 57, 183] {
-            let path = format!("/{}", "p".repeat(len - 1));
-            let mut synth = Synth::new(0, 1);
-            let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
-            assert_eq!(done[0].lookup, Some(lookup(&path, false)), "len {len}");
-            assert_eq!(done[0].ret_i32(), 3);
+        for format in [PathRecords::Whole, PathRecords::Tail] {
+            let mut pairer = Pairer::new(format);
+            for len in [1, 23, 24, 25, 56, 57, 183] {
+                let path = format!("/{}", "p".repeat(len - 1));
+                let mut synth = Synth::new(0, 1).with_path_records(format);
+                let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
+                assert_eq!(done[0].lookup, Some(lookup(&path, false)), "{format:?} len {len}");
+                assert_eq!(done[0].ret_i32(), 3);
+            }
         }
     }
 
     #[test]
-    fn long_paths_keep_their_end_and_are_marked() {
-        let mut pairer = Pairer::default();
+    fn current_kernels_report_whole_paths() {
+        let mut pairer = Pairer::new(PathRecords::Whole);
         let mut synth = Synth::new(0, 1);
+        for len in [TAIL_PATH_BYTES, 400, 1023] {
+            let path = format!("/{}", "w".repeat(len - 1));
+            let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
+            assert_eq!(done[0].lookup, Some(lookup(&path, false)), "len {len}");
+        }
+    }
+
+    #[test]
+    fn older_kernels_keep_the_end_of_long_paths() {
+        let mut pairer = Pairer::new(PathRecords::Tail);
+        let mut synth = Synth::new(0, 1).with_path_records(PathRecords::Tail);
         let path = format!("/Users/me/{}/data.db", "deep/".repeat(60));
         let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
         assert_eq!(
             done[0].lookup,
-            Some(lookup(&path[path.len() - KERNEL_PATH_BYTES..], true))
+            Some(lookup(&path[path.len() - TAIL_PATH_BYTES..], true))
         );
         // Exactly the limit is indistinguishable from a longer path.
-        let exact = format!("/{}", "e".repeat(KERNEL_PATH_BYTES - 1));
+        let exact = format!("/{}", "e".repeat(TAIL_PATH_BYTES - 1));
         let done = run(&mut pairer, &synth.open(1, 2, &exact, 3));
         assert_eq!(done[0].lookup, Some(lookup(&exact, true)));
     }
 
     #[test]
+    fn picks_the_format_from_the_kernel_release() {
+        assert_eq!(PathRecords::for_release("24.3.0"), PathRecords::Tail);
+        assert_eq!(PathRecords::for_release("22.6.0"), PathRecords::Tail);
+        assert_eq!(PathRecords::for_release("24.4.0"), PathRecords::Whole);
+        assert_eq!(PathRecords::for_release("25.6.0"), PathRecords::Whole);
+        assert_eq!(PathRecords::for_release("unknown"), PathRecords::Whole);
+    }
+
+    #[test]
     fn strips_padding_after_the_name() {
-        let mut pairer = Pairer::default();
-        let mut synth = Synth::new(0, 1);
+        let mut pairer = Pairer::new(PathRecords::Tail);
+        let mut synth = Synth::new(0, 1).with_path_records(PathRecords::Tail);
         let mut records = vec![synth.syscall_start(1, 5, [0; 4])];
         records.extend(synth.lookup_bytes(1, b"sub", b'>'));
         records.push(synth.syscall_end(1, 5, 2, 0, [3, 0]));

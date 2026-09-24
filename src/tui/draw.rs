@@ -557,6 +557,7 @@ mod tests {
     use crate::model::{Endpoint, Proto, Target};
     use crate::session::{Filter, Input, Process, Session, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
+    use crate::trace::pairing::PathRecords;
     use crate::trace::procs::{Fixed, Snapshot};
     use crate::trace::synth::{Call, Synth};
     use crate::tui::state::App;
@@ -577,6 +578,7 @@ mod tests {
                 pid: PID,
                 name: "curl".into(),
             }],
+            path_records: PathRecords::Whole,
         };
         let mut src = Fixed::default();
         src.snapshots.insert(

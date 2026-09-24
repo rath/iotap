@@ -199,10 +199,10 @@ live run in any output mode. A recording holds paths and addresses but no transf
 - **Dropped records.** Under heavy load the kernel buffer can overflow. iotap reports it and the
   totals undercount; a larger `--buffer` helps.
 - **Paths.** The kernel reports a path as it resolved it, after following symbolic links, and
-  keeps only its last 184 bytes. While the new descriptor is still open, iotap takes the full name
-  from libproc. Otherwise a relative path is joined to the working directory or the directory
-  descriptor, which is wrong after a link with a relative target other than `/etc`, `/tmp` and
-  `/var`, and a truncated path is shown as `…` followed by its end.
+  before macOS 15.4 only its last 184 bytes. While the new descriptor is still open, iotap takes
+  the full name from libproc. Otherwise a relative path is joined to the working directory or the
+  directory descriptor, which is wrong after a link with a relative target other than `/etc`,
+  `/tmp` and `/var`, and a truncated path is shown as `…` followed by its end.
 - **Recording size.** A recording grows by about 64 bytes per kernel record.
 
 ## Checking against a live kernel

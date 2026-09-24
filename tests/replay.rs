@@ -9,6 +9,7 @@ use iotap::model::{Endpoint, Proto, Target};
 use iotap::record::{Recorder, Recording};
 use iotap::session::{Collect, Filter, Input, Process, Session, SessionInfo};
 use iotap::sys::time::{ClockAnchor, Timebase};
+use iotap::trace::pairing::PathRecords;
 use iotap::trace::procs::{Fixed, Snapshot};
 use iotap::trace::synth::{Call, Synth};
 
@@ -43,6 +44,7 @@ fn write_recording(path: &Path) {
             pid: PID,
             name: "curl".into(),
         }],
+        path_records: PathRecords::Whole,
     };
     let mut procs = Fixed::default();
     procs.snapshots.insert(
