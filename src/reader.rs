@@ -42,6 +42,13 @@ pub trait Tracer {
     /// process when it runs exec, as kdebug does, traces it again.
     fn add_pid(&mut self, pid: i32) -> Result<(), Self::Error>;
 
+    /// Stops tracing `pid`, which is gone, so that a later process given the same pid is not
+    /// traced by mistake. Harmless when the facility let the process go by itself, as kdebug
+    /// does.
+    fn remove_pid(&mut self, _pid: i32) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Takes what the facility still holds once tracing stops. Called once, after the last read.
     fn finish(&mut self) -> Result<Option<Records>, Self::Error> {
         Ok(None)
@@ -85,7 +92,7 @@ pub fn run<T: Tracer>(
         }
         if last_poll.elapsed() >= config.poll {
             last_poll = Instant::now();
-            for input in watch.poll(tracer) {
+            for input in watch.poll(tracer)? {
                 if tx.send(input).is_err() {
                     return Ok(());
                 }
@@ -180,8 +187,9 @@ impl Watch {
         self.tracked.is_empty()
     }
 
-    fn poll<T: Tracer>(&mut self, tracer: &mut T) -> Vec<Input> {
+    fn poll<T: Tracer>(&mut self, tracer: &mut T) -> Result<Vec<Input>, T::Error> {
         let mut inputs = Vec::new();
+        let mut gone = Vec::new();
         self.tracked.retain_mut(|process| {
             let alive = proc::info(process.pid).is_some_and(|info| info.start == process.start)
                 // kdebug loses a process at exec, which gives it a new kernel proc without the
@@ -193,6 +201,7 @@ impl Watch {
                     pid: process.pid,
                     ticks: time::now_ticks(),
                 });
+                gone.push(process.pid);
                 return false;
             }
             let exe = proc::exe_path(process.pid);
@@ -205,10 +214,13 @@ impl Watch {
             }
             true
         });
+        for pid in gone {
+            tracer.remove_pid(pid)?;
+        }
         if !self.follow.is_empty() {
             self.follow_new(tracer, &mut inputs);
         }
-        inputs
+        Ok(inputs)
     }
 
     fn follow_new<T: Tracer>(&mut self, tracer: &mut T, inputs: &mut Vec<Input>) {
@@ -259,6 +271,7 @@ mod tests {
         reads: VecDeque<Read>,
         stop: Option<&'a AtomicBool>,
         added: Vec<i32>,
+        removed: Vec<i32>,
         /// What the facility still holds at the end.
         held: Option<Records>,
     }
@@ -269,6 +282,7 @@ mod tests {
                 reads: reads.into_iter().collect(),
                 stop,
                 added: Vec::new(),
+                removed: Vec::new(),
                 held: None,
             }
         }
@@ -296,6 +310,11 @@ mod tests {
 
         fn add_pid(&mut self, pid: i32) -> io::Result<()> {
             self.added.push(pid);
+            Ok(())
+        }
+
+        fn remove_pid(&mut self, pid: i32) -> io::Result<()> {
+            self.removed.push(pid);
             Ok(())
         }
 
@@ -421,6 +440,7 @@ mod tests {
             "{:?}",
             tracer.added
         );
+        assert_eq!(tracer.removed, [i32::MAX], "only the process that is gone");
     }
 
     #[test]
@@ -441,5 +461,6 @@ mod tests {
             tracer.added.is_empty(),
             "a process that is gone is not traced again"
         );
+        assert_eq!(tracer.removed, [i32::MAX]);
     }
 }
