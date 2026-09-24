@@ -52,7 +52,7 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/stats.rs` | Per-target and per-second aggregation |
 | `src/record.rs` | `--record` and `--replay` file format |
 | `src/output/` | Text and JSON Lines output, shared formatting |
-| `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), the frame loop |
+| `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), `fit` (names fitted to columns), `clipboard` (copying), the frame loop |
 | `src/sys/` | The only unsafe code: kdebug sysctls, libproc, mach time and user accounts behind safe functions |
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |

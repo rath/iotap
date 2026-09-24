@@ -7,6 +7,7 @@
 pub mod clipboard;
 mod details;
 pub mod draw;
+mod fit;
 pub mod state;
 
 use std::io::{self, IsTerminal};
@@ -19,6 +20,7 @@ use ratatui::crossterm::{cursor, execute, terminal};
 
 use self::state::{App, Tab};
 use crate::session::Session;
+use crate::sys::user;
 
 /// Time between frames while input arrives.
 const FRAME: Duration = Duration::from_millis(50);
@@ -83,6 +85,7 @@ fn run_loop(
     tabs: &'static [Tab],
 ) -> io::Result<()> {
     let mut app = App::new(tabs);
+    app.view.home = user::invoking().map(|account| account.home.to_string_lossy().into_owned());
     let mut dirty = true;
     loop {
         if !app.has_ended() {

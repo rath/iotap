@@ -160,6 +160,11 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 
 The UI stays open after tracing stops and says why it stopped.
 
+Tables write the home directory of the user who ran sudo as `~`. A path too long for its column
+loses directory names from the left, each cut to its first letter as in the fish shell's prompt,
+so the file name and the directories nearest it stay whole the longest:
+`~/L/A/G/C/Default/Cache/Cache_Data/data_1`. The details panel and `y` use the full path.
+
 The details panel opens below the Files or Network table and shows the selected target:
 
 - its full path or endpoint

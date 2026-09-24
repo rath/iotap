@@ -1,18 +1,17 @@
 //! Draws one frame of the terminal UI.
 
-use std::borrow::Cow;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use super::details;
 use super::state::{Drawn, Shown, Tab, View};
+use super::{details, fit};
+use crate::model::{Endpoint, Target};
 use crate::output::{bytes, count, text};
-use crate::stats::{self, Key, Second, SortBy};
+use crate::stats::{self, Key, Peer, Second, SortBy};
 
 pub(super) const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 pub(super) const DIM: Style = Style::new().fg(Color::DarkGray);
@@ -292,6 +291,7 @@ fn draw_targets(
     let spacing = spacing(area.width);
     let target_width = usize::from(area.width).saturating_sub(fixed_width(&widths, spacing));
     let sort = view.sort;
+    let home = view.home.as_deref();
     let highlight = |label: &str, sorted: bool| {
         let cell = right(label.to_owned());
         if sorted { cell.style(SORTED) } else { cell }
@@ -307,7 +307,7 @@ fn draw_targets(
     ])
     .style(BOLD);
     let body = rows.iter().enumerate().map(|(i, (key, row))| {
-        let drawn = target_row(key, row, shown.now_ns, target_width);
+        let drawn = target_row(key, row, shown.now_ns, target_width, home);
         if offset + i == selected {
             drawn.style(SELECTED_ROW)
         } else {
@@ -330,12 +330,16 @@ fn draw_targets(
     }
 }
 
-fn target_row(key: &Key, row: &stats::Row, now_ns: u64, width: usize) -> Row<'static> {
+fn target_row(key: &Key, row: &stats::Row, now_ns: u64, width: usize, home: Option<&str>) -> Row<'static> {
     let note = match row.connections() {
         n if n > 1 => format!("  {n} connections"),
         _ => String::new(),
     };
-    let name = key.to_string();
+    let path = key_path(key);
+    let name = match path {
+        Some((proto, path)) => show_path(proto, path, home, usize::MAX),
+        None => key.to_string(),
+    };
     // The note goes first when space runs out; the target itself matters more.
     let target = if name.width() + note.width() <= width {
         let mut spans = vec![Span::raw(name)];
@@ -344,7 +348,11 @@ fn target_row(key: &Key, row: &stats::Row, now_ns: u64, width: usize) -> Row<'st
         }
         spans
     } else {
-        vec![Span::raw(fit_start(&name, width).into_owned())]
+        let fitted = match path {
+            Some((proto, path)) => show_path(proto, path, home, width),
+            None => fit::start(&name, width).into_owned(),
+        };
+        vec![Span::raw(fitted)]
     };
     let failed = right(row.errors.to_string());
     Row::new([
@@ -421,6 +429,7 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
     }))
     .style(BOLD);
 
+    let home = view.home.as_deref();
     let clock = &mut view.clock;
     let body: Vec<Row<'static>> = ring
         .range(start, end)
@@ -444,7 +453,11 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
             cells.push(right(
                 event.latency_ns.map_or_else(|| "-".to_owned(), short_latency),
             ));
-            cells.push(Cell::from(fit_start(&target, target_width).into_owned()));
+            let target = match target_path(&event.target) {
+                Some((proto, path)) => show_path(proto, path, home, target_width),
+                None => fit::start(&target, target_width).into_owned(),
+            };
+            cells.push(Cell::from(target));
             Row::new(cells)
         })
         .collect();
@@ -568,26 +581,40 @@ fn grouped(n: u64) -> String {
     out
 }
 
-/// `text` shortened from the left to fit `width` columns, marked with an ellipsis; the end of a
-/// path or address says the most.
-fn fit_start(text: &str, width: usize) -> Cow<'_, str> {
-    if text.width() <= width {
-        return Cow::Borrowed(text);
+/// The path in a key's name and the protocol before it, for files and Unix-domain sockets.
+fn key_path(key: &Key) -> Option<(&'static str, &str)> {
+    match key {
+        Key::File(path) if !path.is_empty() => Some(("", path)),
+        Key::Socket {
+            proto,
+            peer: Peer::Path(path),
+        } => Some((proto.name(), path)),
+        _ => None,
     }
-    if width == 0 {
-        return Cow::Borrowed("");
+}
+
+/// The path in a target's name and the protocol before it, for files and Unix-domain sockets.
+fn target_path(target: &Target) -> Option<(&'static str, &str)> {
+    match target {
+        Target::File { path } if !path.is_empty() => Some(("", path)),
+        Target::Socket(Endpoint {
+            proto,
+            path: Some(path),
+            ..
+        }) => Some((proto.name(), path)),
+        _ => None,
     }
-    let mut kept = 0;
-    let mut start = text.len();
-    for (index, c) in text.char_indices().rev() {
-        let w = c.width().unwrap_or(0);
-        if kept + w > width - 1 {
-            break;
-        }
-        kept += w;
-        start = index;
+}
+
+/// A path, after its protocol if it has one, in at most `width` columns: the home directory
+/// shows as `~`, and directory names are cut from the left when the path is too long.
+fn show_path(proto: &str, path: &str, home: Option<&str>, width: usize) -> String {
+    let path = fit::tilde(path, home);
+    if proto.is_empty() {
+        return fit::path(&path, width).into_owned();
     }
-    Cow::Owned(format!("…{}", &text[start..]))
+    let room = width.saturating_sub(proto.width() + 1);
+    format!("{proto} {}", fit::path(&path, room))
 }
 
 #[cfg(test)]
@@ -909,6 +936,58 @@ mod tests {
     }
 
     #[test]
+    fn paths_show_home_as_a_tilde_and_shorten_directory_by_directory() {
+        use std::sync::Arc;
+
+        use ratatui::crossterm::event::KeyCode;
+
+        use crate::model::{IoEvent, Op, Provenance};
+        use crate::session::Sink;
+        let (session, mut app) = traced();
+        app.view.home = Some("/Users/me".into());
+        let long = "/Users/me/Library/Application Support/Google/Chrome/Default/Cache/Cache_Data/data_1";
+        app.event(&IoEvent {
+            time_ns: START_NS + 1_500_000_000,
+            pid: PID,
+            tid: 1,
+            op: Op::Read,
+            syscall: "read",
+            fd: Some(9),
+            requested: Some(1 << 20),
+            bytes: Some(1 << 20),
+            messages: None,
+            errno: 0,
+            latency_ns: Some(1_000),
+            target: Arc::new(Target::File { path: long.into() }),
+            provenance: Provenance::Traced,
+        })
+        .unwrap();
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        assert!(find(&lines, "~/page.html").ends_with("  ~/page.html"));
+        // 100 columns leave the target 99 - 44 - 6 * 2 = 43 columns.
+        let row = find(&lines, "data_1");
+        assert!(
+            row.ends_with("  ~/L/A/G/C/Default/Cache/Cache_Data/data_1"),
+            "{row}"
+        );
+
+        press(&mut app, &session, KeyCode::Enter);
+        let lines = render(&session, &mut app, 100, 30, START_NS);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with("/Cache/Cache_Data/data_1") && line.starts_with(" /Users/me/")),
+            "the details keep the path whole: {}",
+            lines.join("\n")
+        );
+
+        press(&mut app, &session, KeyCode::Char('3'));
+        let lines = render(&session, &mut app, 130, 20, START_NS);
+        assert!(find(&lines, " write ").ends_with("  ~/page.html"));
+        assert!(find(&lines, " read ").ends_with("/Cache/Cache_Data/data_1"));
+    }
+
+    #[test]
     fn alerts_and_pause_are_visible() {
         let (session, mut app) = traced();
         app.end("Tracing stopped: every traced process has exited.".into());
@@ -999,9 +1078,5 @@ mod tests {
         assert_eq!(grouped(0), "0");
         assert_eq!(grouped(1_234), "1,234");
         assert_eq!(grouped(123_456_789), "123,456,789");
-        assert_eq!(fit_start("/Users/me/page.html", 30), "/Users/me/page.html");
-        assert_eq!(fit_start("/Users/me/page.html", 10), "…page.html");
-        assert_eq!(fit_start("/데이터/파일", 7), "…/파일");
-        assert_eq!(fit_start("abc", 0), "");
     }
 }

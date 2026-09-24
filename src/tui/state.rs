@@ -154,6 +154,8 @@ pub struct View {
     pub clock: LocalClock,
     /// Account names by uid, for file owners; a cache, not state.
     pub owners: HashMap<u32, Option<String>>,
+    /// Home directory of the user who started iotap, which the tables write as `~`.
+    pub home: Option<String>,
 }
 
 impl Default for View {
@@ -175,6 +177,7 @@ impl View {
             drawn: Drawn::default(),
             clock: LocalClock::default(),
             owners: HashMap::new(),
+            home: None,
         }
     }
 
