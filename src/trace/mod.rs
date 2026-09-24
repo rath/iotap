@@ -2,4 +2,5 @@
 
 pub mod codes;
 pub mod decode;
+pub mod pairing;
 pub mod synth;
