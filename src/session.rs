@@ -3,7 +3,7 @@
 //! A session depends only on its input and on the answers of its [`ProcSource`], never on
 //! wall-clock time, so a recording replays to the same output.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 
@@ -14,8 +14,8 @@ use crate::stats::{Stats, SummaryRow, Totals};
 use crate::sys::kdebug::KdBuf;
 use crate::sys::time::{ClockAnchor, Timebase};
 use crate::trace::codes::Role;
-use crate::trace::decode::{Kind, decode};
-use crate::trace::fdtable::FdTable;
+use crate::trace::decode::{Event, Kind, decode};
+use crate::trace::fdtable::{FdTable, Found, Verdict};
 use crate::trace::pairing::{Completed, Pairer, PathRecords};
 use crate::trace::procs::ProcSource;
 
@@ -63,6 +63,10 @@ pub enum Input {
     },
     /// Tracing stopped at this mach time.
     Stopped {
+        ticks: u64,
+    },
+    /// Every record up to this mach time has been delivered.
+    Watermark {
         ticks: u64,
     },
 }
@@ -139,6 +143,23 @@ struct ProcessState {
     alive: bool,
 }
 
+/// Output held back until the answers its event's target rests on are settled.
+#[derive(Debug)]
+enum Held {
+    Event {
+        event: IoEvent,
+        /// The unconfirmed libproc answer the target came from.
+        answer: Option<u64>,
+    },
+    Notice(Notice),
+}
+
+impl Held {
+    fn is_ready(&self) -> bool {
+        !matches!(self, Self::Event { answer: Some(_), .. })
+    }
+}
+
 #[derive(Debug)]
 pub struct Session {
     info: SessionInfo,
@@ -153,6 +174,8 @@ pub struct Session {
     unknown: Arc<Target>,
     /// Stands in for an unidentified descriptor that a socket-only call used.
     some_socket: Arc<Target>,
+    /// Events and notices waiting, in order, for the first of them to be settled.
+    held: VecDeque<Held>,
 }
 
 impl Session {
@@ -170,6 +193,7 @@ impl Session {
             stopped_ticks: None,
             unknown: Arc::new(Target::Unknown),
             some_socket: Arc::new(Target::Socket(Endpoint::unresolved(Proto::Other))),
+            held: VecDeque::new(),
             info,
         };
         for process in session.info.processes.clone() {
@@ -246,7 +270,7 @@ impl Session {
                         alive,
                     },
                 );
-                sink.notice(&Notice::Attached(process.clone()))?;
+                self.hold(Held::Notice(Notice::Attached(process.clone())), sink)?;
             }
             Input::Exec { pid, path } => {
                 if let Some(name) = path.rsplit('/').next().filter(|n| !n.is_empty())
@@ -255,17 +279,31 @@ impl Session {
                     name.clone_into(&mut state.name);
                 }
                 self.fds.attach(*pid, src);
-                sink.notice(&Notice::Exec {
+                let exec = Notice::Exec {
                     pid: *pid,
                     path: path.clone(),
-                })?;
+                };
+                self.hold(Held::Notice(exec), sink)?;
             }
             Input::Exited { pid } => self.exited(*pid, sink)?,
             Input::Stopped { ticks } => {
                 self.stopped_ticks = Some((*ticks).max(self.last_ticks));
+                self.finish(sink)?;
+            }
+            Input::Watermark { ticks } => {
+                self.last_ticks = self.last_ticks.max(*ticks);
+                self.fds.advance(*ticks);
+                self.settle(sink)?;
             }
         }
         Ok(())
+    }
+
+    /// Settles every answer still unconfirmed and emits what waited for it. Call it when no
+    /// more input will come; a `Stopped` input does it too.
+    pub fn finish(&mut self, sink: &mut dyn Sink) -> io::Result<()> {
+        self.fds.advance(u64::MAX);
+        self.settle(sink)
     }
 
     pub fn summary(&self) -> Summary {
@@ -300,6 +338,13 @@ impl Session {
             return Ok(());
         };
         self.last_ticks = self.last_ticks.max(event.ts);
+        self.apply(&event, src, sink)?;
+        // Every record up to this one has been seen now.
+        self.fds.advance(event.ts);
+        self.settle(sink)
+    }
+
+    fn apply(&mut self, event: &Event, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
         match event.kind {
             Kind::LostEvents => {
                 self.lost_events += 1;
@@ -313,16 +358,81 @@ impl Session {
                 for pid in alive {
                     self.fds.attach(pid, src);
                 }
-                sink.notice(&Notice::LostEvents {
+                let lost = Notice::LostEvents {
                     time_ns: self.unix_ns(event.ts),
-                })
+                };
+                self.hold(Held::Notice(lost), sink)
             }
             Kind::ProcExit { pid } => self.exited(pid, sink),
-            Kind::Syscall(_) | Kind::Lookup => match self.pairer.push(&event) {
+            Kind::Syscall(_) | Kind::Lookup => match self.pairer.push(event) {
                 Some(done) => self.completed(&done, src, sink),
                 None => Ok(()),
             },
         }
+    }
+
+    /// Emits `item` now, or queues it behind what is already waiting.
+    fn hold(&mut self, item: Held, sink: &mut dyn Sink) -> io::Result<()> {
+        if self.held.is_empty() && item.is_ready() {
+            return self.emit(item, sink);
+        }
+        self.held.push_back(item);
+        Ok(())
+    }
+
+    /// Applies the descriptor table's verdicts to waiting events and emits the ones at the
+    /// front that no longer wait.
+    fn settle(&mut self, sink: &mut dyn Sink) -> io::Result<()> {
+        let verdicts = self.fds.take_verdicts();
+        if !verdicts.is_empty() {
+            let outcome: HashMap<u64, Option<(Arc<Target>, Provenance)>> = verdicts
+                .into_iter()
+                .map(|verdict| match verdict {
+                    Verdict::Confirmed(answer) => (answer, None),
+                    Verdict::Stale {
+                        answer,
+                        target,
+                        provenance,
+                    } => (answer, Some((target, provenance))),
+                })
+                .collect();
+            for held in &mut self.held {
+                if let Held::Event { event, answer } = held
+                    && let Some(settled) = answer.and_then(|id| outcome.get(&id))
+                {
+                    if let Some((target, provenance)) = settled {
+                        event.target = target.clone();
+                        event.provenance = *provenance;
+                    }
+                    *answer = None;
+                }
+            }
+        }
+        while self.held.front().is_some_and(Held::is_ready) {
+            if let Some(item) = self.held.pop_front() {
+                self.emit(item, sink)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit(&mut self, item: Held, sink: &mut dyn Sink) -> io::Result<()> {
+        let mut event = match item {
+            Held::Notice(notice) => return sink.notice(&notice),
+            Held::Event { event, .. } => event,
+        };
+        // Only sockets take these calls, so an unidentified descriptor is at least a socket.
+        if *event.target == Target::Unknown
+            && event.op.needs_socket()
+            && !matches!(event.errno, libc::EBADF | libc::ENOTSOCK)
+        {
+            event.target = self.some_socket.clone();
+        }
+        if !self.filter.accepts(event.target.category()) {
+            return Ok(());
+        }
+        self.stats.record(&event);
+        sink.event(&event)
     }
 
     fn completed(
@@ -335,12 +445,8 @@ impl Session {
             self.fds.apply(done, src);
             return Ok(());
         };
-        let event = self.io_event(done, op, fd_arg, len_arg, src);
-        if !self.filter.accepts(event.target.category()) {
-            return Ok(());
-        }
-        self.stats.record(&event);
-        sink.event(&event)
+        let (event, answer) = self.io_event(done, op, fd_arg, len_arg, src);
+        self.hold(Held::Event { event, answer }, sink)
     }
 
     fn io_event(
@@ -350,21 +456,23 @@ impl Session {
         fd_arg: usize,
         len_arg: Option<usize>,
         src: &mut dyn ProcSource,
-    ) -> IoEvent {
+    ) -> (IoEvent, Option<u64>) {
         let fd = done.arg_i32(fd_arg);
-        let (mut target, provenance) = match fd {
+        let Found {
+            target,
+            provenance,
+            answer,
+        } = match fd {
             Some(fd) => self.fds.target(done.pid, fd, done.end_ts, src),
-            None => (self.unknown.clone(), Provenance::None),
+            None => Found {
+                target: self.unknown.clone(),
+                provenance: Provenance::None,
+                answer: None,
+            },
         };
-        if *target == Target::Unknown
-            && op.needs_socket()
-            && !matches!(done.errno, libc::EBADF | libc::ENOTSOCK)
-        {
-            target = self.some_socket.clone();
-        }
         let unit = op.result_unit();
         let ret = done.is_ok().then(|| done.ret_u64());
-        IoEvent {
+        let event = IoEvent {
             time_ns: self.unix_ns(done.end_ts),
             pid: done.pid,
             tid: done.tid,
@@ -380,7 +488,8 @@ impl Session {
                 .map(|ticks| self.info.timebase.ticks_to_nanos(ticks)),
             target,
             provenance,
-        }
+        };
+        (event, answer)
     }
 
     fn exited(&mut self, pid: i32, sink: &mut dyn Sink) -> io::Result<()> {
@@ -392,7 +501,7 @@ impl Session {
                     name: state.name.clone(),
                 };
                 self.fds.detach(pid);
-                sink.notice(&Notice::Exited(process))
+                self.hold(Held::Notice(Notice::Exited(process)), sink)
             }
             _ => Ok(()),
         }
@@ -532,6 +641,94 @@ mod tests {
         let totals = *session.stats().totals();
         assert_eq!((totals.file_read.bytes, totals.file_write.bytes), (1000, 12));
         assert_eq!((totals.net_write.bytes, totals.net_read.bytes), (517, 3000));
+    }
+
+    #[test]
+    fn events_wait_for_libproc_and_drop_stale_answers() {
+        let mut src = procs();
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        // Two connections one after the other on fd 4. libproc is asked late about both, and
+        // by then fd 4 is the second connection.
+        let later = Endpoint {
+            local: Some("10.0.0.2:5001".parse().unwrap()),
+            remote: Some("93.184.216.34:443".parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Tcp)
+        };
+        src.targets.insert((PID, 4), Target::Socket(later));
+        src.answered_at = 50_000;
+        let mut records = Vec::new();
+        for len in [10, 20] {
+            records.extend(synth.call(Call {
+                ret: 4,
+                ..Call::new(8, PID, 97, [2, 1, 0, 0])
+            }));
+            records.extend(synth.call(Call::new(8, PID, 98, [4, 0, 16, 0])));
+            records.extend(synth.io(8, PID, 133, 4, len, len));
+            if len == 10 {
+                records.extend(synth.close(8, PID, 4));
+            }
+        }
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(records), &mut src, &mut sink)
+            .unwrap();
+        let shown = |sink: &Collect| -> Vec<String> {
+            sink.events
+                .iter()
+                .map(|e| format!("{:?} {}", e.bytes, e.target))
+                .collect()
+        };
+        // The close came before the answer, so the first send keeps what the trace knows.
+        assert_eq!(shown(&sink), ["Some(10) tcp ?"]);
+        session
+            .handle(
+                &Input::Attached(Process {
+                    pid: 9,
+                    name: "late".into(),
+                }),
+                &mut src,
+                &mut sink,
+            )
+            .unwrap();
+        assert!(sink.notices.is_empty(), "the notice waits behind the second send");
+        session
+            .handle(&Input::Watermark { ticks: 50_000 }, &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(sink.events.len(), 1, "the trace is not past the answer yet");
+        session
+            .handle(&Input::Watermark { ticks: 50_001 }, &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(
+            shown(&sink),
+            [
+                "Some(10) tcp ?",
+                "Some(20) tcp 10.0.0.2:5001 -> 93.184.216.34:443"
+            ]
+        );
+        assert_eq!(sink.notices.len(), 1);
+        assert_eq!(session.stats().totals().net_write.bytes, 30);
+    }
+
+    #[test]
+    fn stopping_releases_what_still_waits() {
+        let mut src = procs();
+        src.answered_at = 1 << 40;
+        src.targets
+            .insert((PID, 6), Target::File { path: "/late".into() });
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        let records = synth.io(7, PID, 3, 6, 8, 8);
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(records), &mut src, &mut sink)
+            .unwrap();
+        assert!(sink.events.is_empty());
+        session
+            .handle(&Input::Stopped { ticks: 9_000 }, &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(sink.events[0].target.to_string(), "/late");
+        assert_eq!(sink.events[0].provenance, Provenance::Lazy);
     }
 
     #[test]

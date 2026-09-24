@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::Target;
 use crate::session::{Input, Process, SessionInfo};
 use crate::sys::kdebug::KdBuf;
-use crate::trace::procs::{ProcSource, Snapshot};
+use crate::trace::procs::{Described, ProcSource, Snapshot};
 
 const MAGIC: &[u8; 8] = b"IOTAPREC";
 const VERSION: u32 = 1;
@@ -31,6 +31,7 @@ const TAG_EXITED: u8 = 5;
 const TAG_STOPPED: u8 = 6;
 const TAG_SNAPSHOT: u8 = 7;
 const TAG_DESCRIBE: u8 = 8;
+const TAG_WATERMARK: u8 = 9;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -54,6 +55,11 @@ struct StoppedFrame {
     ticks: u64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct WatermarkFrame {
+    ticks: u64,
+}
+
 /// Written with borrowed answers, read back as owned ones.
 #[derive(Serialize, Deserialize)]
 struct SnapshotFrame<T> {
@@ -66,6 +72,9 @@ struct DescribeFrame<T> {
     pid: i32,
     fd: i32,
     answer: Option<T>,
+    /// Absent from recordings made before answers were checked against the trace.
+    #[serde(default)]
+    at: u64,
 }
 
 /// Writes a recording.
@@ -113,6 +122,7 @@ impl<W: Write> Recorder<W> {
             ),
             Input::Exited { pid } => self.json(TAG_EXITED, &PidFrame { pid: *pid }),
             Input::Stopped { ticks } => self.json(TAG_STOPPED, &StoppedFrame { ticks: *ticks }),
+            Input::Watermark { ticks } => self.json(TAG_WATERMARK, &WatermarkFrame { ticks: *ticks }),
         }
     }
 
@@ -120,8 +130,16 @@ impl<W: Write> Recorder<W> {
         self.json(TAG_SNAPSHOT, &SnapshotFrame { pid, answer })
     }
 
-    fn describe(&mut self, pid: i32, fd: i32, answer: Option<&Target>) -> io::Result<()> {
-        self.json(TAG_DESCRIBE, &DescribeFrame { pid, fd, answer })
+    fn describe(&mut self, pid: i32, fd: i32, described: &Described) -> io::Result<()> {
+        self.json(
+            TAG_DESCRIBE,
+            &DescribeFrame {
+                pid,
+                fd,
+                answer: described.target.as_ref(),
+                at: described.at,
+            },
+        )
     }
 
     /// Flushes and returns the writer.
@@ -199,10 +217,10 @@ impl<P: ProcSource, W: Write> ProcSource for Recording<P, W> {
         answer
     }
 
-    fn describe(&mut self, pid: i32, fd: i32) -> Option<Target> {
-        let answer = self.source.describe(pid, fd);
-        self.write(|recorder| recorder.describe(pid, fd, answer.as_ref()));
-        answer
+    fn describe(&mut self, pid: i32, fd: i32) -> Described {
+        let described = self.source.describe(pid, fd);
+        self.write(|recorder| recorder.describe(pid, fd, &described));
+        described
     }
 }
 
@@ -210,7 +228,7 @@ impl<P: ProcSource, W: Write> ProcSource for Recording<P, W> {
 #[derive(Debug, Default)]
 pub struct Answers {
     snapshots: HashMap<i32, VecDeque<Option<Snapshot>>>,
-    describes: HashMap<(i32, i32), VecDeque<Option<Target>>>,
+    describes: HashMap<(i32, i32), VecDeque<Described>>,
 }
 
 impl ProcSource for Answers {
@@ -221,11 +239,11 @@ impl ProcSource for Answers {
             .flatten()
     }
 
-    fn describe(&mut self, pid: i32, fd: i32) -> Option<Target> {
+    fn describe(&mut self, pid: i32, fd: i32) -> Described {
         self.describes
             .get_mut(&(pid, fd))
             .and_then(VecDeque::pop_front)
-            .flatten()
+            .unwrap_or_else(|| Described::settled(None))
     }
 }
 
@@ -338,8 +356,14 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
                     .describes
                     .entry((frame.pid, frame.fd))
                     .or_default()
-                    .push_back(frame.answer);
+                    .push_back(Described {
+                        target: frame.answer,
+                        at: frame.at,
+                    });
             }
+            TAG_WATERMARK => inputs.push(Input::Watermark {
+                ticks: json::<WatermarkFrame>(&payload).map_err(corrupt)?.ticks,
+            }),
             // Frames from newer versions of the same layout are skipped.
             _ => {}
         }
@@ -469,6 +493,27 @@ mod tests {
             "tcp 10.0.0.5:61000 -> 93.184.216.34:443"
         );
         assert_eq!(live.events[2].target.to_string(), "/tmp/out.html");
+    }
+
+    #[test]
+    fn keeps_answer_times_and_watermarks() {
+        let (info, mut procs, _) = fixture();
+        procs.answered_at = 77_000;
+        let mut recording = Recording::new(procs, Some(Recorder::new(Vec::new(), &info).unwrap()));
+        let answer = recording.describe(300, 5);
+        recording.input(&Input::Watermark { ticks: 78_000 });
+        let mut bytes = recording.recorder.take().unwrap().finish().unwrap();
+        // A describe frame from before answer times were kept.
+        let old = br#"{"pid":300,"fd":5,"answer":null}"#;
+        bytes.push(TAG_DESCRIBE);
+        bytes.extend_from_slice(&u32::try_from(old.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(old);
+
+        let mut replay = parse(bytes.as_slice()).unwrap();
+        assert_eq!(replay.inputs, [Input::Watermark { ticks: 78_000 }]);
+        assert_eq!(replay.answers.describe(300, 5), answer);
+        assert_eq!(answer.at, 77_000);
+        assert_eq!(replay.answers.describe(300, 5), Described::settled(None));
     }
 
     #[test]

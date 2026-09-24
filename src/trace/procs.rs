@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{FdType, Target};
 use crate::sys::proc as libproc;
+use crate::sys::time;
 
 /// Descriptor table and working directory of a process at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,12 +16,28 @@ pub struct Snapshot {
     pub cwd: Option<String>,
 }
 
+/// What a descriptor referred to when libproc was asked, and when that was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Described {
+    /// `None` when the descriptor was not open.
+    pub target: Option<Target>,
+    /// Mach time just after libproc answered; 0 when unknown, which trusts the answer at once.
+    pub at: u64,
+}
+
+impl Described {
+    /// An answer that needs no checking against the trace.
+    pub fn settled(target: Option<Target>) -> Self {
+        Self { target, at: 0 }
+    }
+}
+
 /// Answers questions about the traced processes.
 pub trait ProcSource {
     /// Descriptor table of `pid`, or `None` if the process is gone.
     fn snapshot(&mut self, pid: i32) -> Option<Snapshot>;
-    /// What `fd` of `pid` refers to now, or `None` if it is not open.
-    fn describe(&mut self, pid: i32, fd: i32) -> Option<Target>;
+    /// What `fd` of `pid` refers to now.
+    fn describe(&mut self, pid: i32, fd: i32) -> Described;
 }
 
 /// Queries the running system through libproc.
@@ -39,19 +56,27 @@ impl ProcSource for Live {
         })
     }
 
-    fn describe(&mut self, pid: i32, fd: i32) -> Option<Target> {
-        // Files and sockets answer directly; anything else needs the typed listing.
-        if let Ok(path) = libproc::fd_path(pid, fd) {
-            return Some(Target::File { path });
+    fn describe(&mut self, pid: i32, fd: i32) -> Described {
+        let target = live_target(pid, fd);
+        Described {
+            target,
+            at: time::now_ticks(),
         }
-        if let Ok(endpoint) = libproc::fd_socket(pid, fd) {
-            return Some(Target::Socket(endpoint));
-        }
-        let (_, fd_type) = libproc::list_fds(pid)?
-            .into_iter()
-            .find(|&(open, _)| open == fd)?;
-        describe_typed(pid, fd, fd_type)
     }
+}
+
+fn live_target(pid: i32, fd: i32) -> Option<Target> {
+    // Files and sockets answer directly; anything else needs the typed listing.
+    if let Ok(path) = libproc::fd_path(pid, fd) {
+        return Some(Target::File { path });
+    }
+    if let Ok(endpoint) = libproc::fd_socket(pid, fd) {
+        return Some(Target::Socket(endpoint));
+    }
+    let (_, fd_type) = libproc::list_fds(pid)?
+        .into_iter()
+        .find(|&(open, _)| open == fd)?;
+    describe_typed(pid, fd, fd_type)
 }
 
 /// Answers from fixed tables; for tests and synthetic fixtures.
@@ -59,6 +84,8 @@ impl ProcSource for Live {
 pub struct Fixed {
     pub snapshots: HashMap<i32, Snapshot>,
     pub targets: HashMap<(i32, i32), Target>,
+    /// Trace time every answer is given at, to stand for libproc lagging behind the trace.
+    pub answered_at: u64,
 }
 
 impl ProcSource for Fixed {
@@ -66,8 +93,11 @@ impl ProcSource for Fixed {
         self.snapshots.get(&pid).cloned()
     }
 
-    fn describe(&mut self, pid: i32, fd: i32) -> Option<Target> {
-        self.targets.get(&(pid, fd)).cloned()
+    fn describe(&mut self, pid: i32, fd: i32) -> Described {
+        Described {
+            target: self.targets.get(&(pid, fd)).cloned(),
+            at: self.answered_at,
+        }
     }
 }
 
@@ -114,12 +144,15 @@ mod tests {
         );
         assert!(snap.cwd.is_some());
         assert_eq!(
-            live.describe(pid, write_end.as_raw_fd()),
+            live.describe(pid, write_end.as_raw_fd()).target,
             Some(Target::Other {
                 fd_type: FdType::Pipe
             })
         );
-        assert_eq!(live.describe(pid, file.as_raw_fd()), find(file.as_raw_fd()));
-        assert_eq!(live.describe(pid, 9_999), None);
+        let before = time::now_ticks();
+        let described = live.describe(pid, file.as_raw_fd());
+        assert_eq!(described.target, find(file.as_raw_fd()));
+        assert!(described.at >= before);
+        assert_eq!(live.describe(pid, 9_999).target, None);
     }
 }

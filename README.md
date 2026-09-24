@@ -158,9 +158,9 @@ The UI stays open after tracing stops and says why it stopped.
 
 ### Recordings
 
-`--record FILE` saves the raw kernel records together with every answer libproc gave, and
-`--replay FILE` feeds them through the same processing, so a replay reproduces the output of the
-live run in any output mode. A recording holds paths and addresses but no transferred data.
+`--record FILE` saves the raw kernel records together with every answer libproc gave and when it
+gave it, and `--replay FILE` feeds them through the same processing, so a replay reproduces the
+output of the live run in any output mode. A recording holds paths and addresses but no transferred data.
 
 ## How it works
 
@@ -173,7 +173,13 @@ live run in any output mode. A recording holds paths and addresses but no transf
    lookup records, and tracks what each descriptor refers to. When a process is attached, its open
    descriptors come from libproc; after that, the traced open, socket, connect, accept, dup, fcntl
    and close calls keep the table current.
-4. Processing after the reader depends only on the records and on libproc's answers, never on
+4. libproc describes a descriptor as it is when asked, a few milliseconds after the traced call.
+   In between, the process may have closed it and received the same number for another one. So
+   an event whose target comes from libproc is held back until the trace has been read past the
+   moment libproc answered. If the trace shows the descriptor closed before then, the answer
+   described something else, and the event gets what the trace alone knows. An event waits about
+   10 ms for this, at most about 100 ms, and longer only while iotap lags behind the kernel.
+5. Processing after the reader depends only on the records and on libproc's answers, never on
    the clock, which is why recordings replay exactly. Only the live terminal UI reads the clock,
    for its elapsed time and its current second.
 
@@ -185,8 +191,9 @@ live run in any output mode. A recording holds paths and addresses but no transf
   page-cache writeback, never appear.
 - **Unknown sizes.** `sendfile` returns its byte count through a pointer the trace does not carry,
   and `sendmsg_x` and `recvmsg_x` return message counts, so iotap counts those calls without bytes.
-- **Stale lookups.** A descriptor first seen in use is looked up then. If it was closed and its
-  number reused in between, the lookup names the wrong target; such events carry `resolved: lazy`.
+- **Stale lookups.** iotap discards a libproc answer when the trace shows the descriptor closed
+  before libproc answered. A descriptor closed in a way the trace does not show, as by exec for
+  a close-on-exec descriptor, can still leave a lookup naming a later descriptor.
 - **Children.** The kernel's trace flag is not inherited by forked children, so they are not
   traced. A name target picks up new processes with that name within 250 ms and misses their
   first calls.

@@ -13,6 +13,10 @@ use crate::sys::proc as libproc;
 use crate::sys::time;
 use crate::target::{self, Tracked};
 
+/// How often an idle reader still says how far the trace has been read, so that the consumer
+/// can settle what it asked libproc about.
+const IDLE_WATERMARK: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Debug)]
 pub struct ReaderConfig {
     /// Names whose newly started processes should be traced too.
@@ -37,13 +41,27 @@ pub fn run(
     let mut watch = Watch::new(tracked, config);
     let mut buf = Vec::new();
     let mut last_poll = Instant::now();
+    let mut last_watermark = Instant::now();
+    // Records went out after the last watermark.
+    let mut unmarked = false;
     loop {
         let stopping = stop.load(Ordering::SeqCst);
         if !stopping {
             kd.wait(config.wait)?;
         }
-        if !drain(kd, &mut buf, tx)? {
+        let read_at = time::now_ticks();
+        let Some(count) = drain(kd, &mut buf, tx)? else {
             return Ok(());
+        };
+        if count > 0 {
+            unmarked = true;
+        } else if unmarked || last_watermark.elapsed() >= IDLE_WATERMARK {
+            // The read found nothing, so every record before it has been sent.
+            if tx.send(Input::Watermark { ticks: read_at }).is_err() {
+                return Ok(());
+            }
+            unmarked = false;
+            last_watermark = Instant::now();
         }
         if stopping {
             break;
@@ -59,7 +77,7 @@ pub fn run(
                 // Records of the last moments may still be in per-CPU buffers.
                 for _ in 0..2 {
                     thread::sleep(Duration::from_millis(20));
-                    if !drain(kd, &mut buf, tx)? {
+                    if drain(kd, &mut buf, tx)?.is_none() {
                         return Ok(());
                     }
                 }
@@ -73,14 +91,18 @@ pub fn run(
     Ok(())
 }
 
-/// Moves buffered records to the consumer; false if the consumer is gone.
+/// Moves buffered records to the consumer. Returns how many there were, or `None` if the
+/// consumer is gone.
 fn drain(
     kd: &Kdebug,
     buf: &mut Vec<crate::sys::kdebug::KdBuf>,
     tx: &Sender<Input>,
-) -> Result<bool, KdebugError> {
+) -> Result<Option<usize>, KdebugError> {
     let count = kd.read(buf)?;
-    Ok(count == 0 || tx.send(Input::Records(buf[..count].to_vec())).is_ok())
+    if count > 0 && tx.send(Input::Records(buf[..count].to_vec())).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(count))
 }
 
 /// Liveness, exec and name-follow bookkeeping for the traced processes.

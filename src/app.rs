@@ -274,7 +274,7 @@ fn consume(input: &mut LiveInput<'_>, session: &mut Session, sink: &mut dyn Sink
             let _ = writeln!(io::stderr(), "iotap: {message}");
         }
         if matches!(step, Step::Stopped | Step::Closed) {
-            return Ok(());
+            return session.finish(sink);
         }
     }
 }
@@ -331,6 +331,7 @@ impl Feed for LiveFeed<'_, '_> {
                 }
                 Step::Closed => {
                     self.ended = true;
+                    session.finish(app)?;
                     return Ok(Some(
                         "The kernel reader failed; its error follows the summary.".to_owned(),
                     ));
@@ -367,6 +368,7 @@ impl Feed for ReplayFeed<'_> {
                 return Ok(None);
             }
         }
+        session.finish(app)?;
         Ok(Some("End of the recording.".to_owned()))
     }
 
@@ -416,6 +418,7 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
             for input in feed.inputs.by_ref() {
                 session.handle(&input, &mut feed.answers, &mut Discard)?;
             }
+            session.finish(&mut Discard)?;
             let printer = Printer::new(cli, session.info())?;
             finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?;
         }
@@ -423,10 +426,15 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
     }
     let mut printer = Printer::new(cli, session.info())?;
     let sink = printer.sink();
-    let fed = replay.inputs.iter().try_for_each(|input| {
-        session.handle(input, &mut answers, sink)?;
-        sink.flush()
-    });
+    let fed = replay
+        .inputs
+        .iter()
+        .try_for_each(|input| {
+            session.handle(input, &mut answers, sink)?;
+            sink.flush()
+        })
+        .and_then(|()| session.finish(sink))
+        .and_then(|()| sink.flush());
     if finish_output(fed, WRITE_FAILED)? {
         finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?;
     }

@@ -3,13 +3,21 @@
 //! Traced calls are the most reliable source: an `open` END carries the new descriptor and
 //! the looked-up path. Descriptors that existed before tracing come from a snapshot, and
 //! anything still unknown is looked up the first time it is used.
+//!
+//! libproc describes a descriptor as it is when asked, which is after the traced call that
+//! made the table ask. If the process closed the descriptor in between and got its number back
+//! for a new one, the answer describes the new one. So an answer stays unconfirmed until the
+//! trace has been read past the moment it was given. If the descriptor was closed before that
+//! moment the answer is stale, and every entry that took its target from it falls back to what
+//! the trace alone says. [`Verdict`]s report how each answer turned out, so that events whose
+//! target rests on one can wait for it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use super::codes::{NewFd, Role};
 use super::pairing::{Completed, Lookup};
-use super::procs::ProcSource;
+use super::procs::{Described, ProcSource};
 use crate::model::{Endpoint, FdType, Proto, Provenance, Target};
 
 const F_DUPFD: i32 = 0;
@@ -23,6 +31,20 @@ struct FdEntry {
     opened_at: u64,
     /// Trace time after which an incomplete socket endpoint may be looked up again.
     refresh_at: Option<u64>,
+    /// The unconfirmed answer the target rests on.
+    answer: Option<u64>,
+}
+
+impl FdEntry {
+    fn new(target: Target, provenance: Provenance, opened_at: u64) -> Self {
+        Self {
+            target: Arc::new(target),
+            provenance,
+            opened_at,
+            refresh_at: None,
+            answer: None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +55,42 @@ struct ProcFds {
     misses: HashMap<i32, u64>,
 }
 
+/// An answer that entries rest on until the trace confirms it.
+#[derive(Debug)]
+struct Unconfirmed {
+    /// Mach time the answer was given.
+    at: u64,
+    /// Entries that took their target from it: the descriptor asked about and its copies.
+    entries: Vec<(i32, i32)>,
+    /// What the trace alone says, for when the answer turns out to be about another
+    /// descriptor.
+    fallback: Arc<Target>,
+    fallback_provenance: Provenance,
+}
+
+/// How an answer that targets rested on turned out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The trace was read past the answer with the descriptor still open.
+    Confirmed(u64),
+    /// The descriptor had been closed when libproc answered; `target` is what the trace alone
+    /// says instead.
+    Stale {
+        answer: u64,
+        target: Arc<Target>,
+        provenance: Provenance,
+    },
+}
+
+/// What a descriptor refers to, as far as the table knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub target: Arc<Target>,
+    pub provenance: Provenance,
+    /// The unconfirmed answer the target rests on.
+    pub answer: Option<u64>,
+}
+
 /// Descriptor tables of every traced process.
 #[derive(Debug)]
 pub struct FdTable {
@@ -40,6 +98,11 @@ pub struct FdTable {
     /// Minimum trace-time gap between two lookups of the same descriptor.
     retry_ticks: u64,
     unknown: Arc<Target>,
+    unconfirmed: HashMap<u64, Unconfirmed>,
+    /// Unconfirmed answers by the time they were given, oldest first.
+    by_time: VecDeque<(u64, u64)>,
+    next_answer: u64,
+    verdicts: Vec<Verdict>,
 }
 
 impl FdTable {
@@ -48,6 +111,10 @@ impl FdTable {
             procs: HashMap::new(),
             retry_ticks,
             unknown: Arc::new(Target::Unknown),
+            unconfirmed: HashMap::new(),
+            by_time: VecDeque::new(),
+            next_answer: 1,
+            verdicts: Vec::new(),
         }
     }
 
@@ -58,21 +125,25 @@ impl FdTable {
         let Some(snapshot) = src.snapshot(pid) else {
             return false;
         };
-        let old = self.procs.remove(&pid).unwrap_or_default();
+        let mut old = self.procs.remove(&pid).unwrap_or_default();
         let mut fds = HashMap::with_capacity(snapshot.fds.len());
         for (fd, target) in snapshot.fds {
-            let kept = old.fds.get(&fd).filter(|prev| {
-                prev.provenance == Provenance::Traced
-                    && (*prev.target == target
-                        || matches!((&*prev.target, &target), (Target::File { .. }, Target::File { path }) if path.is_empty()))
-            });
-            let entry = kept.cloned().unwrap_or_else(|| FdEntry {
-                refresh_at: needs_refresh(&target).then_some(0),
-                target: Arc::new(target),
-                provenance: Provenance::Snapshot,
-                opened_at: 0,
-            });
+            let entry = match old.fds.remove(&fd) {
+                Some(prev) if keeps(&prev, &target) => prev,
+                prev => {
+                    if let Some(prev) = &prev {
+                        self.retire(pid, fd, prev, None);
+                    }
+                    FdEntry {
+                        refresh_at: needs_refresh(&target).then_some(0),
+                        ..FdEntry::new(target, Provenance::Snapshot, 0)
+                    }
+                }
+            };
             fds.insert(fd, entry);
+        }
+        for (fd, entry) in &old.fds {
+            self.retire(pid, *fd, entry, None);
         }
         self.procs.insert(
             pid,
@@ -87,7 +158,11 @@ impl FdTable {
 
     /// Forgets `pid`.
     pub fn detach(&mut self, pid: i32) {
-        self.procs.remove(&pid);
+        if let Some(proc_fds) = self.procs.remove(&pid) {
+            for (fd, entry) in &proc_fds.fds {
+                self.retire(pid, *fd, entry, None);
+            }
+        }
     }
 
     pub fn is_attached(&self, pid: i32) -> bool {
@@ -95,41 +170,53 @@ impl FdTable {
     }
 
     /// Target of `fd` at trace time `ts`, looking it up if the table does not know it.
-    pub fn target(
-        &mut self,
-        pid: i32,
-        fd: i32,
-        ts: u64,
-        src: &mut dyn ProcSource,
-    ) -> (Arc<Target>, Provenance) {
-        let retry = self.retry_ticks;
-        let proc_fds = self.procs.entry(pid).or_default();
-        if let Some(entry) = proc_fds.fds.get_mut(&fd) {
-            if entry.refresh_at.is_some_and(|at| ts >= at) {
-                refresh_socket(entry, src.describe(pid, fd), ts, retry);
+    pub fn target(&mut self, pid: i32, fd: i32, ts: u64, src: &mut dyn ProcSource) -> Found {
+        let due = self
+            .entry(pid, fd)
+            .map(|entry| entry.answer.is_none() && entry.refresh_at.is_some_and(|at| ts >= at));
+        match due {
+            None => return self.look_up(pid, fd, ts, src),
+            Some(true) => {
+                let described = src.describe(pid, fd);
+                self.refresh(pid, fd, described, ts);
             }
-            return (entry.target.clone(), entry.provenance);
+            Some(false) => {}
         }
-        if proc_fds
-            .misses
-            .get(&fd)
-            .is_some_and(|&at| ts < at.saturating_add(retry))
-        {
-            return (self.unknown.clone(), Provenance::None);
+        match self.entry(pid, fd) {
+            Some(entry) => Found {
+                target: entry.target.clone(),
+                provenance: entry.provenance,
+                answer: entry.answer,
+            },
+            None => self.unknown_found(),
         }
-        let Some(target) = src.describe(pid, fd) else {
-            proc_fds.misses.insert(fd, ts);
-            return (self.unknown.clone(), Provenance::None);
-        };
-        let entry = FdEntry {
-            refresh_at: needs_refresh(&target).then(|| ts.saturating_add(retry)),
-            target: Arc::new(target),
-            provenance: Provenance::Lazy,
-            opened_at: 0,
-        };
-        let found = (entry.target.clone(), entry.provenance);
-        proc_fds.fds.insert(fd, entry);
-        found
+    }
+
+    /// Confirms the answers given before trace time `ts`: the trace up to then has been read,
+    /// and it did not close their descriptors.
+    pub fn advance(&mut self, ts: u64) {
+        while let Some(&(at, answer)) = self.by_time.front() {
+            if at >= ts {
+                break;
+            }
+            self.by_time.pop_front();
+            let Some(unconfirmed) = self.unconfirmed.remove(&answer) else {
+                continue;
+            };
+            for (pid, fd) in unconfirmed.entries {
+                if let Some(entry) = self.entry_mut(pid, fd)
+                    && entry.answer == Some(answer)
+                {
+                    entry.answer = None;
+                }
+            }
+            self.verdicts.push(Verdict::Confirmed(answer));
+        }
+    }
+
+    /// Verdicts reached since the last call.
+    pub fn take_verdicts(&mut self) -> Vec<Verdict> {
+        std::mem::take(&mut self.verdicts)
     }
 
     /// Applies a call that creates, copies or closes descriptors, or changes directory.
@@ -139,6 +226,9 @@ impl FdTable {
             return;
         }
         let (pid, ts) = (done.pid, done.end_ts);
+        // When the call began: a descriptor it closes or replaces was gone by its end at the
+        // latest, and possibly from its start.
+        let since = done.start_ts().unwrap_or(ts);
         match done.call.role {
             Role::Io { .. } => {}
             Role::Open { dirfd_arg } => {
@@ -146,10 +236,9 @@ impl FdTable {
                 match &done.lookup {
                     Some(lookup) => {
                         let dirfd = dirfd_arg.and_then(|i| done.arg_i32(i));
-                        let path = self.opened_path(pid, fd, dirfd, lookup, src);
-                        self.insert(pid, fd, Target::File { path }, ts);
+                        self.open(pid, fd, dirfd, lookup, (ts, since), src);
                     }
-                    None => self.forget(pid, fd),
+                    None => self.forget(pid, fd, since),
                 }
             }
             Role::Close => {
@@ -159,14 +248,14 @@ impl FdTable {
             }
             Role::Dup | Role::Dup2 => {
                 if let Some(old) = done.arg_i32(0) {
-                    self.copy(pid, old, done.ret_i32(), ts, src);
+                    self.copy(pid, old, done.ret_i32(), (ts, since), src);
                 }
             }
             Role::Fcntl => {
                 if matches!(done.arg_i32(1), Some(F_DUPFD | F_DUPFD_CLOEXEC))
                     && let Some(old) = done.arg_i32(0)
                 {
-                    self.copy(pid, old, done.ret_i32(), ts, src);
+                    self.copy(pid, old, done.ret_i32(), (ts, since), src);
                 }
             }
             Role::Socket => {
@@ -177,22 +266,35 @@ impl FdTable {
                     _ => Proto::Other,
                 };
                 let fd = done.ret_i32();
-                self.insert(pid, fd, Target::Socket(Endpoint::unresolved(proto)), ts);
-                self.schedule_refresh(pid, fd, 0);
+                let entry = FdEntry {
+                    refresh_at: Some(0),
+                    ..FdEntry::new(
+                        Target::Socket(Endpoint::unresolved(proto)),
+                        Provenance::Traced,
+                        ts,
+                    )
+                };
+                self.insert(pid, fd, entry, since);
             }
             Role::Accept => self.accept(pid, done, src),
             Role::Connect => {
                 if let Some(fd) = done.arg_i32(0) {
                     let path = done.lookup.as_ref().map(|lookup| self.guess(pid, None, lookup));
-                    self.connect(pid, fd, path, ts, src);
+                    self.connect(pid, fd, path.as_deref(), ts, src);
                 }
             }
             Role::Pipe => {
-                let pipe = || Target::Other {
-                    fd_type: FdType::Pipe,
-                };
-                self.insert(pid, done.rval[0].cast_signed(), pipe(), ts);
-                self.insert(pid, done.rval[1].cast_signed(), pipe(), ts);
+                for fd in done.rval {
+                    let pipe = Target::Other {
+                        fd_type: FdType::Pipe,
+                    };
+                    self.insert(
+                        pid,
+                        fd.cast_signed(),
+                        FdEntry::new(pipe, Provenance::Traced, ts),
+                        since,
+                    );
+                }
             }
             Role::NewFd(kind) => {
                 let fd = done.ret_i32();
@@ -200,9 +302,10 @@ impl FdTable {
                     NewFd::Kqueue => FdType::Kqueue,
                     NewFd::Pshm => FdType::Pshm,
                     NewFd::Necp => FdType::Netpolicy,
-                    NewFd::Unknown => return self.forget(pid, fd),
+                    NewFd::Unknown => return self.forget(pid, fd, since),
                 };
-                self.insert(pid, fd, Target::Other { fd_type }, ts);
+                let entry = FdEntry::new(Target::Other { fd_type }, Provenance::Traced, ts);
+                self.insert(pid, fd, entry, since);
             }
             Role::Chdir => {
                 if let Some(lookup) = &done.lookup {
@@ -219,25 +322,161 @@ impl FdTable {
         }
     }
 
-    fn insert(&mut self, pid: i32, fd: i32, target: Target, ts: u64) {
-        let proc_fds = self.procs.entry(pid).or_default();
-        proc_fds.misses.remove(&fd);
-        proc_fds.fds.insert(
-            fd,
-            FdEntry {
-                target: Arc::new(target),
-                provenance: Provenance::Traced,
-                opened_at: ts,
-                refresh_at: None,
+    fn entry(&self, pid: i32, fd: i32) -> Option<&FdEntry> {
+        self.procs.get(&pid)?.fds.get(&fd)
+    }
+
+    fn entry_mut(&mut self, pid: i32, fd: i32) -> Option<&mut FdEntry> {
+        self.procs.get_mut(&pid)?.fds.get_mut(&fd)
+    }
+
+    fn unknown_found(&self) -> Found {
+        Found {
+            target: self.unknown.clone(),
+            provenance: Provenance::None,
+            answer: None,
+        }
+    }
+
+    /// Asks libproc about a descriptor the table does not know.
+    fn look_up(&mut self, pid: i32, fd: i32, ts: u64, src: &mut dyn ProcSource) -> Found {
+        let retry = self.retry_ticks;
+        let missed = self
+            .procs
+            .get(&pid)
+            .and_then(|p| p.misses.get(&fd))
+            .is_some_and(|&at| ts < at.saturating_add(retry));
+        if missed {
+            return self.unknown_found();
+        }
+        let described = src.describe(pid, fd);
+        let Some(target) = described.target else {
+            self.procs.entry(pid).or_default().misses.insert(fd, ts);
+            return self.unknown_found();
+        };
+        let entry = FdEntry {
+            refresh_at: needs_refresh(&target).then(|| ts.saturating_add(retry)),
+            ..FdEntry::new(target, Provenance::Lazy, 0)
+        };
+        let found = Found {
+            target: entry.target.clone(),
+            provenance: entry.provenance,
+            answer: None,
+        };
+        self.procs.entry(pid).or_default().fds.insert(fd, entry);
+        let fallback = (self.unknown.clone(), Provenance::None);
+        let answer = self.rest_on(pid, fd, described.at, ts, fallback);
+        Found { answer, ..found }
+    }
+
+    /// Takes a new answer about a socket whose endpoint was incomplete.
+    fn refresh(&mut self, pid: i32, fd: i32, described: Described, ts: u64) {
+        let retry_at = ts.saturating_add(self.retry_ticks);
+        let Some(entry) = self.entry_mut(pid, fd) else {
+            return;
+        };
+        let endpoint = match described.target {
+            Some(Target::Socket(endpoint)) if same_kind(&entry.target, &endpoint) => endpoint,
+            _ => {
+                entry.refresh_at = Some(retry_at);
+                return;
+            }
+        };
+        let target = Target::Socket(endpoint);
+        entry.refresh_at = needs_refresh(&target).then_some(retry_at);
+        if *entry.target == target {
+            return;
+        }
+        let fallback = (
+            std::mem::replace(&mut entry.target, Arc::new(target)),
+            entry.provenance,
+        );
+        self.rest_on(pid, fd, described.at, ts, fallback);
+    }
+
+    /// Makes the entry of `pid`/`fd` rest on an answer given at `at` in place of `fallback`,
+    /// unless the trace at `ts` is already past the answer. Returns the answer's number.
+    fn rest_on(
+        &mut self,
+        pid: i32,
+        fd: i32,
+        at: u64,
+        ts: u64,
+        fallback: (Arc<Target>, Provenance),
+    ) -> Option<u64> {
+        if at <= ts {
+            return None;
+        }
+        let answer = self.next_answer;
+        self.next_answer += 1;
+        self.unconfirmed.insert(
+            answer,
+            Unconfirmed {
+                at,
+                entries: vec![(pid, fd)],
+                fallback: fallback.0,
+                fallback_provenance: fallback.1,
             },
         );
+        self.by_time.push_back((at, answer));
+        if let Some(entry) = self.entry_mut(pid, fd) {
+            entry.answer = Some(answer);
+        }
+        Some(answer)
+    }
+
+    /// Settles the answer `entry` rested on as it leaves the table. `closed_at` is the trace time
+    /// its descriptor was closed or replaced, when known: an answer given after that was about
+    /// whatever took the number next, so it is stale for every entry that used it.
+    fn retire(&mut self, pid: i32, fd: i32, entry: &FdEntry, closed_at: Option<u64>) {
+        let Some(answer) = entry.answer else {
+            return;
+        };
+        let Some(at) = self.unconfirmed.get(&answer).map(|u| u.at) else {
+            return;
+        };
+        if closed_at.is_none_or(|closed| at <= closed) {
+            if let Some(unconfirmed) = self.unconfirmed.get_mut(&answer) {
+                unconfirmed.entries.retain(|&e| e != (pid, fd));
+            }
+            return;
+        }
+        let Some(unconfirmed) = self.unconfirmed.remove(&answer) else {
+            return;
+        };
+        for (other_pid, other_fd) in unconfirmed.entries {
+            if let Some(other) = self.entry_mut(other_pid, other_fd)
+                && other.answer == Some(answer)
+            {
+                other.target = unconfirmed.fallback.clone();
+                other.provenance = unconfirmed.fallback_provenance;
+                other.answer = None;
+            }
+        }
+        self.verdicts.push(Verdict::Stale {
+            answer,
+            target: unconfirmed.fallback,
+            provenance: unconfirmed.fallback_provenance,
+        });
+    }
+
+    /// Puts `entry` in the table for a descriptor created at trace time `since` or later.
+    fn insert(&mut self, pid: i32, fd: i32, entry: FdEntry, since: u64) {
+        let proc_fds = self.procs.entry(pid).or_default();
+        proc_fds.misses.remove(&fd);
+        if let Some(old) = proc_fds.fds.insert(fd, entry) {
+            self.retire(pid, fd, &old, Some(since));
+        }
     }
 
     /// Drops what is known about `fd` so its next use looks it up afresh.
-    fn forget(&mut self, pid: i32, fd: i32) {
-        if let Some(proc_fds) = self.procs.get_mut(&pid) {
-            proc_fds.fds.remove(&fd);
-            proc_fds.misses.remove(&fd);
+    fn forget(&mut self, pid: i32, fd: i32, since: u64) {
+        let Some(proc_fds) = self.procs.get_mut(&pid) else {
+            return;
+        };
+        proc_fds.misses.remove(&fd);
+        if let Some(old) = proc_fds.fds.remove(&fd) {
+            self.retire(pid, fd, &old, Some(since));
         }
     }
 
@@ -252,58 +491,100 @@ impl FdTable {
             .fds
             .get(&fd)
             .is_some_and(|entry| entry.opened_at < start_ts)
+            && let Some(old) = proc_fds.fds.remove(&fd)
         {
-            proc_fds.fds.remove(&fd);
+            self.retire(pid, fd, &old, Some(start_ts));
         }
     }
 
-    fn copy(&mut self, pid: i32, old: i32, new: i32, ts: u64, src: &mut dyn ProcSource) {
+    fn copy(&mut self, pid: i32, old: i32, new: i32, (ts, since): (u64, u64), src: &mut dyn ProcSource) {
         if old == new {
             return;
         }
-        let (target, provenance) = self.target(pid, old, ts, src);
-        let proc_fds = self.procs.entry(pid).or_default();
-        let refresh_at = proc_fds.fds.get(&old).and_then(|entry| entry.refresh_at);
-        proc_fds.misses.remove(&new);
-        if *target == Target::Unknown {
-            proc_fds.fds.remove(&new);
+        let found = self.target(pid, old, ts, src);
+        if *found.target == Target::Unknown {
+            self.forget(pid, new, since);
             return;
         }
-        proc_fds.fds.insert(
-            new,
-            FdEntry {
-                target,
-                provenance,
-                opened_at: ts,
-                refresh_at,
-            },
-        );
+        let entry = FdEntry {
+            target: found.target,
+            provenance: found.provenance,
+            opened_at: ts,
+            refresh_at: self.entry(pid, old).and_then(|entry| entry.refresh_at),
+            answer: found.answer,
+        };
+        self.insert(pid, new, entry, since);
+        // The copy refers to the same open file, so the answer's verdict holds for it too.
+        if let Some(answer) = found.answer
+            && let Some(unconfirmed) = self.unconfirmed.get_mut(&answer)
+        {
+            unconfirmed.entries.push((pid, new));
+        }
+    }
+
+    fn open(
+        &mut self,
+        pid: i32,
+        fd: i32,
+        dirfd: Option<i32>,
+        lookup: &Lookup,
+        (ts, since): (u64, u64),
+        src: &mut dyn ProcSource,
+    ) {
+        let file = |path| FdEntry::new(Target::File { path }, Provenance::Traced, ts);
+        if lookup.is_absolute() {
+            self.insert(pid, fd, file(lookup.path.clone()), since);
+            return;
+        }
+        // A path the kernel reported relative or cut short is replaced by libproc's name for
+        // the new descriptor when that ends in the same name; it cannot help once the process
+        // has closed the descriptor.
+        let guess = self.guess(pid, dirfd, lookup);
+        let described = src.describe(pid, fd);
+        match described.target {
+            Some(Target::File { path }) if same_name(&path, &lookup.path) => {
+                self.insert(pid, fd, file(path), since);
+                let fallback = (Arc::new(Target::File { path: guess }), Provenance::Traced);
+                self.rest_on(pid, fd, described.at, ts, fallback);
+            }
+            _ => self.insert(pid, fd, file(guess), since),
+        }
     }
 
     fn accept(&mut self, pid: i32, done: &Completed, src: &mut dyn ProcSource) {
         let (fd, ts) = (done.ret_i32(), done.end_ts);
+        let since = done.start_ts().unwrap_or(ts);
         let retry_at = ts.saturating_add(self.retry_ticks);
-        if let Some(target @ Target::Socket(_)) = src.describe(pid, fd) {
-            let refresh = needs_refresh(&target);
-            self.insert(pid, fd, target, ts);
-            if refresh {
-                self.schedule_refresh(pid, fd, retry_at);
+        // What the trace tells: a socket like the one it was accepted on.
+        let listening = match done.arg_i32(0) {
+            Some(listener) => self.accepted_from(pid, listener, ts, src),
+            None => Endpoint::unresolved(Proto::Other),
+        };
+        let traced = Target::Socket(listening);
+        let described = src.describe(pid, fd);
+        match described.target {
+            Some(Target::Socket(endpoint)) if same_kind(&traced, &endpoint) => {
+                let answered = Target::Socket(endpoint);
+                let entry = FdEntry {
+                    refresh_at: needs_refresh(&answered).then_some(retry_at),
+                    ..FdEntry::new(answered, Provenance::Traced, ts)
+                };
+                self.insert(pid, fd, entry, since);
+                self.rest_on(pid, fd, described.at, ts, (Arc::new(traced), Provenance::Traced));
             }
-        } else {
-            // Closed before it could be looked up, it still was a socket like the one it was
-            // accepted on.
-            let endpoint = match done.arg_i32(0) {
-                Some(listener) => self.accepted_from(pid, listener, ts, src),
-                None => Endpoint::unresolved(Proto::Other),
-            };
-            self.insert(pid, fd, Target::Socket(endpoint), ts);
-            self.schedule_refresh(pid, fd, retry_at);
+            _ => {
+                let entry = FdEntry {
+                    refresh_at: Some(retry_at),
+                    ..FdEntry::new(traced, Provenance::Traced, ts)
+                };
+                self.insert(pid, fd, entry, since);
+            }
         }
     }
 
     /// What an accepted connection is known to share with the socket it was accepted on.
     fn accepted_from(&mut self, pid: i32, listener: i32, ts: u64, src: &mut dyn ProcSource) -> Endpoint {
-        match &*self.target(pid, listener, ts, src).0 {
+        match &*self.target(pid, listener, ts, src).target {
             Target::Socket(listening) => Endpoint {
                 remote: None,
                 ..listening.clone()
@@ -312,64 +593,48 @@ impl FdTable {
         }
     }
 
-    fn connect(&mut self, pid: i32, fd: i32, path: Option<String>, ts: u64, src: &mut dyn ProcSource) {
-        let retry = self.retry_ticks;
+    fn connect(&mut self, pid: i32, fd: i32, path: Option<&str>, ts: u64, src: &mut dyn ProcSource) {
+        let retry_at = ts.saturating_add(self.retry_ticks);
         let described = src.describe(pid, fd);
-        let proc_fds = self.procs.entry(pid).or_default();
-        let entry = proc_fds.fds.entry(fd).or_insert_with(|| FdEntry {
-            target: Arc::new(Target::Socket(Endpoint::unresolved(Proto::Other))),
-            provenance: Provenance::Lazy,
-            opened_at: 0,
-            refresh_at: None,
-        });
-        refresh_socket(entry, described, ts, retry);
+        let (known, provenance, opened_at) = match self.entry(pid, fd) {
+            Some(entry) => (entry.target.clone(), entry.provenance, entry.opened_at),
+            None => (
+                Arc::new(Target::Socket(Endpoint::unresolved(Proto::Other))),
+                Provenance::Lazy,
+                0,
+            ),
+        };
         // Only a Unix-domain connect looks up a path: the socket file, found from the caller's
         // directory. libproc reports the address the peer was bound with instead, which can be
         // relative, and nothing once the socket is closed.
-        if let (Some(path), Target::Socket(endpoint)) = (path, &*entry.target)
-            && matches!(endpoint.proto, Proto::Unix | Proto::Other)
-            && !endpoint.path.as_deref().is_some_and(|p| p.starts_with('/'))
-        {
-            let endpoint = Endpoint {
-                proto: Proto::Unix,
-                path: Some(path),
-                ..endpoint.clone()
-            };
-            entry.target = Arc::new(Target::Socket(endpoint));
-            entry.refresh_at = None;
+        let traced = Arc::new(with_unix_path(&known, path));
+        let answered = match described.target {
+            Some(Target::Socket(endpoint)) if same_kind(&known, &endpoint) => {
+                Some(with_unix_path(&Target::Socket(endpoint), path))
+            }
+            _ => None,
+        };
+        let target = answered.clone().map_or_else(|| traced.clone(), Arc::new);
+        let entry = FdEntry {
+            refresh_at: needs_refresh(&target).then_some(retry_at),
+            target,
+            provenance,
+            opened_at,
+            answer: None,
+        };
+        let replaced = self.procs.entry(pid).or_default().fds.insert(fd, entry);
+        if let Some(old) = replaced {
+            self.retire(pid, fd, &old, None);
         }
-    }
-
-    fn schedule_refresh(&mut self, pid: i32, fd: i32, at: u64) {
-        if let Some(entry) = self.procs.get_mut(&pid).and_then(|p| p.fds.get_mut(&fd)) {
-            entry.refresh_at = Some(at);
+        if answered.is_some_and(|answered| answered != *traced) {
+            self.rest_on(pid, fd, described.at, ts, (traced, provenance));
         }
     }
 
     fn file_path(&self, pid: i32, fd: i32) -> Option<String> {
-        match &*self.procs.get(&pid)?.fds.get(&fd)?.target {
+        match &*self.entry(pid, fd)?.target {
             Target::File { path } if !path.is_empty() => Some(path.clone()),
             _ => None,
-        }
-    }
-
-    /// Path of the file an open call looked up. A path the kernel reported relative or cut short
-    /// is replaced by libproc's name for the new descriptor when that ends in the same name; it
-    /// cannot help once the process has closed the descriptor.
-    fn opened_path(
-        &self,
-        pid: i32,
-        fd: i32,
-        dirfd: Option<i32>,
-        lookup: &Lookup,
-        src: &mut dyn ProcSource,
-    ) -> String {
-        if lookup.is_absolute() {
-            return lookup.path.clone();
-        }
-        match src.describe(pid, fd) {
-            Some(Target::File { path }) if same_name(&path, &lookup.path) => path,
-            _ => self.guess(pid, dirfd, lookup),
         }
     }
 
@@ -404,6 +669,42 @@ impl FdTable {
     }
 }
 
+/// Whether an entry from traced calls survives a new snapshot: the snapshot agrees, or only
+/// lacks the name of a file that was unlinked since.
+fn keeps(prev: &FdEntry, target: &Target) -> bool {
+    prev.provenance == Provenance::Traced
+        && (*prev.target == *target
+            || matches!((&*prev.target, target), (Target::File { .. }, Target::File { path }) if path.is_empty()))
+}
+
+/// A socket target with the path a Unix-domain connect looked up, unless it already names an
+/// absolute one. Other targets are returned as they are.
+fn with_unix_path(target: &Target, path: Option<&str>) -> Target {
+    match (target, path) {
+        (Target::Socket(endpoint), Some(path))
+            if matches!(endpoint.proto, Proto::Unix | Proto::Other)
+                && !endpoint.path.as_deref().is_some_and(|p| p.starts_with('/')) =>
+        {
+            Target::Socket(Endpoint {
+                proto: Proto::Unix,
+                path: Some(path.to_owned()),
+                ..endpoint.clone()
+            })
+        }
+        _ => target.clone(),
+    }
+}
+
+/// Whether libproc's `endpoint` can describe the socket the trace knows as `known`: a socket
+/// created as one protocol never turns into another, so a different protocol means the number
+/// was reused.
+fn same_kind(known: &Target, endpoint: &Endpoint) -> bool {
+    match known {
+        Target::Socket(traced) => traced.proto == Proto::Other || traced.proto == endpoint.proto,
+        _ => true,
+    }
+}
+
 /// `/etc`, `/tmp` and `/var` link to `private/etc`, `private/tmp` and `private/var`, so the
 /// kernel reports a lookup through them relative to the root directory.
 fn through_root_link(path: &str) -> bool {
@@ -425,18 +726,6 @@ fn file_name(path: &str) -> &str {
 
 fn needs_refresh(target: &Target) -> bool {
     matches!(target, Target::Socket(endpoint) if endpoint.is_incomplete())
-}
-
-/// Replaces a socket entry's endpoint with a fresh lookup and schedules the next one while the
-/// endpoint stays incomplete.
-fn refresh_socket(entry: &mut FdEntry, described: Option<Target>, ts: u64, retry: u64) {
-    match described {
-        Some(target @ Target::Socket(_)) => {
-            entry.refresh_at = needs_refresh(&target).then(|| ts.saturating_add(retry));
-            entry.target = Arc::new(target);
-        }
-        _ => entry.refresh_at = Some(ts.saturating_add(retry)),
-    }
 }
 
 fn join(base: &str, relative: &str) -> String {
@@ -463,6 +752,8 @@ mod tests {
         snapshots: HashMap<i32, Snapshot>,
         live: HashMap<(i32, i32), Target>,
         describes: usize,
+        /// Trace time the answers are given at; 0 trusts them at once.
+        answered_at: u64,
     }
 
     impl ProcSource for Fake {
@@ -470,9 +761,12 @@ mod tests {
             self.snapshots.get(&pid).cloned()
         }
 
-        fn describe(&mut self, pid: i32, fd: i32) -> Option<Target> {
+        fn describe(&mut self, pid: i32, fd: i32) -> Described {
             self.describes += 1;
-            self.live.get(&(pid, fd)).cloned()
+            Described {
+                target: self.live.get(&(pid, fd)).cloned(),
+                at: self.answered_at,
+            }
         }
     }
 
@@ -499,8 +793,84 @@ mod tests {
     }
 
     fn target_of(table: &mut FdTable, fd: i32, ts: u64, src: &mut Fake) -> (Target, Provenance) {
-        let (target, provenance) = table.target(PID, fd, ts, src);
-        ((*target).clone(), provenance)
+        let found = table.target(PID, fd, ts, src);
+        ((*found.target).clone(), found.provenance)
+    }
+
+    fn tcp(remote: Option<&str>) -> Target {
+        Target::Socket(Endpoint {
+            remote: remote.map(|r| r.parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Tcp)
+        })
+    }
+
+    #[test]
+    fn answers_given_after_a_close_are_stale() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        let (inet, stream) = (i64::from(libc::AF_INET), i64::from(libc::SOCK_STREAM));
+        // By the time libproc is asked about fd 4, it names a later connection.
+        src.live.insert((PID, 4), tcp(Some("10.0.0.2:443")));
+        table.apply(&done(97, 1, 2, [inet, stream, 0, 0], 4, &[]), &mut src);
+        table.apply(&done(98, 3, 4, [4, 0, 0, 0], 0, &[]), &mut src);
+        let first = table.target(PID, 4, 5, &mut src);
+        assert_eq!(*first.target, tcp(Some("10.0.0.2:443")));
+        let answer = first.answer.expect("unconfirmed");
+        table.apply(&done(6, 6, 7, [4, 0, 0, 0], 0, &[]), &mut src);
+        assert_eq!(
+            table.take_verdicts(),
+            [Verdict::Stale {
+                answer,
+                target: Arc::new(tcp(None)),
+                provenance: Provenance::Traced,
+            }]
+        );
+        // The later connection itself: the same answer holds once the trace passes it.
+        table.apply(&done(97, 8, 9, [inet, stream, 0, 0], 4, &[]), &mut src);
+        table.apply(&done(98, 10, 11, [4, 0, 0, 0], 0, &[]), &mut src);
+        let second = table.target(PID, 4, 12, &mut src).answer.expect("unconfirmed");
+        table.advance(100);
+        assert!(table.take_verdicts().is_empty(), "not yet past the answer");
+        table.advance(101);
+        assert_eq!(table.take_verdicts(), [Verdict::Confirmed(second)]);
+        let found = table.target(PID, 4, 102, &mut src);
+        assert_eq!((found.answer, &*found.target), (None, &tcp(Some("10.0.0.2:443"))));
+    }
+
+    #[test]
+    fn copies_share_the_verdict_of_their_answer() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        src.live.insert((PID, 5), file("/later"));
+        assert!(table.target(PID, 5, 1, &mut src).answer.is_some());
+        table.apply(&done(41, 2, 3, [5, 0, 0, 0], 6, &[]), &mut src);
+        table.apply(&done(6, 4, 5, [5, 0, 0, 0], 0, &[]), &mut src);
+        assert!(matches!(table.take_verdicts()[..], [Verdict::Stale { .. }]));
+        assert_eq!(
+            target_of(&mut table, 6, 6, &mut src),
+            (Target::Unknown, Provenance::None),
+            "the copy falls back too"
+        );
+    }
+
+    #[test]
+    fn a_different_protocol_means_the_number_was_reused() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let (inet, dgram) = (i64::from(libc::AF_INET), i64::from(libc::SOCK_DGRAM));
+        table.apply(&done(97, 1, 2, [inet, dgram, 0, 0], 4, &[]), &mut src);
+        src.live
+            .insert((PID, 4), Target::Socket(Endpoint::unresolved(Proto::Unix)));
+        assert_eq!(
+            target_of(&mut table, 4, 3, &mut src).0,
+            Target::Socket(Endpoint::unresolved(Proto::Udp))
+        );
     }
 
     #[test]

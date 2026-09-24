@@ -45,7 +45,7 @@ wraps sysctl, libproc and the C shim behind safe functions. Pin dependencies to 
 | `src/trace/codes.rs` | kdebug event IDs and the syscall table |
 | `src/trace/decode.rs` | Raw `kd_buf` records to typed events |
 | `src/trace/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |
-| `src/trace/fdtable.rs` | What each descriptor of each process refers to |
+| `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks libproc's answers against the trace |
 | `src/trace/procs.rs` | `ProcSource`: libproc when live, fixed answers in tests |
 | `src/trace/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
 | `src/stats.rs` | Per-target and per-second aggregation |
