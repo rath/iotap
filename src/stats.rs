@@ -2,13 +2,13 @@
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
 
 use serde::Serialize;
 
-use crate::model::{Category, Dir, FdType, IoEvent, Proto, Target};
+use crate::model::{Category, Dir, Endpoint, FdType, IoEvent, Proto, Target};
 
 /// Seconds of throughput history kept for live views.
 const HISTORY_SECONDS: usize = 120;
@@ -36,6 +36,30 @@ pub enum Peer {
     Unknown,
 }
 
+impl Peer {
+    fn of(endpoint: &Endpoint) -> Self {
+        if let Some(path) = &endpoint.path {
+            Self::Path(path.clone())
+        } else if let Some(remote) = endpoint.remote {
+            Self::Remote(remote)
+        } else if let Some(local) = endpoint.local {
+            Self::Local(local)
+        } else {
+            Self::Unknown
+        }
+    }
+
+    /// True when [`Peer::of`] gives this peer for `endpoint`, without building one.
+    fn is_of(&self, endpoint: &Endpoint) -> bool {
+        match (&endpoint.path, endpoint.remote, endpoint.local) {
+            (Some(path), _, _) => matches!(self, Self::Path(own) if own == path),
+            (None, Some(remote), _) => *self == Self::Remote(remote),
+            (None, None, Some(local)) => *self == Self::Local(local),
+            (None, None, None) => *self == Self::Unknown,
+        }
+    }
+}
+
 /// Aggregation key: files by path, sockets by peer, other descriptors by kind.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Key {
@@ -49,23 +73,26 @@ impl Key {
     pub fn of(target: &Target) -> Self {
         match target {
             Target::File { path } => Self::File(path.clone()),
-            Target::Socket(endpoint) => {
-                let peer = if let Some(path) = &endpoint.path {
-                    Peer::Path(path.clone())
-                } else if let Some(remote) = endpoint.remote {
-                    Peer::Remote(remote)
-                } else if let Some(local) = endpoint.local {
-                    Peer::Local(local)
-                } else {
-                    Peer::Unknown
-                };
-                Self::Socket {
-                    proto: endpoint.proto,
-                    peer,
-                }
-            }
+            Target::Socket(endpoint) => Self::Socket {
+                proto: endpoint.proto,
+                peer: Peer::of(endpoint),
+            },
             Target::Other { fd_type } => Self::Other(*fd_type),
             Target::Unknown => Self::Unknown,
+        }
+    }
+
+    /// True when events on `target` count under this key; cheaper than comparing with
+    /// [`Key::of`].
+    pub fn matches(&self, target: &Target) -> bool {
+        match (self, target) {
+            (Self::File(path), Target::File { path: other }) => path == other,
+            (Self::Socket { proto, peer }, Target::Socket(endpoint)) => {
+                *proto == endpoint.proto && peer.is_of(endpoint)
+            }
+            (Self::Other(fd_type), Target::Other { fd_type: other }) => fd_type == other,
+            (Self::Unknown, Target::Unknown) => true,
+            _ => false,
         }
     }
 
@@ -103,6 +130,27 @@ impl fmt::Display for Key {
     }
 }
 
+/// Time spent in the calls whose start was traced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Latency {
+    pub calls: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+}
+
+impl Latency {
+    fn add(&mut self, ns: u64) {
+        self.calls += 1;
+        self.total_ns = self.total_ns.saturating_add(ns);
+        self.max_ns = self.max_ns.max(ns);
+    }
+
+    /// Mean time per call, once a call was timed.
+    pub fn mean_ns(&self) -> Option<u64> {
+        self.total_ns.checked_div(self.calls)
+    }
+}
+
 /// Totals for one target.
 #[derive(Clone, Debug, Default)]
 pub struct Row {
@@ -114,8 +162,12 @@ pub struct Row {
     pub messages: u64,
     /// Successful calls whose byte count the trace does not carry.
     pub unsized_calls: u64,
-    locals: HashSet<SocketAddr>,
-    /// Wall-clock time of the latest event, in Unix nanoseconds.
+    pub latency: Latency,
+    locals: BTreeSet<SocketAddr>,
+    /// Processes that used the target, in pid order.
+    pids: Vec<i32>,
+    /// Wall-clock time of the first and of the latest event, in Unix nanoseconds.
+    pub first_ns: u64,
     pub last_ns: u64,
 }
 
@@ -131,6 +183,16 @@ impl Row {
     /// Distinct local socket addresses seen for this peer.
     pub fn connections(&self) -> usize {
         self.locals.len()
+    }
+
+    /// The local socket addresses seen for this peer, in order.
+    pub fn locals(&self) -> &BTreeSet<SocketAddr> {
+        &self.locals
+    }
+
+    /// Processes that used the target, in pid order.
+    pub fn pids(&self) -> &[i32] {
+        &self.pids
     }
 }
 
@@ -247,7 +309,10 @@ impl Stats {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 self.targets[category_index(category)] += 1;
-                entry.insert(Row::default())
+                entry.insert(Row {
+                    first_ns: event.time_ns,
+                    ..Row::default()
+                })
             }
         };
         let dir = event.dir();
@@ -255,7 +320,14 @@ impl Stats {
             Dir::Read => row.read.add(event.bytes),
             Dir::Write => row.write.add(event.bytes),
         }
+        row.first_ns = row.first_ns.min(event.time_ns);
         row.last_ns = row.last_ns.max(event.time_ns);
+        if let Some(ns) = event.latency_ns {
+            row.latency.add(ns);
+        }
+        if let Err(at) = row.pids.binary_search(&event.pid) {
+            row.pids.insert(at, event.pid);
+        }
         row.messages += event.messages.unwrap_or(0);
         if !event.is_ok() {
             row.errors += 1;
@@ -340,6 +412,11 @@ impl Stats {
         rows.sort_by(|a, b| compare(sort, a, b));
         rows.drain(..skip.min(end));
         rows
+    }
+
+    /// The row of `key`, if it has one.
+    pub fn row(&self, key: &Key) -> Option<&Row> {
+        self.rows.get(key)
     }
 
     /// Position of `key` in `sort` order among the rows of the categories `wanted` accepts.
@@ -608,6 +685,67 @@ mod tests {
             }
             assert_eq!(stats.rank(|c| c == Category::Network, sort, full[0].0), None);
             assert_eq!(stats.rank(local, sort, &Key::File("/none".into())), None);
+        }
+    }
+
+    #[test]
+    fn rows_keep_processes_latency_and_first_use() {
+        let mut stats = Stats::default();
+        let file = Target::File { path: "/a".into() };
+        for (pid, latency_ns, time_ns) in [(3, Some(10), 5), (1, None, 2), (3, Some(30), 9)] {
+            stats.record(&IoEvent {
+                pid,
+                latency_ns,
+                ..event(Op::Read, file.clone(), Some(1), 0, time_ns)
+            });
+        }
+        let row = stats.row(&Key::of(&file)).unwrap();
+        assert_eq!(row.pids(), [1, 3]);
+        assert_eq!((row.first_ns, row.last_ns), (2, 9));
+        assert_eq!(
+            row.latency,
+            Latency {
+                calls: 2,
+                total_ns: 40,
+                max_ns: 30
+            }
+        );
+        assert_eq!(row.latency.mean_ns(), Some(20));
+        assert_eq!(Latency::default().mean_ns(), None);
+        assert!(stats.row(&Key::File("/b".into())).is_none());
+    }
+
+    #[test]
+    fn keys_match_the_targets_they_count() {
+        let tcp = |remote: Option<&str>, path: Option<&str>| {
+            Target::Socket(Endpoint {
+                proto: Proto::Tcp,
+                local: Some("10.0.0.1:5000".parse().unwrap()),
+                remote: remote.map(|r| r.parse().unwrap()),
+                path: path.map(Into::into),
+            })
+        };
+        let targets = [
+            Target::File { path: "/a".into() },
+            Target::File { path: "/b".into() },
+            tcp(Some("1.1.1.1:443"), None),
+            tcp(Some("1.1.1.1:80"), None),
+            tcp(None, None),
+            tcp(Some("1.1.1.1:443"), Some("/tmp/s")),
+            Target::Socket(Endpoint::unresolved(Proto::Unix)),
+            Target::Socket(Endpoint::unresolved(Proto::Udp)),
+            Target::Other {
+                fd_type: FdType::Pipe,
+            },
+            Target::Other {
+                fd_type: FdType::Kqueue,
+            },
+            Target::Unknown,
+        ];
+        for a in &targets {
+            for b in &targets {
+                assert_eq!(Key::of(a).matches(b), Key::of(a) == Key::of(b), "{a} and {b}");
+            }
         }
     }
 
