@@ -121,7 +121,6 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
             Spec::Pid(_) => None,
         })
         .collect();
-    announce(&tracked, &follow, cli.tui);
 
     let timebase = Timebase::host();
     let anchor = ClockAnchor::now();
@@ -143,6 +142,8 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         }
         None => None,
     };
+    // Said once the kernel records the targets' calls and the recording, if any, is open.
+    announce(&tracked, &follow, cli.tui);
     let mut src = Recording::new(Live, recorder);
     let mut session = Session::new(info, filter(cli), &mut src);
 
