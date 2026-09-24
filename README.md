@@ -113,7 +113,8 @@ epoch.
 
 A `target` is `{"kind":"file","path":…}`, `{"kind":"socket","proto":…,"local":…,"remote":…}`
 with a `path` for Unix-domain sockets, `{"kind":"other","fd_type":…}` or `{"kind":"unknown"}`.
-`resolved` says how iotap learned the target:
+A file `path` that starts with `…` is only the end of a longer path (see
+[Limitations](#limitations)). `resolved` says how iotap learned the target:
 
 - **`traced`** means iotap saw the call that created the descriptor.
 - **`snapshot`** means the descriptor was already open when tracing of the process began.
@@ -193,8 +194,11 @@ live run in any output mode. A recording holds paths and addresses but no transf
   for example `tcp ?`.
 - **Dropped records.** Under heavy load the kernel buffer can overflow. iotap reports it and the
   totals undercount; a larger `--buffer` helps.
-- **Paths.** A path is what the process passed to open, joined with the working directory or the
-  directory descriptor when relative. Symbolic links are not resolved.
+- **Paths.** The kernel reports a path as it resolved it, after following symbolic links, and
+  keeps only its last 184 bytes. While the new descriptor is still open, iotap takes the full name
+  from libproc. Otherwise a relative path is joined to the working directory or the directory
+  descriptor, which is wrong after a link with a relative target other than `/etc`, `/tmp` and
+  `/var`, and a truncated path is shown as `…` followed by its end.
 - **Recording size.** A recording grows by about 64 bytes per kernel record.
 
 ## Checking against a live kernel

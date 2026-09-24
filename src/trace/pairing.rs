@@ -1,4 +1,4 @@
-//! Joins syscall START and END records per thread and collects the paths looked up in between.
+//! Joins syscall START and END records per thread and collects the path looked up in between.
 //!
 //! A thread is inside at most one BSD syscall at a time, and the kernel merges its per-CPU
 //! buffers in timestamp order, so the records of one thread arrive in order.
@@ -8,10 +8,11 @@ use std::collections::HashMap;
 use super::codes::Syscall;
 use super::decode::{Event, Kind, Phase, low_i32};
 
-/// Longest path the kernel reports (`MAXPATHLEN`).
+/// Most path bytes one lookup reports. XNU's `kdebug_lookup` copies at most `NUMPARMS` (23)
+/// words and keeps the end of a longer path.
+pub const KERNEL_PATH_BYTES: usize = 23 * 8;
+/// Bound on the bytes gathered for one lookup, in case its END record is lost.
 const MAX_PATH_BYTES: usize = 1024;
-/// Lookups kept per call; following symlinks repeats the lookup with the resolved path.
-const MAX_PATHS: usize = 4;
 /// Bound on threads with an open call, so threads that die mid-call cannot grow the map.
 const MAX_PENDING: usize = 1 << 16;
 
@@ -29,8 +30,44 @@ pub struct Completed {
     pub errno: i32,
     /// `uu_rval[0]` and `uu_rval[1]`.
     pub rval: [u32; 2],
-    /// Paths looked up during the call, in order.
-    pub paths: Vec<String>,
+    /// The first path looked up during the call.
+    pub lookup: Option<Lookup>,
+}
+
+/// A path as the kernel reports a name lookup: once, when the lookup is complete.
+///
+/// Following a symbolic link replaces the path with the link's text followed by the rest of
+/// the path. So the reported path is what the process passed only when no link was followed.
+/// After a link with a relative target, it is relative to the directory holding that link:
+/// `/etc/hosts` is reported as `private/etc/hosts`, because `/etc` links to `private/etc`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lookup {
+    pub path: String,
+    /// Only the last [`KERNEL_PATH_BYTES`] bytes were reported. A path of exactly that length
+    /// looks the same, so it counts as truncated too.
+    pub truncated: bool,
+}
+
+impl Lookup {
+    /// Absolute, and reported whole.
+    pub fn is_absolute(&self) -> bool {
+        !self.truncated && self.path.starts_with('/')
+    }
+
+    /// Parses the bytes of one lookup's records. The kernel pads the path to the end of its
+    /// last record with NUL bytes, or with `>` when the name goes on past the part looked up.
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let (path, truncated) = if let Some(len) = bytes.iter().position(|&b| b == 0) {
+            (&bytes[..len], false)
+        } else {
+            let len = bytes.iter().rposition(|&b| b != b'>').map_or(0, |last| last + 1);
+            (&bytes[..len], len == KERNEL_PATH_BYTES)
+        };
+        (!path.is_empty()).then(|| Self {
+            path: String::from_utf8_lossy(path).into_owned(),
+            truncated,
+        })
+    }
 }
 
 impl Completed {
@@ -71,7 +108,7 @@ struct Pending {
     call: Syscall,
     ts: u64,
     args: [u64; 4],
-    paths: Vec<String>,
+    lookup: Option<Lookup>,
     partial: Option<Vec<u8>>,
 }
 
@@ -127,7 +164,7 @@ impl Pairer {
             call,
             ts: event.ts,
             args: event.args,
-            paths: Vec::new(),
+            lookup: None,
             partial: None,
         };
         if self.pending.insert(event.tid, pending).is_some() {
@@ -136,16 +173,16 @@ impl Pairer {
     }
 
     fn end(&mut self, call: Syscall, event: &Event) -> Completed {
-        let (start, paths) = match self.pending.remove(&event.tid) {
-            Some(open) if open.call.number == call.number => (Some((open.ts, open.args)), open.paths),
+        let (start, lookup) = match self.pending.remove(&event.tid) {
+            Some(open) if open.call.number == call.number => (Some((open.ts, open.args)), open.lookup),
             Some(_) => {
                 self.orphan_starts += 1;
                 self.orphan_ends += 1;
-                (None, Vec::new())
+                (None, None)
             }
             None => {
                 self.orphan_ends += 1;
-                (None, Vec::new())
+                (None, None)
             }
         };
         Completed {
@@ -156,7 +193,7 @@ impl Pairer {
             end_ts: event.ts,
             errno: low_i32(event.args[0]),
             rval: [event.args[1] as u32, event.args[2] as u32],
-            paths,
+            lookup,
         }
     }
 
@@ -184,12 +221,9 @@ impl Pairer {
         }
         if event.phase.is_end()
             && let Some(bytes) = open.partial.take()
+            && open.lookup.is_none()
         {
-            let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-            if len > 0 && open.paths.len() < MAX_PATHS {
-                open.paths
-                    .push(String::from_utf8_lossy(&bytes[..len]).into_owned());
-            }
+            open.lookup = Lookup::parse(&bytes);
         }
     }
 
@@ -230,36 +264,70 @@ mod tests {
         assert_eq!(read.arg(2), Some(4096));
         assert_eq!(read.ret_u64(), 812);
         assert_eq!(read.latency_ticks(), Some(10));
-        assert!(read.paths.is_empty());
+        assert!(read.lookup.is_none());
+    }
+
+    fn lookup(path: &str, truncated: bool) -> Lookup {
+        Lookup {
+            path: path.to_owned(),
+            truncated,
+        }
     }
 
     #[test]
     fn reassembles_paths_of_every_length() {
         let mut pairer = Pairer::default();
-        for path in [
-            "/a",
-            &"/x".repeat(12),
-            &format!("/{}", "y".repeat(24)),
-            &"/z".repeat(300),
-        ] {
+        for len in [1, 23, 24, 25, 56, 57, 183] {
+            let path = format!("/{}", "p".repeat(len - 1));
             let mut synth = Synth::new(0, 1);
-            let done = run(&mut pairer, &synth.open(1, 2, path, 3));
-            assert_eq!(done[0].paths, vec![path.to_owned()], "len {}", path.len());
+            let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
+            assert_eq!(done[0].lookup, Some(lookup(&path, false)), "len {len}");
             assert_eq!(done[0].ret_i32(), 3);
         }
     }
 
     #[test]
-    fn keeps_every_lookup_of_a_symlinked_open() {
+    fn long_paths_keep_their_end_and_are_marked() {
+        let mut pairer = Pairer::default();
+        let mut synth = Synth::new(0, 1);
+        let path = format!("/Users/me/{}/data.db", "deep/".repeat(60));
+        let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
+        assert_eq!(
+            done[0].lookup,
+            Some(lookup(&path[path.len() - KERNEL_PATH_BYTES..], true))
+        );
+        // Exactly the limit is indistinguishable from a longer path.
+        let exact = format!("/{}", "e".repeat(KERNEL_PATH_BYTES - 1));
+        let done = run(&mut pairer, &synth.open(1, 2, &exact, 3));
+        assert_eq!(done[0].lookup, Some(lookup(&exact, true)));
+    }
+
+    #[test]
+    fn strips_padding_after_the_name() {
+        let mut pairer = Pairer::default();
+        let mut synth = Synth::new(0, 1);
+        let mut records = vec![synth.syscall_start(1, 5, [0; 4])];
+        records.extend(synth.lookup_bytes(1, b"sub", b'>'));
+        records.push(synth.syscall_end(1, 5, 2, 0, [3, 0]));
+        assert_eq!(run(&mut pairer, &records)[0].lookup, Some(lookup("sub", false)));
+        // A path that ends on a record boundary has no padding at all.
+        let aligned = "a".repeat(56);
+        let done = run(&mut pairer, &synth.open(1, 2, &aligned, 3));
+        assert_eq!(done[0].lookup, Some(lookup(&aligned, false)));
+    }
+
+    #[test]
+    fn keeps_the_first_lookup_of_a_call() {
         let mut synth = Synth::new(0, 1);
         let mut pairer = Pairer::default();
         let records = synth.call(Call {
-            paths: &["/tmp/link", "/private/tmp/target"],
+            paths: &["private/etc/hosts", "/elsewhere"],
             ret: 4,
             ..Call::new(1, 2, 5, [0; 4])
         });
         let done = run(&mut pairer, &records);
-        assert_eq!(done[0].paths, ["/tmp/link", "/private/tmp/target"]);
+        assert_eq!(done[0].lookup, Some(lookup("private/etc/hosts", false)));
+        assert!(!done[0].lookup.as_ref().unwrap().is_absolute());
     }
 
     #[test]
@@ -271,7 +339,7 @@ mod tests {
         records.extend(synth.io(1, 2, 3, 7, 10, 10));
         let done = run(&mut pairer, &records);
         assert_eq!(done.len(), 1);
-        assert!(done[0].paths.is_empty());
+        assert!(done[0].lookup.is_none());
     }
 
     #[test]

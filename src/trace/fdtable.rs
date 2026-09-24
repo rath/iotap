@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::codes::{NewFd, Role};
-use super::pairing::Completed;
+use super::pairing::{Completed, Lookup};
 use super::procs::ProcSource;
 use crate::model::{Endpoint, FdType, Proto, Provenance, Target};
 
@@ -143,10 +143,10 @@ impl FdTable {
             Role::Io { .. } => {}
             Role::Open { dirfd_arg } => {
                 let fd = done.ret_i32();
-                match done.paths.first() {
-                    Some(path) => {
+                match &done.lookup {
+                    Some(lookup) => {
                         let dirfd = dirfd_arg.and_then(|i| done.arg_i32(i));
-                        let path = self.absolute(pid, dirfd, path);
+                        let path = self.opened_path(pid, fd, dirfd, lookup, src);
                         self.insert(pid, fd, Target::File { path }, ts);
                     }
                     None => self.forget(pid, fd),
@@ -195,7 +195,8 @@ impl FdTable {
             }
             Role::Connect => {
                 if let Some(fd) = done.arg_i32(0) {
-                    self.connect(pid, fd, done.paths.first(), ts, src);
+                    let path = done.lookup.as_ref().map(|lookup| self.guess(pid, None, lookup));
+                    self.connect(pid, fd, path, ts, src);
                 }
             }
             Role::Pipe => {
@@ -216,8 +217,8 @@ impl FdTable {
                 self.insert(pid, fd, Target::Other { fd_type }, ts);
             }
             Role::Chdir => {
-                if let Some(path) = done.paths.first() {
-                    let cwd = self.absolute(pid, None, path);
+                if let Some(lookup) = &done.lookup {
+                    let cwd = self.guess(pid, None, lookup);
                     self.procs.entry(pid).or_default().cwd = Some(cwd);
                 }
             }
@@ -291,7 +292,7 @@ impl FdTable {
         );
     }
 
-    fn connect(&mut self, pid: i32, fd: i32, lookup: Option<&String>, ts: u64, src: &mut dyn ProcSource) {
+    fn connect(&mut self, pid: i32, fd: i32, path: Option<String>, ts: u64, src: &mut dyn ProcSource) {
         let retry = self.retry_ticks;
         let described = src.describe(pid, fd);
         let proc_fds = self.procs.entry(pid).or_default();
@@ -302,14 +303,20 @@ impl FdTable {
             refresh_at: None,
         });
         refresh_socket(entry, described, ts, retry);
-        // A Unix-domain connect looks up the socket path, which libproc may not report yet.
-        if let (Some(path), Target::Socket(endpoint)) = (lookup, &*entry.target)
-            && endpoint.proto == Proto::Unix
-            && endpoint.path.is_none()
+        // Only a Unix-domain connect looks up a path: the socket file, found from the caller's
+        // directory. libproc reports the address the peer was bound with instead, which can be
+        // relative, and nothing once the socket is closed.
+        if let (Some(path), Target::Socket(endpoint)) = (path, &*entry.target)
+            && matches!(endpoint.proto, Proto::Unix | Proto::Other)
+            && !endpoint.path.as_deref().is_some_and(|p| p.starts_with('/'))
         {
-            let mut endpoint = endpoint.clone();
-            endpoint.path = Some(path.clone());
+            let endpoint = Endpoint {
+                proto: Proto::Unix,
+                path: Some(path),
+                ..endpoint.clone()
+            };
             entry.target = Arc::new(Target::Socket(endpoint));
+            entry.refresh_at = None;
         }
     }
 
@@ -323,6 +330,40 @@ impl FdTable {
         match &*self.procs.get(&pid)?.fds.get(&fd)?.target {
             Target::File { path } if !path.is_empty() => Some(path.clone()),
             _ => None,
+        }
+    }
+
+    /// Path of the file an open call looked up. A path the kernel reported relative or cut short
+    /// is replaced by libproc's name for the new descriptor when that ends in the same name; it
+    /// cannot help once the process has closed the descriptor.
+    fn opened_path(
+        &self,
+        pid: i32,
+        fd: i32,
+        dirfd: Option<i32>,
+        lookup: &Lookup,
+        src: &mut dyn ProcSource,
+    ) -> String {
+        if lookup.is_absolute() {
+            return lookup.path.clone();
+        }
+        match src.describe(pid, fd) {
+            Some(Target::File { path }) if same_name(&path, &lookup.path) => path,
+            _ => self.guess(pid, dirfd, lookup),
+        }
+    }
+
+    /// Best reading of a looked-up path without libproc. What is left of a truncated path is
+    /// shown after an ellipsis. A relative path through one of the root directory's links is
+    /// relative to the root. Any other relative path is joined to the directory it is relative
+    /// to when no link was followed, which is wrong after a link with a relative target.
+    fn guess(&self, pid: i32, dirfd: Option<i32>, lookup: &Lookup) -> String {
+        if lookup.truncated {
+            format!("…{}", lookup.path)
+        } else if through_root_link(&lookup.path) {
+            format!("/{}", lookup.path)
+        } else {
+            self.absolute(pid, dirfd, &lookup.path)
         }
     }
 
@@ -341,6 +382,25 @@ impl FdTable {
             None => path.to_owned(),
         }
     }
+}
+
+/// `/etc`, `/tmp` and `/var` link to `private/etc`, `private/tmp` and `private/var`, so the
+/// kernel reports a lookup through them relative to the root directory.
+fn through_root_link(path: &str) -> bool {
+    ["private/etc", "private/tmp", "private/var"].iter().any(|dir| {
+        path.strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// Whether two paths end in the same name, ignoring case as the default APFS format does.
+fn same_name(a: &str, b: &str) -> bool {
+    let (a, b) = (file_name(a), file_name(b));
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
+fn file_name(path: &str) -> &str {
+    path.trim_end_matches('/').rsplit('/').next().unwrap_or_default()
 }
 
 fn needs_refresh(target: &Target) -> bool {
@@ -407,7 +467,10 @@ mod tests {
             end_ts: end,
             errno: 0,
             rval: [ret.cast_unsigned() as u32, 0],
-            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            lookup: paths.first().map(|path| Lookup {
+                path: (*path).to_owned(),
+                truncated: false,
+            }),
         }
     }
 
@@ -535,18 +598,130 @@ mod tests {
         assert_eq!(src.describes, 2);
     }
 
-    #[test]
-    fn unix_connect_uses_the_looked_up_path() {
-        let mut src = Fake::default();
+    fn table_in(cwd: &str, src: &mut Fake) -> FdTable {
+        src.snapshots.insert(
+            PID,
+            Snapshot {
+                fds: vec![],
+                cwd: Some(cwd.into()),
+            },
+        );
         let mut table = FdTable::new(1_000);
-        src.live
-            .insert((PID, 4), Target::Socket(Endpoint::unresolved(Proto::Unix)));
+        assert!(table.attach(PID, src));
+        table
+    }
+
+    fn unix(path: Option<&str>) -> Target {
+        Target::Socket(Endpoint {
+            path: path.map(Into::into),
+            ..Endpoint::unresolved(Proto::Unix)
+        })
+    }
+
+    #[test]
+    fn relative_lookups_take_the_name_libproc_confirms() {
+        let mut src = Fake::default();
+        let mut table = table_in("/", &mut src);
+        // Resources links to Versions/Current/Resources, and Current to A.
+        let real = "/System/Library/Frameworks/Foo.framework/Versions/A/Resources/Info.plist";
+        src.live.insert((PID, 3), file(real));
+        table.apply(&done(5, 1, 2, [0; 4], 3, &["A/Resources/Info.plist"]), &mut src);
+        assert_eq!(
+            target_of(&mut table, 3, 3, &mut src),
+            (file(real), Provenance::Traced)
+        );
+        src.live.insert((PID, 4), file("/Users/me/Notes.TXT"));
+        table.apply(&done(5, 4, 5, [0; 4], 4, &["notes.txt"]), &mut src);
+        assert_eq!(
+            target_of(&mut table, 4, 6, &mut src).0,
+            file("/Users/me/Notes.TXT")
+        );
+        // Descriptor 5 was closed and its number reused before libproc was asked.
+        src.live.insert((PID, 5), file("/Users/me/other.txt"));
+        table.apply(&done(5, 7, 8, [0; 4], 5, &["web2"]), &mut src);
+        assert_eq!(target_of(&mut table, 5, 9, &mut src).0, file("/web2"));
+        // Absolute paths are exact and need no lookup.
+        let asked = src.describes;
+        table.apply(&done(5, 10, 11, [0; 4], 6, &["/usr/share/dict/web2"]), &mut src);
+        assert_eq!(src.describes, asked);
+    }
+
+    #[test]
+    fn root_links_and_truncated_paths_need_no_libproc() {
+        let mut src = Fake::default();
+        let mut table = table_in("/Users/me", &mut src);
+        table.apply(&done(5, 1, 2, [0; 4], 3, &["private/etc/hosts"]), &mut src);
+        assert_eq!(
+            target_of(&mut table, 3, 3, &mut src).0,
+            file("/private/etc/hosts")
+        );
+        table.apply(&done(5, 4, 5, [0; 4], 4, &["private/tmpdir/x"]), &mut src);
+        assert_eq!(
+            target_of(&mut table, 4, 6, &mut src).0,
+            file("/Users/me/private/tmpdir/x")
+        );
+        let mut cut = done(5, 7, 8, [0; 4], 5, &[]);
+        cut.lookup = Some(Lookup {
+            path: "ntainers/app/Data/cache.db".into(),
+            truncated: true,
+        });
+        table.apply(&cut, &mut src);
+        assert_eq!(
+            target_of(&mut table, 5, 9, &mut src).0,
+            file("…ntainers/app/Data/cache.db")
+        );
+        // While the descriptor is open, libproc knows the whole path.
+        let whole = "/Users/me/Library/Containers/app/Data/cache.db";
+        src.live.insert((PID, 6), file(whole));
+        cut.rval = [6, 0];
+        table.apply(&cut, &mut src);
+        assert_eq!(target_of(&mut table, 6, 9, &mut src).0, file(whole));
+        // A working directory entered through a root link.
+        table.apply(&done(12, 10, 11, [0; 4], 0, &["private/var/folders"]), &mut src);
+        table.apply(&done(5, 12, 13, [0; 4], 7, &["x"]), &mut src);
+        assert_eq!(
+            target_of(&mut table, 7, 14, &mut src).0,
+            file("/private/var/folders/x")
+        );
+    }
+
+    #[test]
+    fn unix_connect_paths_are_made_absolute() {
+        let mut src = Fake::default();
+        let mut table = table_in("/w", &mut src);
+        let (af_unix, stream) = (i64::from(libc::AF_UNIX), i64::from(libc::SOCK_STREAM));
+        table.apply(&done(97, 1, 2, [af_unix, stream, 0, 0], 4, &[]), &mut src);
+        // The peer was bound with a relative path, and libproc repeats it.
+        src.live.insert((PID, 4), unix(Some("u.sock")));
+        table.apply(&done(98, 3, 4, [4, 0, 0, 0], 0, &["u.sock"]), &mut src);
+        assert_eq!(target_of(&mut table, 4, 5, &mut src).0, unix(Some("/w/u.sock")));
+        assert_eq!(
+            target_of(&mut table, 4, 5_000, &mut src).0,
+            unix(Some("/w/u.sock")),
+            "a later lookup must not bring the relative path back"
+        );
+        // An absolute bound path is kept.
+        src.live.insert((PID, 5), unix(Some("/var/run/syslog")));
         table.apply(
-            &done(98, 1, 2, [4, 0, 0, 0], 0, &["/var/run/mDNSResponder"]),
+            &done(98, 6, 7, [5, 0, 0, 0], 0, &["private/var/run/syslog"]),
             &mut src,
         );
-        let (target, _) = target_of(&mut table, 4, 3, &mut src);
-        assert_eq!(target.to_string(), "unix /var/run/mDNSResponder");
+        assert_eq!(
+            target_of(&mut table, 5, 8, &mut src).0,
+            unix(Some("/var/run/syslog"))
+        );
+        // libproc reports no path yet, or nothing at all for a socket never seen created.
+        src.live.insert((PID, 6), unix(None));
+        table.apply(&done(98, 9, 10, [6, 0, 0, 0], 0, &["/var/run/a"]), &mut src);
+        assert_eq!(target_of(&mut table, 6, 11, &mut src).0, unix(Some("/var/run/a")));
+        table.apply(
+            &done(98, 12, 13, [7, 0, 0, 0], 0, &["private/var/run/b"]),
+            &mut src,
+        );
+        assert_eq!(
+            target_of(&mut table, 7, 14, &mut src).0,
+            unix(Some("/private/var/run/b"))
+        );
     }
 
     #[test]

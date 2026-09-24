@@ -2,6 +2,7 @@
 //! whole pipeline without root.
 
 use super::codes::{self, FUNC_END, FUNC_START};
+use super::pairing::KERNEL_PATH_BYTES;
 use crate::sys::kdebug::KdBuf;
 
 /// Emits records with strictly increasing timestamps.
@@ -64,12 +65,18 @@ impl Synth {
         self.record(tid, codes::syscall_debugid(number, FUNC_END), args)
     }
 
-    /// Records of one path lookup, split as `kdebug_vfs_lookup` does: 24 path bytes after the
-    /// vnode in the first record, then 32 bytes per record, END set on the last.
+    /// Records of one path lookup as `kdebug_lookup` emits them: the last
+    /// [`KERNEL_PATH_BYTES`] bytes of the path at most, padded with NUL bytes.
     pub fn lookup(&mut self, tid: u64, path: &str) -> Vec<KdBuf> {
         let bytes = path.as_bytes();
+        self.lookup_bytes(tid, &bytes[bytes.len().saturating_sub(KERNEL_PATH_BYTES)..], 0)
+    }
+
+    /// Records carrying `bytes` and then `pad`, split as `kdebug_vfs_lookup` does: 24 bytes
+    /// after the vnode in the first record, then 32 bytes per record, END set on the last.
+    pub fn lookup_bytes(&mut self, tid: u64, bytes: &[u8], pad: u8) -> Vec<KdBuf> {
         let word = |index: usize| {
-            let mut buf = [0u8; 8];
+            let mut buf = [pad; 8];
             let start = (index * 8).min(bytes.len());
             let end = (index * 8 + 8).min(bytes.len());
             buf[..end - start].copy_from_slice(&bytes[start..end]);
@@ -197,6 +204,9 @@ mod tests {
         // 24 + 32 = 56 bytes fit in two records; 57 need three.
         assert_eq!(synth.lookup(9, &"x".repeat(56)).len(), 2);
         assert_eq!(synth.lookup(9, &"x".repeat(57)).len(), 3);
+        // The kernel reports at most 184 bytes: six records.
+        assert_eq!(synth.lookup(9, &"x".repeat(184)).len(), 6);
+        assert_eq!(synth.lookup(9, &"x".repeat(1000)).len(), 6);
     }
 
     #[test]
