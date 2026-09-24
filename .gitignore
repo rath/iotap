@@ -1,0 +1,6 @@
+/target
+/tmp
+/.impeccable
+.DS_Store
+*.iotaprec
+!/tests/fixtures/*.iotaprec

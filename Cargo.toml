@@ -1,0 +1,35 @@
+[package]
+name = "iotap"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Trace the file and network I/O of macOS processes through the kernel trace facility"
+license = "MIT"
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"
+dbg_macro = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# Kernel records carry 32-bit values in 64-bit registers; truncation is the decoding step itself.
+cast_possible_truncation = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
