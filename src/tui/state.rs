@@ -596,10 +596,10 @@ mod tests {
     use crate::model::{Op, Provenance, Target};
     use crate::session::{Input, Process, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
-    use crate::trace::Records;
     use crate::trace::kdebug::pairing::PathRecords;
     use crate::trace::kdebug::synth::Synth;
     use crate::trace::procs::Fixed;
+    use crate::trace::{Records, System};
 
     fn event(time_ns: u64) -> IoEvent {
         IoEvent {
@@ -631,6 +631,7 @@ mod tests {
                 name: "demo".into(),
             }],
             path_records: PathRecords::Whole,
+            system: System::Macos,
         };
         let mut src = Fixed::default();
         let session = Session::new(info, Filter::ALL, &mut src);

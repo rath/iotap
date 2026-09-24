@@ -22,6 +22,7 @@ use crate::sys;
 use crate::sys::kdebug::{self, Kdebug, KdebugError};
 use crate::sys::time::{self, ClockAnchor, Timebase};
 use crate::target::{self, Spec, Tracked};
+use crate::trace::System;
 use crate::trace::procs::{Live, ProcSource};
 use crate::tui::state::{App, Tab};
 use crate::tui::{self, Feed};
@@ -125,6 +126,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         anchor,
         processes: tracked.iter().map(Tracked::process).collect(),
         path_records: Kdebug::path_records(),
+        system: System::HOST,
     };
     let recorder = match &cli.record {
         Some(path) => {
@@ -379,7 +381,9 @@ impl Feed for ReplayFeed<'_> {
 
 /// Replays a recording through the same session and output as a live trace.
 fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
-    let replay = record::read(path).with_context(|| format!("cannot replay {}", path.display()))?;
+    let replay = record::read(path)
+        .and_then(|replay| record::check_system(&replay.info).map(|()| replay))
+        .with_context(|| format!("cannot replay {}", path.display()))?;
     if replay.truncated {
         let _ = writeln!(
             io::stderr(),

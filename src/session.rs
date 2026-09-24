@@ -16,7 +16,7 @@ use crate::trace::call::{Completed, Role};
 use crate::trace::fdtable::{FdTable, Found, Verdict};
 use crate::trace::kdebug::{self, pairing::PathRecords};
 use crate::trace::procs::ProcSource;
-use crate::trace::{Decode, Records, Step, Traced};
+use crate::trace::{Decode, Records, Step, System, Traced};
 
 /// A traced process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +43,9 @@ pub struct SessionInfo {
     /// How the kernel that made the records lays out lookup paths.
     #[serde(default)]
     pub path_records: PathRecords,
+    /// The system the records come from.
+    #[serde(default)]
+    pub system: System,
 }
 
 /// What the kernel reader delivers, in order.
@@ -563,6 +566,7 @@ mod tests {
                 name: "demo".into(),
             }],
             path_records: PathRecords::Whole,
+            system: System::Macos,
         }
     }
 

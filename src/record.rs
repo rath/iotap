@@ -2,8 +2,9 @@
 //!
 //! Layout: the magic `IOTAPREC`, a little-endian `u32` version, then frames of
 //! `[tag: u8][length: u32 LE][payload]`. Batches of kdebug records carry the raw 64-byte records
-//! in little-endian order; every other payload is JSON. Recordings are specific to 64-bit Apple
-//! hardware, like the records themselves.
+//! in little-endian order; every other payload is JSON. The header names the system the
+//! recording comes from; version 1 recordings, which do not, all come from macOS. A recording
+//! replays only on the operating system it was made on, whose numbers its calls use.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -15,12 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Target;
 use crate::session::{Input, Process, SessionInfo};
-use crate::trace::Records;
 use crate::trace::kdebug::KdBuf;
 use crate::trace::procs::{Described, ProcSource, Snapshot};
+use crate::trace::{Records, System};
 
 const MAGIC: &[u8; 8] = b"IOTAPREC";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Refuses frames larger than this, so a corrupt length cannot exhaust memory.
 const MAX_FRAME: usize = 1 << 30;
 
@@ -265,12 +266,27 @@ pub enum ReplayError {
     Io(#[from] io::Error),
     #[error("not an iotap recording")]
     BadMagic,
-    #[error("unsupported recording version {0}; this iotap reads version {VERSION}")]
+    #[error("unsupported recording version {0}; this iotap reads versions 1 to {VERSION}")]
     Version(u32),
     #[error("the recording has no header")]
     NoHeader,
     #[error("corrupt frame {index} (tag {tag}): {reason}")]
     Corrupt { index: usize, tag: u8, reason: String },
+    #[error(
+        "it was made on {made_on}; replay it on {made_on}, as its calls use that system's numbers for errors, address families and flags"
+    )]
+    OtherSystem { made_on: &'static str },
+}
+
+/// Refuses a recording made on another operating system than this one.
+pub fn check_system(info: &SessionInfo) -> Result<(), ReplayError> {
+    if info.system.same_os(System::HOST) {
+        Ok(())
+    } else {
+        Err(ReplayError::OtherSystem {
+            made_on: info.system.os_name(),
+        })
+    }
 }
 
 pub fn read(path: &Path) -> Result<Replay, ReplayError> {
@@ -288,7 +304,7 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         .read_exact(&mut version)
         .map_err(|_| ReplayError::BadMagic)?;
     let version = u32::from_le_bytes(version);
-    if version != VERSION {
+    if !(1..=VERSION).contains(&version) {
         return Err(ReplayError::Version(version));
     }
 
@@ -426,6 +442,7 @@ mod tests {
                 name: "curl".into(),
             }],
             path_records: PathRecords::Whole,
+            system: System::Macos,
         };
         let mut procs = Fixed::default();
         procs.snapshots.insert(
@@ -528,6 +545,43 @@ mod tests {
         let replay = parse(&bytes[..bytes.len() - 3]).unwrap();
         assert!(replay.truncated);
         assert_eq!(replay.inputs.len(), 2);
+    }
+
+    #[test]
+    fn version_1_recordings_come_from_macos() {
+        let (info, _, _) = fixture();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let mut header = serde_json::to_value(Header {
+            info: info.clone(),
+            created_by: "iotap 0.1.0".into(),
+        })
+        .unwrap();
+        header["info"].as_object_mut().unwrap().remove("system");
+        let payload = serde_json::to_vec(&header).unwrap();
+        bytes.push(TAG_HEADER);
+        bytes.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let replay = parse(bytes.as_slice()).unwrap();
+        assert_eq!(replay.info, info);
+        assert_eq!(replay.info.system, System::Macos);
+    }
+
+    #[test]
+    fn replays_only_on_the_system_that_made_them() {
+        let (mut info, _, _) = fixture();
+        info.system = System::HOST;
+        assert!(check_system(&info).is_ok());
+        info.system = match System::HOST {
+            System::Macos => System::LinuxX86_64,
+            System::LinuxAarch64 | System::LinuxX86_64 => System::Macos,
+        };
+        let err = check_system(&info).unwrap_err();
+        assert!(err.to_string().starts_with("it was made on "), "{err}");
+        assert_eq!(
+            serde_json::to_string(&[System::LinuxAarch64, System::LinuxX86_64]).unwrap(),
+            r#"["linux_aarch64","linux_x86_64"]"#
+        );
     }
 
     #[test]

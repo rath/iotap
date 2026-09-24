@@ -653,10 +653,10 @@ mod tests {
     use crate::model::{Endpoint, Proto, Target};
     use crate::session::{Filter, Input, Process, Session, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
-    use crate::trace::Records;
     use crate::trace::kdebug::pairing::PathRecords;
     use crate::trace::kdebug::synth::{Call, Synth};
     use crate::trace::procs::{Fixed, Snapshot};
+    use crate::trace::{Records, System};
     use crate::tui::state::App;
 
     const PID: i32 = 4242;
@@ -676,6 +676,7 @@ mod tests {
                 name: "curl".into(),
             }],
             path_records: PathRecords::Whole,
+            system: System::Macos,
         };
         let mut src = Fixed::default();
         src.snapshots.insert(

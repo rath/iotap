@@ -200,7 +200,8 @@ The status line reports what `pbcopy` did; a terminal never says whether it hono
 `--record FILE` saves the raw kernel records together with every answer libproc gave and when it
 gave it, and `--replay FILE` feeds them through the same processing, so a replay reproduces the
 output of the live run in any output mode. A recording holds paths and addresses but no
-transferred data.
+transferred data. It replays on the operating system it was made on, since its calls use that
+system's numbers for errors, address families and flags.
 
 ## How it works
 
