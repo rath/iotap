@@ -180,19 +180,7 @@ impl FdTable {
                 self.insert(pid, fd, Target::Socket(Endpoint::unresolved(proto)), ts);
                 self.schedule_refresh(pid, fd, 0);
             }
-            Role::Accept => {
-                let fd = done.ret_i32();
-                match src.describe(pid, fd) {
-                    Some(target @ Target::Socket(_)) => {
-                        let refresh = needs_refresh(&target);
-                        self.insert(pid, fd, target, ts);
-                        if refresh {
-                            self.schedule_refresh(pid, fd, ts.saturating_add(self.retry_ticks));
-                        }
-                    }
-                    _ => self.forget(pid, fd),
-                }
-            }
+            Role::Accept => self.accept(pid, done, src),
             Role::Connect => {
                 if let Some(fd) = done.arg_i32(0) {
                     let path = done.lookup.as_ref().map(|lookup| self.guess(pid, None, lookup));
@@ -290,6 +278,38 @@ impl FdTable {
                 refresh_at,
             },
         );
+    }
+
+    fn accept(&mut self, pid: i32, done: &Completed, src: &mut dyn ProcSource) {
+        let (fd, ts) = (done.ret_i32(), done.end_ts);
+        let retry_at = ts.saturating_add(self.retry_ticks);
+        if let Some(target @ Target::Socket(_)) = src.describe(pid, fd) {
+            let refresh = needs_refresh(&target);
+            self.insert(pid, fd, target, ts);
+            if refresh {
+                self.schedule_refresh(pid, fd, retry_at);
+            }
+        } else {
+            // Closed before it could be looked up, it still was a socket like the one it was
+            // accepted on.
+            let endpoint = match done.arg_i32(0) {
+                Some(listener) => self.accepted_from(pid, listener, ts, src),
+                None => Endpoint::unresolved(Proto::Other),
+            };
+            self.insert(pid, fd, Target::Socket(endpoint), ts);
+            self.schedule_refresh(pid, fd, retry_at);
+        }
+    }
+
+    /// What an accepted connection is known to share with the socket it was accepted on.
+    fn accepted_from(&mut self, pid: i32, listener: i32, ts: u64, src: &mut dyn ProcSource) -> Endpoint {
+        match &*self.target(pid, listener, ts, src).0 {
+            Target::Socket(listening) => Endpoint {
+                remote: None,
+                ..listening.clone()
+            },
+            _ => Endpoint::unresolved(Proto::Other),
+        }
     }
 
     fn connect(&mut self, pid: i32, fd: i32, path: Option<String>, ts: u64, src: &mut dyn ProcSource) {
@@ -722,6 +742,31 @@ mod tests {
             target_of(&mut table, 7, 14, &mut src).0,
             unix(Some("/private/var/run/b"))
         );
+    }
+
+    #[test]
+    fn accepted_sockets_closed_early_keep_the_listener_kind() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let af_unix = i64::from(libc::AF_UNIX);
+        table.apply(&done(97, 1, 2, [af_unix, 1, 0, 0], 3, &[]), &mut src);
+        src.live.insert((PID, 3), unix(Some("srv.sock")));
+        table.apply(&done(30, 3, 4, [3, 0, 0, 0], 4, &[]), &mut src);
+        assert_eq!(
+            target_of(&mut table, 4, 5, &mut src),
+            (unix(Some("srv.sock")), Provenance::Traced)
+        );
+        // A TCP listener lends its bound address; the peer stays unknown.
+        let listening = Target::Socket(Endpoint {
+            local: Some("0.0.0.0:8765".parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Tcp)
+        });
+        src.live.insert((PID, 5), listening.clone());
+        table.apply(&done(404, 6, 7, [5, 0, 0, 0], 6, &[]), &mut src);
+        assert_eq!(target_of(&mut table, 6, 8, &mut src).0, listening);
+        // With an unknown listener it is still a socket.
+        table.apply(&done(30, 9, 10, [9, 0, 0, 0], 7, &[]), &mut src);
+        assert_eq!(target_of(&mut table, 7, 11, &mut src).0.to_string(), "socket");
     }
 
     #[test]

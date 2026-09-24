@@ -91,6 +91,20 @@ impl Op {
         }
     }
 
+    /// True for calls that only work on sockets.
+    pub fn needs_socket(self) -> bool {
+        matches!(
+            self,
+            Self::Recvfrom
+                | Self::Recvmsg
+                | Self::RecvmsgX
+                | Self::Sendto
+                | Self::Sendmsg
+                | Self::SendmsgX
+                | Self::Sendfile
+        )
+    }
+
     pub fn result_unit(self) -> ResultUnit {
         match self {
             Self::RecvmsgX | Self::SendmsgX => ResultUnit::Messages,

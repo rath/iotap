@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Category, IoEvent, Op, Provenance, ResultUnit, Target};
+use crate::model::{Category, Endpoint, IoEvent, Op, Proto, Provenance, ResultUnit, Target};
 use crate::stats::{Stats, SummaryRow, Totals};
 use crate::sys::kdebug::KdBuf;
 use crate::sys::time::{ClockAnchor, Timebase};
@@ -148,6 +148,8 @@ pub struct Session {
     last_ticks: u64,
     stopped_ticks: Option<u64>,
     unknown: Arc<Target>,
+    /// Stands in for an unidentified descriptor that a socket-only call used.
+    some_socket: Arc<Target>,
 }
 
 impl Session {
@@ -164,6 +166,7 @@ impl Session {
             last_ticks: info.anchor.ticks,
             stopped_ticks: None,
             unknown: Arc::new(Target::Unknown),
+            some_socket: Arc::new(Target::Socket(Endpoint::unresolved(Proto::Other))),
             info,
         };
         for process in session.info.processes.clone() {
@@ -346,10 +349,16 @@ impl Session {
         src: &mut dyn ProcSource,
     ) -> IoEvent {
         let fd = done.arg_i32(fd_arg);
-        let (target, provenance) = match fd {
+        let (mut target, provenance) = match fd {
             Some(fd) => self.fds.target(done.pid, fd, done.end_ts, src),
             None => (self.unknown.clone(), Provenance::None),
         };
+        if *target == Target::Unknown
+            && op.needs_socket()
+            && !matches!(done.errno, libc::EBADF | libc::ENOTSOCK)
+        {
+            target = self.some_socket.clone();
+        }
         let unit = op.result_unit();
         let ret = done.is_ok().then(|| done.ret_u64());
         IoEvent {
@@ -519,6 +528,30 @@ mod tests {
         let totals = *session.stats().totals();
         assert_eq!((totals.file_read.bytes, totals.file_write.bytes), (1000, 12));
         assert_eq!((totals.net_write.bytes, totals.net_read.bytes), (517, 3000));
+    }
+
+    #[test]
+    fn socket_only_calls_mark_unknown_descriptors_as_sockets() {
+        let mut src = procs();
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        // socketpair(2) returns its descriptors through memory, and these were closed before
+        // they could be looked up. Only calls that need a socket reveal what they were.
+        let mut records = synth.io(7, PID, 28, 9, 0, 3);
+        records.extend(synth.io(7, PID, 3, 9, 16, 3));
+        records.extend(synth.call(Call {
+            errno: libc::ENOTSOCK,
+            ..Call::new(7, PID, 133, [8, 0, 5, 0])
+        }));
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(records), &mut src, &mut sink)
+            .unwrap();
+        let targets: Vec<String> = sink.events.iter().map(|e| e.target.to_string()).collect();
+        assert_eq!(targets, ["socket", "<unknown>", "<unknown>"]);
+        assert_eq!(sink.events[0].provenance, Provenance::None);
+        let totals = *session.stats().totals();
+        assert_eq!((totals.net_write.bytes, totals.other_read.bytes), (3, 3));
     }
 
     #[test]

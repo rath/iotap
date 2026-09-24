@@ -119,7 +119,8 @@ A file `path` that starts with `…` is only the end of a longer path (see
 - **`traced`** means iotap saw the call that created the descriptor.
 - **`snapshot`** means the descriptor was already open when tracing of the process began.
 - **`lazy`** means iotap looked the descriptor up when it was first used.
-- **`none`** means the descriptor is unknown.
+- **`none`** means the descriptor is unknown. Its target is `unknown`, or a bare `socket` when
+  the call works only on sockets.
 
 ```
 {"type":"event","time_ns":1790259200104708333,"pid":4242,"tid":2,"op":"recvfrom","dir":"read","syscall":"recvfrom","fd":5,"requested":16384,"bytes":null,"messages":null,"errno":35,"error":"EAGAIN","latency_ns":41666,"target":{"kind":"socket","proto":"tcp","local":"192.168.1.20:61000","remote":"93.184.216.34:443"},"resolved":"traced"}
@@ -190,8 +191,10 @@ live run in any output mode. A recording holds paths and addresses but no transf
   first calls.
 - **exec.** exec gives a process a new kernel identity without the trace flag. iotap flags the
   process again within 250 ms and misses the calls in between.
-- **Short-lived sockets.** A socket closed before iotap could look it up shows only its protocol,
-  for example `tcp ?`.
+- **Short-lived sockets.** A socket closed before iotap could look it up shows only what the trace
+  reveals: its protocol, such as `tcp ?`, the path of a Unix-domain connect, the protocol and
+  bound address of the socket it was accepted on, or just `socket`. Descriptors from
+  `socketpair` reach the process through memory, so iotap learns them only through libproc.
 - **Dropped records.** Under heavy load the kernel buffer can overflow. iotap reports it and the
   totals undercount; a larger `--buffer` helps.
 - **Paths.** The kernel reports a path as it resolved it, after following symbolic links, and
