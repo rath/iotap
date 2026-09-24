@@ -10,7 +10,10 @@ use crate::sys::kdebug::KdBuf;
 pub struct Synth {
     ts: u64,
     step: u64,
+    /// Vnode found by the most recent lookup of a new file.
     vnode: u64,
+    /// Vnode the next lookup finds instead of a new one.
+    same_file: Option<u64>,
     paths: PathRecords,
 }
 
@@ -22,6 +25,7 @@ impl Synth {
             ts: start_ts,
             step: step.max(1),
             vnode: 0xfeed_0000,
+            same_file: None,
             paths: PathRecords::Whole,
         }
     }
@@ -41,6 +45,12 @@ impl Synth {
     /// Leaves a gap of `ticks` before the next record.
     pub fn advance(&mut self, ticks: u64) {
         self.ts += ticks;
+    }
+
+    /// Makes the next lookup find `vnode`, as another lookup of the same file does. Later
+    /// lookups find new files again.
+    pub fn find_vnode(&mut self, vnode: u64) {
+        self.same_file = Some(vnode);
     }
 
     fn record(&mut self, tid: u64, debugid: u32, args: [u64; 4]) -> KdBuf {
@@ -96,13 +106,15 @@ impl Synth {
             buf[..end - start].copy_from_slice(&bytes[start..end]);
             u64::from_le_bytes(buf)
         };
-        self.vnode += 0x10;
+        let vnode = self.same_file.take().unwrap_or_else(|| {
+            self.vnode += 0x10;
+            self.vnode
+        });
         let mut out = Vec::new();
         let mut func = FUNC_START;
         if bytes.len() <= 24 {
             func |= FUNC_END;
         }
-        let vnode = self.vnode;
         out.push(self.record(tid, codes::VFS_LOOKUP | func, [vnode, word(0), word(1), word(2)]));
         let mut index = 3;
         while index * 8 < bytes.len() {

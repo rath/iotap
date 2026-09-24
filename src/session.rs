@@ -711,6 +711,46 @@ mod tests {
     }
 
     #[test]
+    fn a_file_opened_again_on_its_number_keeps_the_name_libproc_gave() {
+        let reads = |other_file: bool| -> Vec<String> {
+            let mut src = procs();
+            // Asked late, libproc describes whatever holds fd 3 by then: the second open.
+            src.targets.insert(
+                (PID, 3),
+                Target::File {
+                    path: "/usr/share/dict/web2".into(),
+                },
+            );
+            src.answered_at = 50_000;
+            let mut session = Session::new(info(), Filter::ALL, &mut src);
+            let mut synth = Synth::new(2_000, 10);
+            // `/usr/share/dict/words` links to `web2`, so the kernel reports only that name.
+            synth.find_vnode(0xabc0);
+            let mut records = synth.open(8, PID, "web2", 3);
+            records.extend(synth.io(8, PID, 3, 3, 100, 100));
+            records.extend(synth.close(8, PID, 3));
+            // getcwd holds the number for a moment in between.
+            records.extend(synth.open(8, PID, ".", 3));
+            records.extend(synth.close(8, PID, 3));
+            synth.find_vnode(if other_file { 0xdef0 } else { 0xabc0 });
+            records.extend(synth.open(8, PID, "web2", 3));
+            records.extend(synth.io(8, PID, 3, 3, 200, 200));
+            let mut sink = Collect::default();
+            session
+                .handle(&Input::Records(records), &mut src, &mut sink)
+                .unwrap();
+            assert!(sink.events.is_empty(), "both reads wait for their answers");
+            session
+                .handle(&Input::Watermark { ticks: 50_001 }, &mut src, &mut sink)
+                .unwrap();
+            sink.events.iter().map(|e| e.target.to_string()).collect()
+        };
+        assert_eq!(reads(false), ["/usr/share/dict/web2", "/usr/share/dict/web2"]);
+        // Another file of that name on the number: the first read keeps what the trace says.
+        assert_eq!(reads(true), ["/work/web2", "/usr/share/dict/web2"]);
+    }
+
+    #[test]
     fn stopping_releases_what_still_waits() {
         let mut src = procs();
         src.answered_at = 1 << 40;

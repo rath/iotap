@@ -160,7 +160,8 @@ The UI stays open after tracing stops and says why it stopped.
 
 `--record FILE` saves the raw kernel records together with every answer libproc gave and when it
 gave it, and `--replay FILE` feeds them through the same processing, so a replay reproduces the
-output of the live run in any output mode. A recording holds paths and addresses but no transferred data.
+output of the live run in any output mode. A recording holds paths and addresses but no
+transferred data.
 
 ## How it works
 
@@ -177,8 +178,10 @@ output of the live run in any output mode. A recording holds paths and addresses
    In between, the process may have closed it and received the same number for another one. So
    an event whose target comes from libproc is held back until the trace has been read past the
    moment libproc answered. If the trace shows the descriptor closed before then, the answer
-   described something else, and the event gets what the trace alone knows. An event waits about
-   10 ms for this, at most about 100 ms, and longer only while iotap lags behind the kernel.
+   described whatever held the number at that moment. It still stands when that was the same
+   file, which the kernel's lookups tell by the file's vnode; otherwise the event gets what the
+   trace alone knows. An event waits about 10 ms for this, at most about 100 ms, and longer only
+   while iotap lags behind the kernel.
 5. Processing after the reader depends only on the records and on libproc's answers, never on
    the clock, which is why recordings replay exactly. Only the live terminal UI reads the clock,
    for its elapsed time and its current second.
@@ -192,8 +195,9 @@ output of the live run in any output mode. A recording holds paths and addresses
 - **Unknown sizes.** `sendfile` returns its byte count through a pointer the trace does not carry,
   and `sendmsg_x` and `recvmsg_x` return message counts, so iotap counts those calls without bytes.
 - **Stale lookups.** iotap discards a libproc answer when the trace shows the descriptor closed
-  before libproc answered. A descriptor closed in a way the trace does not show, as by exec for
-  a close-on-exec descriptor, can still leave a lookup naming a later descriptor.
+  before libproc answered, unless the number was by then held by a descriptor on the same file.
+  A descriptor closed in a way the trace does not show, as by exec for a close-on-exec
+  descriptor, can still leave a lookup naming a later descriptor.
 - **Children.** The kernel's trace flag is not inherited by forked children, so they are not
   traced. A name target picks up new processes with that name within 250 ms and misses their
   first calls.
@@ -206,10 +210,11 @@ output of the live run in any output mode. A recording holds paths and addresses
 - **Dropped records.** Under heavy load the kernel buffer can overflow. iotap reports it and the
   totals undercount; a larger `--buffer` helps.
 - **Paths.** The kernel reports a path as it resolved it, after following symbolic links, and
-  before macOS 15.4 only its last 184 bytes. While the new descriptor is still open, iotap takes
-  the full name from libproc. Otherwise a relative path is joined to the working directory or the
-  directory descriptor, which is wrong after a link with a relative target other than `/etc`,
-  `/tmp` and `/var`, and a truncated path is shown as `…` followed by its end.
+  before macOS 15.4 only its last 184 bytes. iotap takes the full name from libproc when the new
+  descriptor, or a later one on the same file, still holds its number by the time iotap asks.
+  Otherwise a relative path is joined to the working directory or the directory descriptor,
+  which is wrong after a link with a relative target other than `/etc`, `/tmp` and `/var`, and a
+  truncated path is shown as `…` followed by its end.
 - **Recording size.** A recording grows by about 64 bytes per kernel record.
 
 ## Checking against a live kernel

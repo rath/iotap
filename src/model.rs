@@ -316,7 +316,7 @@ pub enum Provenance {
     Traced,
     /// From the descriptor table read when tracing of the process started.
     Snapshot,
-    /// Looked up when the descriptor was first used; can be stale if it was reused meanwhile.
+    /// Looked up through libproc when the descriptor was first used.
     Lazy,
     /// Not known.
     None,

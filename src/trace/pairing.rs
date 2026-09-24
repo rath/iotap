@@ -73,6 +73,9 @@ pub struct Lookup {
     /// Only the last [`TAIL_PATH_BYTES`] bytes were reported. In that format a path of exactly
     /// that length looks the same, so it counts as truncated too.
     pub truncated: bool,
+    /// The kernel's identifier for the vnode found, 0 when nothing was. Lookups that find the
+    /// same file report the same identifier while its vnode lives, whatever path they took.
+    pub vnode: u64,
 }
 
 impl Lookup {
@@ -94,6 +97,7 @@ impl Lookup {
         (!path.is_empty()).then(|| Self {
             path: String::from_utf8_lossy(path).into_owned(),
             truncated,
+            vnode: 0,
         })
     }
 }
@@ -137,7 +141,8 @@ struct Pending {
     ts: u64,
     args: [u64; 4],
     lookup: Option<Lookup>,
-    partial: Option<Vec<u8>>,
+    /// The vnode and path bytes of a lookup whose records are still arriving.
+    partial: Option<(u64, Vec<u8>)>,
 }
 
 /// Pairs START and END records per thread.
@@ -242,12 +247,12 @@ impl Pairer {
         }
         // The first record carries the vnode in arg1 and path bytes in arg2..arg4.
         let words = if event.phase.is_start() {
-            open.partial = Some(Vec::with_capacity(64));
+            open.partial = Some((event.args[0], Vec::with_capacity(64)));
             &event.args[1..]
         } else {
             &event.args[..]
         };
-        let Some(bytes) = open.partial.as_mut() else {
+        let Some((_, bytes)) = open.partial.as_mut() else {
             return;
         };
         for word in words {
@@ -256,10 +261,10 @@ impl Pairer {
             }
         }
         if event.phase.is_end()
-            && let Some(bytes) = open.partial.take()
+            && let Some((vnode, bytes)) = open.partial.take()
             && open.lookup.is_none()
         {
-            open.lookup = Lookup::parse(&bytes, self.format);
+            open.lookup = Lookup::parse(&bytes, self.format).map(|lookup| Lookup { vnode, ..lookup });
         }
     }
 
@@ -307,7 +312,13 @@ mod tests {
         Lookup {
             path: path.to_owned(),
             truncated,
+            vnode: 0,
         }
+    }
+
+    /// The call's lookup without its vnode, which the tests below do not care about.
+    fn looked_up(done: &Completed) -> Option<Lookup> {
+        done.lookup.clone().map(|lookup| Lookup { vnode: 0, ..lookup })
     }
 
     #[test]
@@ -318,7 +329,11 @@ mod tests {
                 let path = format!("/{}", "p".repeat(len - 1));
                 let mut synth = Synth::new(0, 1).with_path_records(format);
                 let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
-                assert_eq!(done[0].lookup, Some(lookup(&path, false)), "{format:?} len {len}");
+                assert_eq!(
+                    looked_up(&done[0]),
+                    Some(lookup(&path, false)),
+                    "{format:?} len {len}"
+                );
                 assert_eq!(done[0].ret_i32(), 3);
             }
         }
@@ -331,7 +346,7 @@ mod tests {
         for len in [TAIL_PATH_BYTES, 400, 1023] {
             let path = format!("/{}", "w".repeat(len - 1));
             let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
-            assert_eq!(done[0].lookup, Some(lookup(&path, false)), "len {len}");
+            assert_eq!(looked_up(&done[0]), Some(lookup(&path, false)), "len {len}");
         }
     }
 
@@ -342,13 +357,13 @@ mod tests {
         let path = format!("/Users/me/{}/data.db", "deep/".repeat(60));
         let done = run(&mut pairer, &synth.open(1, 2, &path, 3));
         assert_eq!(
-            done[0].lookup,
+            looked_up(&done[0]),
             Some(lookup(&path[path.len() - TAIL_PATH_BYTES..], true))
         );
         // Exactly the limit is indistinguishable from a longer path.
         let exact = format!("/{}", "e".repeat(TAIL_PATH_BYTES - 1));
         let done = run(&mut pairer, &synth.open(1, 2, &exact, 3));
-        assert_eq!(done[0].lookup, Some(lookup(&exact, true)));
+        assert_eq!(looked_up(&done[0]), Some(lookup(&exact, true)));
     }
 
     #[test]
@@ -367,11 +382,14 @@ mod tests {
         let mut records = vec![synth.syscall_start(1, 5, [0; 4])];
         records.extend(synth.lookup_bytes(1, b"sub", b'>'));
         records.push(synth.syscall_end(1, 5, 2, 0, [3, 0]));
-        assert_eq!(run(&mut pairer, &records)[0].lookup, Some(lookup("sub", false)));
+        assert_eq!(
+            looked_up(&run(&mut pairer, &records)[0]),
+            Some(lookup("sub", false))
+        );
         // A path that ends on a record boundary has no padding at all.
         let aligned = "a".repeat(56);
         let done = run(&mut pairer, &synth.open(1, 2, &aligned, 3));
-        assert_eq!(done[0].lookup, Some(lookup(&aligned, false)));
+        assert_eq!(looked_up(&done[0]), Some(lookup(&aligned, false)));
     }
 
     #[test]
@@ -384,8 +402,26 @@ mod tests {
             ..Call::new(1, 2, 5, [0; 4])
         });
         let done = run(&mut pairer, &records);
-        assert_eq!(done[0].lookup, Some(lookup("private/etc/hosts", false)));
+        assert_eq!(looked_up(&done[0]), Some(lookup("private/etc/hosts", false)));
         assert!(!done[0].lookup.as_ref().unwrap().is_absolute());
+    }
+
+    #[test]
+    fn lookups_carry_the_vnode_found() {
+        let mut synth = Synth::new(0, 1);
+        let mut pairer = Pairer::default();
+        let first = run(&mut pairer, &synth.open(1, 2, "/a/data.txt", 3));
+        let vnode = first[0].lookup.as_ref().unwrap().vnode;
+        assert_ne!(vnode, 0);
+        // The same file reached another way: the path differs, the vnode does not.
+        synth.find_vnode(vnode);
+        let second = run(&mut pairer, &synth.open(1, 2, "../data.txt", 4));
+        assert_eq!(
+            second[0].lookup.as_ref().map(|l| (l.path.as_str(), l.vnode)),
+            Some(("../data.txt", vnode))
+        );
+        let third = run(&mut pairer, &synth.open(1, 2, "/a/other.txt", 5));
+        assert_ne!(third[0].lookup.as_ref().unwrap().vnode, vnode);
     }
 
     #[test]

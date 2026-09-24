@@ -11,6 +11,11 @@
 //! moment the answer is stale, and every entry that took its target from it falls back to what
 //! the trace alone says. [`Verdict`]s report how each answer turned out, so that events whose
 //! target rests on one can wait for it.
+//!
+//! An answer given after its descriptor began to close describes whatever held the number at
+//! that moment. That can still be the same file: the descriptor on its way out, or a later one
+//! opened on the same file, which the vnode in their lookups tells. Such an answer stands when
+//! everything that may have held the number then refers to that file.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -33,6 +38,8 @@ struct FdEntry {
     refresh_at: Option<u64>,
     /// The unconfirmed answer the target rests on.
     answer: Option<u64>,
+    /// Vnode of the file the descriptor was opened on, from the open's lookup; 0 when unknown.
+    vnode: u64,
 }
 
 impl FdEntry {
@@ -43,6 +50,7 @@ impl FdEntry {
             opened_at,
             refresh_at: None,
             answer: None,
+            vnode: 0,
         }
     }
 }
@@ -60,12 +68,30 @@ struct ProcFds {
 struct Unconfirmed {
     /// Mach time the answer was given.
     at: u64,
+    /// The descriptor libproc was asked about.
+    asked: (i32, i32),
+    /// Vnode of the file the asked descriptor was opened on; 0 when it is not a looked-up
+    /// file.
+    vnode: u64,
     /// Entries that took their target from it: the descriptor asked about and its copies.
     entries: Vec<(i32, i32)>,
     /// What the trace alone says, for when the answer turns out to be about another
     /// descriptor.
     fallback: Arc<Target>,
     fallback_provenance: Provenance,
+    /// Set once the descriptor asked about began to close before the answer.
+    orphan: Option<Orphan>,
+}
+
+/// What the trace shows about the number of an answer given after its descriptor began to
+/// close: who may have held the number when libproc answered.
+#[derive(Debug)]
+struct Orphan {
+    /// Something that may have held it then refers to the file the answer was taken for.
+    held: bool,
+    /// Whether the number's current holder, which took it before the answer, refers to that
+    /// file. Settled when it leaves or when the trace passes the answer.
+    current: Option<bool>,
 }
 
 /// How an answer that targets rested on turned out.
@@ -101,6 +127,8 @@ pub struct FdTable {
     unconfirmed: HashMap<u64, Unconfirmed>,
     /// Unconfirmed answers by the time they were given, oldest first.
     by_time: VecDeque<(u64, u64)>,
+    /// Orphaned answers by the descriptor they were about.
+    orphans: HashMap<(i32, i32), Vec<u64>>,
     next_answer: u64,
     verdicts: Vec<Verdict>,
 }
@@ -113,6 +141,7 @@ impl FdTable {
             unknown: Arc::new(Target::Unknown),
             unconfirmed: HashMap::new(),
             by_time: VecDeque::new(),
+            orphans: HashMap::new(),
             next_answer: 1,
             verdicts: Vec::new(),
         }
@@ -125,6 +154,9 @@ impl FdTable {
         let Some(snapshot) = src.snapshot(pid) else {
             return false;
         };
+        // A new snapshot follows calls the trace did not show, such as the closes of an exec or
+        // records the kernel dropped, so the trace can no longer vouch for pending answers.
+        self.drop_answers(pid);
         let mut old = self.procs.remove(&pid).unwrap_or_default();
         let mut fds = HashMap::with_capacity(snapshot.fds.len());
         for (fd, target) in snapshot.fds {
@@ -200,17 +232,21 @@ impl FdTable {
                 break;
             }
             self.by_time.pop_front();
-            let Some(unconfirmed) = self.unconfirmed.remove(&answer) else {
+            let Some(unconfirmed) = self.unconfirmed.get(&answer) else {
                 continue;
             };
-            for (pid, fd) in unconfirmed.entries {
-                if let Some(entry) = self.entry_mut(pid, fd)
-                    && entry.answer == Some(answer)
-                {
-                    entry.answer = None;
-                }
+            let stands = unconfirmed
+                .orphan
+                .as_ref()
+                .is_none_or(|orphan| match orphan.current {
+                    Some(same) => same,
+                    None => orphan.held,
+                });
+            if stands {
+                self.confirm(answer);
+            } else {
+                self.stale(answer);
             }
-            self.verdicts.push(Verdict::Confirmed(answer));
         }
     }
 
@@ -238,12 +274,12 @@ impl FdTable {
                         let dirfd = dirfd_arg.and_then(|i| done.arg_i32(i));
                         self.open(pid, fd, dirfd, lookup, (ts, since), src);
                     }
-                    None => self.forget(pid, fd, since),
+                    None => self.forget(pid, fd, (since, ts)),
                 }
             }
             Role::Close => {
                 if let (Some(fd), Some(start)) = (done.arg_i32(0), done.start_ts()) {
-                    self.close(pid, fd, start);
+                    self.close(pid, fd, (start, ts));
                 }
             }
             Role::Dup | Role::Dup2 => {
@@ -302,7 +338,7 @@ impl FdTable {
                     NewFd::Kqueue => FdType::Kqueue,
                     NewFd::Pshm => FdType::Pshm,
                     NewFd::Necp => FdType::Netpolicy,
-                    NewFd::Unknown => return self.forget(pid, fd, since),
+                    NewFd::Unknown => return self.forget(pid, fd, (since, ts)),
                 };
                 let entry = FdEntry::new(Target::Other { fd_type }, Provenance::Traced, ts);
                 self.insert(pid, fd, entry, since);
@@ -349,6 +385,8 @@ impl FdTable {
         if missed {
             return self.unknown_found();
         }
+        // Something the trace did not show created it, at some point before now.
+        self.holder_arrives((pid, fd), (0, ts), 0);
         let described = src.describe(pid, fd);
         let Some(target) = described.target else {
             self.procs.entry(pid).or_default().misses.insert(fd, ts);
@@ -413,9 +451,12 @@ impl FdTable {
             answer,
             Unconfirmed {
                 at,
+                asked: (pid, fd),
+                vnode: self.entry(pid, fd).map_or(0, |entry| entry.vnode),
                 entries: vec![(pid, fd)],
                 fallback: fallback.0,
                 fallback_provenance: fallback.1,
+                orphan: None,
             },
         );
         self.by_time.push_back((at, answer));
@@ -425,32 +466,115 @@ impl FdTable {
         Some(answer)
     }
 
-    /// Settles the answer `entry` rested on as it leaves the table. `closed_at` is the trace time
-    /// its descriptor was closed or replaced, when known: an answer given after that was about
-    /// whatever took the number next, so it is stale for every entry that used it.
-    fn retire(&mut self, pid: i32, fd: i32, entry: &FdEntry, closed_at: Option<u64>) {
+    /// Settles what the answer `entry` rested on learns from its leaving the table. `closed`
+    /// spans the call that closed or replaced its descriptor, when the trace shows one. Only the
+    /// descriptor libproc was asked about matters; a copy leaving just stops using the answer.
+    fn retire(&mut self, pid: i32, fd: i32, entry: &FdEntry, closed: Option<(u64, u64)>) {
         let Some(answer) = entry.answer else {
             return;
         };
-        let Some(at) = self.unconfirmed.get(&answer).map(|u| u.at) else {
+        let Some(unconfirmed) = self.unconfirmed.get_mut(&answer) else {
             return;
         };
-        if closed_at.is_none_or(|closed| at <= closed) {
-            if let Some(unconfirmed) = self.unconfirmed.get_mut(&answer) {
-                unconfirmed.entries.retain(|&e| e != (pid, fd));
-            }
+        unconfirmed.entries.retain(|&e| e != (pid, fd));
+        let Some((start, end)) = closed.filter(|_| unconfirmed.asked == (pid, fd)) else {
+            return;
+        };
+        if unconfirmed.at <= start {
             return;
         }
-        let Some(unconfirmed) = self.unconfirmed.remove(&answer) else {
+        // It began to close before libproc answered, so the answer is about whatever held the
+        // number then: this descriptor only if its close had not yet finished.
+        let held = end >= unconfirmed.at;
+        if held || unconfirmed.vnode != 0 {
+            unconfirmed.orphan = Some(Orphan { held, current: None });
+            self.orphans.entry((pid, fd)).or_default().push(answer);
+        } else {
+            self.stale(answer);
+        }
+    }
+
+    /// Notes a descriptor taking the number `slot` in a call that ran from `start` to `end`,
+    /// opened on `vnode`, or 0 when it is not a known file.
+    fn holder_arrives(&mut self, slot: (i32, i32), (start, end): (u64, u64), vnode: u64) {
+        // A holder the trace did not show leaving was gone by the end of this call.
+        self.holder_leaves(slot, end, false);
+        for answer in self.orphans.get(&slot).cloned().unwrap_or_default() {
+            if let Some(unconfirmed) = self.unconfirmed.get_mut(&answer)
+                && let Some(orphan) = unconfirmed.orphan.as_mut()
+                && start < unconfirmed.at
+            {
+                orphan.current = Some(vnode != 0 && vnode == unconfirmed.vnode);
+            }
+        }
+    }
+
+    /// Notes the holder of the number `slot` leaving it in a call that ended at `end`.
+    /// `unknown` says the table had no entry for it, so nothing is known about what it was.
+    fn holder_leaves(&mut self, slot: (i32, i32), end: u64, unknown: bool) {
+        let mut stale = Vec::new();
+        for answer in self.orphans.get(&slot).cloned().unwrap_or_default() {
+            let Some(unconfirmed) = self.unconfirmed.get_mut(&answer) else {
+                continue;
+            };
+            let Some(orphan) = unconfirmed.orphan.as_mut() else {
+                continue;
+            };
+            let leaving = orphan.current.take().or(unknown.then_some(false));
+            match leaving {
+                // Gone before libproc answered, so not what it described.
+                Some(_) if end < unconfirmed.at => {}
+                Some(true) => orphan.held = true,
+                Some(false) => stale.push(answer),
+                None => {}
+            }
+        }
+        for answer in stale {
+            self.stale(answer);
+        }
+    }
+
+    /// Declares every pending answer about `pid` stale.
+    fn drop_answers(&mut self, pid: i32) {
+        let mut pending: Vec<u64> = self
+            .unconfirmed
+            .iter()
+            .filter(|(_, unconfirmed)| unconfirmed.asked.0 == pid)
+            .map(|(&answer, _)| answer)
+            .collect();
+        pending.sort_unstable();
+        for answer in pending {
+            self.stale(answer);
+        }
+    }
+
+    /// The entries resting on `answer` keep their targets.
+    fn confirm(&mut self, answer: u64) {
+        let Some(unconfirmed) = self.take(answer) else {
             return;
         };
-        for (other_pid, other_fd) in unconfirmed.entries {
-            if let Some(other) = self.entry_mut(other_pid, other_fd)
-                && other.answer == Some(answer)
+        for (pid, fd) in unconfirmed.entries {
+            if let Some(entry) = self.entry_mut(pid, fd)
+                && entry.answer == Some(answer)
             {
-                other.target = unconfirmed.fallback.clone();
-                other.provenance = unconfirmed.fallback_provenance;
-                other.answer = None;
+                entry.answer = None;
+            }
+        }
+        self.verdicts.push(Verdict::Confirmed(answer));
+    }
+
+    /// The entries resting on `answer` fall back to what the trace alone says.
+    fn stale(&mut self, answer: u64) {
+        let Some(unconfirmed) = self.take(answer) else {
+            return;
+        };
+        for (pid, fd) in unconfirmed.entries {
+            if let Some(entry) = self.entry_mut(pid, fd)
+                && entry.answer == Some(answer)
+            {
+                entry.target = unconfirmed.fallback.clone();
+                entry.provenance = unconfirmed.fallback_provenance;
+                entry.answer = None;
             }
         }
         self.verdicts.push(Verdict::Stale {
@@ -460,40 +584,64 @@ impl FdTable {
         });
     }
 
-    /// Puts `entry` in the table for a descriptor created at trace time `since` or later.
+    /// Removes `answer` from those still pending.
+    fn take(&mut self, answer: u64) -> Option<Unconfirmed> {
+        let unconfirmed = self.unconfirmed.remove(&answer)?;
+        if unconfirmed.orphan.is_some()
+            && let Some(waiting) = self.orphans.get_mut(&unconfirmed.asked)
+        {
+            waiting.retain(|&other| other != answer);
+            if waiting.is_empty() {
+                self.orphans.remove(&unconfirmed.asked);
+            }
+        }
+        Some(unconfirmed)
+    }
+
+    /// Puts `entry` in the table for a descriptor created by a call that began at trace time
+    /// `since` and ended at the entry's `opened_at`.
     fn insert(&mut self, pid: i32, fd: i32, entry: FdEntry, since: u64) {
+        let (call, vnode) = ((since, entry.opened_at.max(since)), entry.vnode);
         let proc_fds = self.procs.entry(pid).or_default();
         proc_fds.misses.remove(&fd);
         if let Some(old) = proc_fds.fds.insert(fd, entry) {
-            self.retire(pid, fd, &old, Some(since));
+            self.retire(pid, fd, &old, Some(call));
+            self.holder_leaves((pid, fd), call.1, false);
         }
+        self.holder_arrives((pid, fd), call, vnode);
     }
 
-    /// Drops what is known about `fd` so its next use looks it up afresh.
-    fn forget(&mut self, pid: i32, fd: i32, since: u64) {
-        let Some(proc_fds) = self.procs.get_mut(&pid) else {
-            return;
-        };
-        proc_fds.misses.remove(&fd);
-        if let Some(old) = proc_fds.fds.remove(&fd) {
-            self.retire(pid, fd, &old, Some(since));
+    /// Drops what is known about `fd`, which a call running over `call` replaced with something
+    /// unknown, so its next use looks it up afresh.
+    fn forget(&mut self, pid: i32, fd: i32, call: (u64, u64)) {
+        if let Some(proc_fds) = self.procs.get_mut(&pid) {
+            proc_fds.misses.remove(&fd);
+            if let Some(old) = proc_fds.fds.remove(&fd) {
+                self.retire(pid, fd, &old, Some(call));
+                self.holder_leaves((pid, fd), call.1, false);
+            }
         }
+        self.holder_arrives((pid, fd), call, 0);
     }
 
-    fn close(&mut self, pid: i32, fd: i32, start_ts: u64) {
+    /// Applies a close that ran over `call`.
+    fn close(&mut self, pid: i32, fd: i32, call: (u64, u64)) {
         let Some(proc_fds) = self.procs.get_mut(&pid) else {
             return;
         };
         proc_fds.misses.remove(&fd);
         // Another thread may have been handed the same number after this close released it
         // but before this close returned; that newer descriptor stays.
-        if proc_fds
-            .fds
-            .get(&fd)
-            .is_some_and(|entry| entry.opened_at < start_ts)
-            && let Some(old) = proc_fds.fds.remove(&fd)
-        {
-            self.retire(pid, fd, &old, Some(start_ts));
+        match proc_fds.fds.get(&fd).map(|entry| entry.opened_at < call.0) {
+            Some(true) => {
+                if let Some(old) = proc_fds.fds.remove(&fd) {
+                    self.retire(pid, fd, &old, Some(call));
+                    self.holder_leaves((pid, fd), call.1, false);
+                }
+            }
+            Some(false) => {}
+            // Closing a descriptor the table did not know: something unseen held the number.
+            None => self.holder_leaves((pid, fd), call.1, true),
         }
     }
 
@@ -503,15 +651,17 @@ impl FdTable {
         }
         let found = self.target(pid, old, ts, src);
         if *found.target == Target::Unknown {
-            self.forget(pid, new, since);
+            self.forget(pid, new, (since, ts));
             return;
         }
+        let original = self.entry(pid, old);
         let entry = FdEntry {
             target: found.target,
             provenance: found.provenance,
             opened_at: ts,
-            refresh_at: self.entry(pid, old).and_then(|entry| entry.refresh_at),
+            refresh_at: original.and_then(|entry| entry.refresh_at),
             answer: found.answer,
+            vnode: original.map_or(0, |entry| entry.vnode),
         };
         self.insert(pid, new, entry, since);
         // The copy refers to the same open file, so the answer's verdict holds for it too.
@@ -531,7 +681,10 @@ impl FdTable {
         (ts, since): (u64, u64),
         src: &mut dyn ProcSource,
     ) {
-        let file = |path| FdEntry::new(Target::File { path }, Provenance::Traced, ts);
+        let file = |path| FdEntry {
+            vnode: lookup.vnode,
+            ..FdEntry::new(Target::File { path }, Provenance::Traced, ts)
+        };
         if lookup.is_absolute() {
             self.insert(pid, fd, file(lookup.path.clone()), since);
             return;
@@ -595,6 +748,9 @@ impl FdTable {
 
     fn connect(&mut self, pid: i32, fd: i32, path: Option<&str>, ts: u64, src: &mut dyn ProcSource) {
         let retry_at = ts.saturating_add(self.retry_ticks);
+        if self.entry(pid, fd).is_none() {
+            self.holder_arrives((pid, fd), (0, ts), 0);
+        }
         let described = src.describe(pid, fd);
         let (known, provenance, opened_at) = match self.entry(pid, fd) {
             Some(entry) => (entry.target.clone(), entry.provenance, entry.opened_at),
@@ -621,6 +777,7 @@ impl FdTable {
             provenance,
             opened_at,
             answer: None,
+            vnode: 0,
         };
         let replaced = self.procs.entry(pid).or_default().fds.insert(fd, entry);
         if let Some(old) = replaced {
@@ -784,12 +941,37 @@ mod tests {
             lookup: paths.first().map(|path| Lookup {
                 path: (*path).to_owned(),
                 truncated: false,
+                vnode: 0,
             }),
         }
     }
 
     fn file(path: &str) -> Target {
         Target::File { path: path.into() }
+    }
+
+    /// An `open` of `path` returning `fd`, whose lookup found `vnode`.
+    fn open_of(start: u64, end: u64, path: &str, vnode: u64, fd: i64) -> Completed {
+        let mut open = done(5, start, end, [0; 4], fd, &[path]);
+        if let Some(lookup) = open.lookup.as_mut() {
+            lookup.vnode = vnode;
+        }
+        open
+    }
+
+    fn close_of(start: u64, end: u64, fd: i64) -> Completed {
+        done(6, start, end, [fd, 0, 0, 0], 0, &[])
+    }
+
+    /// Opens `web2` on fd 3 through a link, as `/usr/share/dict/words` is, and returns the
+    /// answer its name rests on. libproc answers at trace time 100.
+    fn open_web2(table: &mut FdTable, src: &mut Fake) -> u64 {
+        src.answered_at = 100;
+        src.live.insert((PID, 3), file("/usr/share/dict/web2"));
+        table.apply(&open_of(1, 2, "web2", 0xa0, 3), src);
+        let found = table.target(PID, 3, 3, src);
+        assert_eq!(*found.target, file("/usr/share/dict/web2"));
+        found.answer.expect("unconfirmed")
     }
 
     fn target_of(table: &mut FdTable, fd: i32, ts: u64, src: &mut Fake) -> (Target, Provenance) {
@@ -838,6 +1020,113 @@ mod tests {
         assert_eq!(table.take_verdicts(), [Verdict::Confirmed(second)]);
         let found = table.target(PID, 4, 102, &mut src);
         assert_eq!((found.answer, &*found.target), (None, &tcp(Some("10.0.0.2:443"))));
+    }
+
+    #[test]
+    fn answers_about_the_same_file_on_a_reused_number_stand() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let answer = open_web2(&mut table, &mut src);
+        table.apply(&close_of(4, 5, 3), &mut src);
+        // getcwd opens "." on the number and closes it again, long before libproc answers.
+        table.apply(&open_of(6, 7, ".", 0xd0, 3), &mut src);
+        table.apply(&close_of(8, 9, 3), &mut src);
+        // Then the same file again: this is what libproc describes at 100.
+        table.apply(&open_of(10, 11, "web2", 0xa0, 3), &mut src);
+        assert!(
+            table.take_verdicts().is_empty(),
+            "undecided until the trace passes the answer"
+        );
+        table.advance(101);
+        assert_eq!(table.take_verdicts()[0], Verdict::Confirmed(answer));
+    }
+
+    #[test]
+    fn answers_about_another_file_on_a_reused_number_are_stale() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let answer = open_web2(&mut table, &mut src);
+        table.apply(&close_of(4, 5, 3), &mut src);
+        // Another file with the same name, still open when libproc answers.
+        table.apply(&open_of(6, 7, "web2", 0xb0, 3), &mut src);
+        table.advance(101);
+        assert_eq!(
+            table.take_verdicts()[0],
+            Verdict::Stale {
+                answer,
+                target: Arc::new(file("web2")),
+                provenance: Provenance::Traced,
+            }
+        );
+    }
+
+    #[test]
+    fn numbers_taken_by_unknown_descriptors_make_answers_stale() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let answer = open_web2(&mut table, &mut src);
+        table.apply(&close_of(4, 5, 3), &mut src);
+        // An open whose lookup was not seen: the number holds something unknown.
+        table.apply(&done(5, 6, 7, [0; 4], 3, &[]), &mut src);
+        table.advance(101);
+        assert!(matches!(table.take_verdicts()[..], [Verdict::Stale { answer: a, .. }] if a == answer));
+
+        // One that is gone again before the answer does not matter.
+        let answer = open_web2(&mut table, &mut src);
+        table.apply(&close_of(4, 5, 3), &mut src);
+        table.apply(&done(5, 6, 7, [0; 4], 3, &[]), &mut src);
+        table.apply(&close_of(8, 9, 3), &mut src);
+        table.apply(&open_of(10, 11, "web2", 0xa0, 3), &mut src);
+        table.advance(101);
+        assert_eq!(table.take_verdicts()[0], Verdict::Confirmed(answer));
+    }
+
+    #[test]
+    fn a_descriptor_still_closing_when_libproc_answered_keeps_its_answer() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        let (inet, stream) = (i64::from(libc::AF_INET), i64::from(libc::SOCK_STREAM));
+        src.live.insert((PID, 4), tcp(Some("10.0.0.2:443")));
+        table.apply(&done(97, 1, 2, [inet, stream, 0, 0], 4, &[]), &mut src);
+        table.apply(&done(98, 3, 4, [4, 0, 0, 0], 0, &[]), &mut src);
+        let answer = table.target(PID, 4, 5, &mut src).answer.expect("unconfirmed");
+        // The close began before the answer and ended after it.
+        table.apply(&close_of(6, 150, 4), &mut src);
+        assert!(table.take_verdicts().is_empty());
+        table.advance(151);
+        assert_eq!(table.take_verdicts(), [Verdict::Confirmed(answer)]);
+    }
+
+    #[test]
+    fn copies_closing_leave_the_answer_to_the_original() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        src.live.insert((PID, 5), file("/later"));
+        let answer = table.target(PID, 5, 1, &mut src).answer.expect("unconfirmed");
+        table.apply(&done(41, 2, 3, [5, 0, 0, 0], 6, &[]), &mut src);
+        table.apply(&close_of(4, 5, 6), &mut src);
+        table.advance(101);
+        assert_eq!(table.take_verdicts(), [Verdict::Confirmed(answer)]);
+    }
+
+    #[test]
+    fn a_new_snapshot_drops_pending_answers() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        src.snapshots.insert(PID, Snapshot::default());
+        let mut table = FdTable::new(1_000);
+        src.live.insert((PID, 5), file("/later"));
+        let answer = table.target(PID, 5, 1, &mut src).answer.expect("unconfirmed");
+        assert!(table.attach(PID, &mut src));
+        assert!(matches!(table.take_verdicts()[..], [Verdict::Stale { answer: a, .. }] if a == answer));
     }
 
     #[test]
@@ -1054,6 +1343,7 @@ mod tests {
         cut.lookup = Some(Lookup {
             path: "ntainers/app/Data/cache.db".into(),
             truncated: true,
+            vnode: 0,
         });
         table.apply(&cut, &mut src);
         assert_eq!(
