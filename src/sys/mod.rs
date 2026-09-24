@@ -6,6 +6,7 @@
 pub mod kdebug;
 pub mod proc;
 pub mod time;
+pub mod user;
 
 /// Returns true when the effective user is root.
 pub fn is_root() -> bool {
