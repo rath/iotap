@@ -68,15 +68,17 @@ pub enum Notice {
         pid: i32,
         path: String,
     },
-    Exited {
-        pid: i32,
-    },
+    Exited(Process),
 }
 
 /// Receives what a session produces.
 pub trait Sink {
     fn event(&mut self, event: &IoEvent) -> io::Result<()>;
     fn notice(&mut self, notice: &Notice) -> io::Result<()>;
+    /// Called after each input has been handled.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Which kinds of targets to report.
@@ -343,8 +345,12 @@ impl Session {
         match self.processes.get_mut(&pid) {
             Some(state) if state.alive => {
                 state.alive = false;
+                let process = Process {
+                    pid,
+                    name: state.name.clone(),
+                };
                 self.fds.detach(pid);
-                sink.notice(&Notice::Exited { pid })
+                sink.notice(&Notice::Exited(process))
             }
             _ => Ok(()),
         }
@@ -515,7 +521,13 @@ mod tests {
         session
             .handle(&Input::Exited { pid: PID }, &mut src, &mut sink)
             .unwrap();
-        assert_eq!(sink.notices, [Notice::Exited { pid: PID }]);
+        assert_eq!(
+            sink.notices,
+            [Notice::Exited(Process {
+                pid: PID,
+                name: "demo".into()
+            })]
+        );
         assert!(session.all_exited());
         session
             .handle(

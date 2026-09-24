@@ -67,6 +67,10 @@ impl Key {
         }
     }
 
+    fn has_addresses(&self) -> bool {
+        matches!(self, Self::Socket { proto, .. } if proto.has_addresses())
+    }
+
     pub fn category(&self) -> Category {
         match self {
             Self::File(_) => Category::File,
@@ -87,6 +91,7 @@ impl fmt::Display for Key {
                     Peer::Remote(addr) => write!(f, "{proto} {addr}"),
                     Peer::Local(addr) => write!(f, "{proto} {addr} (local)"),
                     Peer::Path(path) => write!(f, "{proto} {path}"),
+                    Peer::Unknown if !self.has_addresses() => f.write_str(proto),
                     Peer::Unknown => write!(f, "{proto} ?"),
                 }
             }
@@ -468,6 +473,14 @@ mod tests {
             ..Endpoint::unresolved(Proto::Udp)
         });
         assert_eq!(Key::of(&udp).to_string(), "udp 0.0.0.0:5353 (local)");
+        assert_eq!(
+            Key::of(&Target::Socket(Endpoint::unresolved(Proto::System))).to_string(),
+            "system"
+        );
+        assert_eq!(
+            Key::of(&Target::Socket(Endpoint::unresolved(Proto::Tcp))).to_string(),
+            "tcp ?"
+        );
         assert_eq!(SortBy::Recent.next(), SortBy::Bytes);
     }
 

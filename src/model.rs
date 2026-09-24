@@ -132,6 +132,11 @@ impl Proto {
         }
     }
 
+    /// True for protocols whose endpoints are IP addresses and ports.
+    pub fn has_addresses(self) -> bool {
+        matches!(self, Self::Tcp | Self::Udp | Self::Icmp | Self::Raw)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",
@@ -189,7 +194,8 @@ impl fmt::Display for Endpoint {
             (Some(local), Some(remote)) => write!(f, " {local} -> {remote}"),
             (Some(local), None) => write!(f, " {local}"),
             (None, Some(remote)) => write!(f, " -> {remote}"),
-            (None, None) => f.write_str(" ?"),
+            (None, None) if self.proto.has_addresses() => f.write_str(" ?"),
+            (None, None) => Ok(()),
         }
     }
 }
@@ -435,6 +441,7 @@ mod tests {
         };
         assert_eq!(unix.to_string(), "unix /var/run/mDNSResponder");
         assert_eq!(Endpoint::unresolved(Proto::Udp).to_string(), "udp ?");
+        assert_eq!(Endpoint::unresolved(Proto::System).to_string(), "system");
         assert!(Endpoint::unresolved(Proto::Udp).is_incomplete());
     }
 
