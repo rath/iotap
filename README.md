@@ -188,7 +188,8 @@ it draws, never the contents, so a replay shows the file on the replaying machin
 
 - **The terminal's clipboard (OSC 52).** This reaches the machine you sit at, even over SSH, in
   terminals that allow it: iTerm2 (once "Applications in terminal may access clipboard" is on),
-  kitty, WezTerm, Ghostty and Alacritty. tmux passes it on with `set-clipboard on`.
+  kitty, WezTerm, Ghostty and Alacritty. tmux passes it on with `set-clipboard on`. Terminal.app
+  ignores it.
 - **The Mac's pasteboard.** `pbcopy` runs as the user who ran sudo, so it works in any terminal
   on the Mac that iotap runs on.
 
