@@ -5,7 +5,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Direction of a data transfer, from the traced process's point of view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -101,7 +101,7 @@ impl Op {
 }
 
 /// Transport of a socket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Proto {
     Tcp,
@@ -152,7 +152,7 @@ impl Proto {
 }
 
 /// Where a socket is connected, as far as it is known.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Endpoint {
     pub proto: Proto,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,7 +201,7 @@ impl fmt::Display for Endpoint {
 }
 
 /// Kind of a descriptor that is neither a file nor a socket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FdType {
     Pipe,
@@ -250,7 +250,7 @@ impl FdType {
 }
 
 /// What a descriptor refers to.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Target {
     File {

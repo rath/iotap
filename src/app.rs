@@ -1,6 +1,8 @@
 //! Wires the command line to the kernel reader, the session and the chosen output.
 
+use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,11 +10,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::Cli;
 use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
+use crate::record::{self, Recorder, Recording};
 use crate::session::{Filter, Input, Session, SessionInfo, Sink};
 use crate::sys;
 use crate::sys::kdebug::{self, Kdebug, KdebugConfig, KdebugError, TypeFilter};
@@ -21,11 +24,17 @@ use crate::target::{self, Spec, Tracked};
 use crate::trace::codes;
 use crate::trace::procs::{Live, ProcSource};
 
+/// Process source of a live trace: libproc, optionally recorded to a file.
+type LiveSource = Recording<Live, BufWriter<File>>;
+
 /// Runs iotap as the command line asks.
 pub fn run(cli: &Cli) -> Result<ExitCode> {
     install_panic_hook();
     if let Some(pid) = cli.dump_fds {
         return dump_fds(pid);
+    }
+    if let Some(path) = &cli.replay {
+        return replay(cli, path);
     }
     trace_live(cli)
 }
@@ -78,7 +87,13 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         anchor,
         processes: tracked.iter().map(Tracked::process).collect(),
     };
-    let mut src = Live;
+    let recorder = match &cli.record {
+        Some(path) => {
+            Some(Recorder::create(path, &info).with_context(|| format!("cannot create {}", path.display()))?)
+        }
+        None => None,
+    };
+    let mut src = Recording::new(Live, recorder);
     let mut session = Session::new(info, filter(cli), &mut src);
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -101,30 +116,27 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
             .name("kdebug-reader".into())
             .spawn_scoped(scope, move || {
                 reader::run(kd_ref, tracked, config_ref, &tx, stop_ref)
-            });
+            })
+            .context("cannot start the kernel reader")?;
         let consumed = consume(&rx, &mut session, &mut src, &mut sink, stop_ref, deadline);
         stop_ref.store(true, Ordering::SeqCst);
-        let read = match reader {
-            Ok(handle) => handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("the kernel reader panicked"))?
-                .map_err(anyhow::Error::from),
-            Err(err) => Err(anyhow::Error::from(err).context("cannot start the kernel reader")),
-        };
+        let read = reader.join().map_err(|_| anyhow!("the kernel reader panicked"))?;
         anyhow::Ok((consumed, read))
     })?;
     // Give the trace facility back before anything else can fail.
     drop(kd);
 
-    match consumed {
-        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(ExitCode::SUCCESS),
-        Err(err) => return Err(err).context("cannot write output"),
-        Ok(()) => {}
+    let saved = src.finish();
+    if !finish_output(consumed)? {
+        return Ok(ExitCode::SUCCESS);
     }
     let mut out = sink.into_inner();
     text::write_summary(&mut out, &session.summary(), cli.top, filter(cli))?;
     out.flush()?;
     read?;
+    if let Some(path) = &cli.record {
+        saved.with_context(|| format!("the recording {} is incomplete", path.display()))?;
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -132,11 +144,12 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
 fn consume(
     rx: &Receiver<Input>,
     session: &mut Session,
-    src: &mut dyn ProcSource,
+    src: &mut LiveSource,
     sink: &mut dyn Sink,
     stop: &AtomicBool,
     deadline: Option<Instant>,
 ) -> io::Result<()> {
+    let mut reported = false;
     loop {
         if deadline.is_some_and(|at| Instant::now() >= at) {
             stop.store(true, Ordering::SeqCst);
@@ -147,11 +160,63 @@ fn consume(
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         };
         let last = matches!(input, Input::Stopped { .. });
+        src.input(&input);
         session.handle(&input, src, sink)?;
         sink.flush()?;
+        if !reported && let Some(err) = src.error() {
+            let _ = writeln!(io::stderr(), "iotap: recording stopped: {err}; tracing continues");
+            reported = true;
+        }
         if last {
             return Ok(());
         }
+    }
+}
+
+/// Replays a recording through the same session and output as a live trace.
+fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
+    let replay = record::read(path).with_context(|| format!("cannot replay {}", path.display()))?;
+    if replay.truncated {
+        let _ = writeln!(
+            io::stderr(),
+            "iotap: the recording ends abruptly; replaying what it holds"
+        );
+    }
+    let processes: Vec<String> = replay
+        .info
+        .processes
+        .iter()
+        .map(|p| format!("{} ({})", p.pid, p.name))
+        .collect();
+    let _ = writeln!(
+        io::stderr(),
+        "iotap: replaying {} ({}): {}",
+        path.display(),
+        replay.created_by,
+        processes.join(", ")
+    );
+    let mut answers = replay.answers;
+    let mut session = Session::new(replay.info, filter(cli), &mut answers);
+    let mut sink = TextSink::new(BufWriter::with_capacity(1 << 16, io::stdout().lock()), cli.quiet);
+    let fed = replay.inputs.iter().try_for_each(|input| {
+        session.handle(input, &mut answers, &mut sink)?;
+        sink.flush()
+    });
+    if !finish_output(fed)? {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut out = sink.into_inner();
+    text::write_summary(&mut out, &session.summary(), cli.top, filter(cli))?;
+    out.flush()?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// False when stdout was closed by its reader, as with `| head`, which is not an error.
+fn finish_output(result: io::Result<()>) -> Result<bool> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(err) => Err(err).context("cannot write output"),
     }
 }
 

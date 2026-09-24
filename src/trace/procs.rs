@@ -3,11 +3,13 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::model::{FdType, Target};
 use crate::sys::proc as libproc;
 
 /// Descriptor table and working directory of a process at one moment.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub fds: Vec<(i32, Target)>,
     pub cwd: Option<String>,

@@ -9,6 +9,7 @@ pub mod cli;
 pub mod model;
 pub mod output;
 pub mod reader;
+pub mod record;
 pub mod session;
 pub mod stats;
 pub mod sys;
