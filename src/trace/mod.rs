@@ -2,5 +2,7 @@
 
 pub mod codes;
 pub mod decode;
+pub mod fdtable;
 pub mod pairing;
+pub mod procs;
 pub mod synth;
