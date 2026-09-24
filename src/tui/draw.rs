@@ -468,10 +468,10 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
     }
     hints.push(if shown.paused { "p resume" } else { "p pause" });
     hints.push("r reset");
-    hints.push(match (table, view.details) {
-        (true, false) => "enter details",
-        (true, true) => "esc close",
-        (false, _) => "↑↓ scroll",
+    hints.extend(match (table, view.details) {
+        (true, false) => ["enter details", "y copy"].as_slice(),
+        (true, true) => &["esc close", "y copy"],
+        (false, _) => &["↑↓ scroll"],
     });
     let hints = Line::styled(format!("{} ", hints.join("  ")), DIM).right_aligned();
     let [left, right] =

@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4.6", features = ["derive"] }
+# The crossterm that ratatui uses, with its OSC 52 clipboard command.
+crossterm = { version = "0.29", default-features = false, features = ["osc52"] }
 libc = "0.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 serde = { version = "1", features = ["derive", "rc"] }

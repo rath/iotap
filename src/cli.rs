@@ -29,8 +29,9 @@ pub struct Cli {
     /// order; p pauses the view while tracing goes on; r resets the view to zero, though the
     /// summary still covers the whole trace; the arrow keys, Page Up, Page Down, Home and End
     /// select a row of the Files and Network tables and scroll the Events tab; Enter shows the
-    /// selected row's details and Esc hides them; q quits and prints the summary. The UI stays
-    /// open after tracing stops. With --quiet it has no Events tab.
+    /// selected row's details and Esc hides them; y copies its path or address; q quits and
+    /// prints the summary. The UI stays open after tracing stops. With --quiet it has no Events
+    /// tab.
     #[arg(long, conflicts_with = "json")]
     pub tui: bool,
 

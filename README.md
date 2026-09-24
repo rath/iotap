@@ -153,6 +153,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | `s` | Sort by bytes, read, write, calls or most recent |
 | `p` or Space | Pause the view; tracing goes on |
 | Enter | Show or hide the details of the selected row |
+| `y` | Copy the selected row's path, or its socket's address |
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
 | Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, move the selected row. The selection stays with its target as the rows re-sort; Home selects the top row, whichever target that is. In the Events tab, scroll; End follows new events again |
 | `q`, Esc, Ctrl-C | Quit and print the summary; Esc closes the details first |
@@ -172,6 +173,16 @@ The details panel opens below the Files or Network table and shows the selected 
 For a file or a Unix-domain socket with a path, the panel also shows what the path is now: kind,
 size, time since modification, permissions and owner. It reads this metadata with `lstat` each time
 it draws, never the contents, so a replay shows the file on the replaying machine.
+
+`y` copies in two ways at once:
+
+- **The terminal's clipboard (OSC 52).** This reaches the machine you sit at, even over SSH, in
+  terminals that allow it: iTerm2 (once "Applications in terminal may access clipboard" is on),
+  kitty, WezTerm, Ghostty and Alacritty. tmux passes it on with `set-clipboard on`.
+- **The Mac's pasteboard.** `pbcopy` runs as the user who ran sudo, so it works in any terminal
+  on the Mac that iotap runs on.
+
+The status line reports what `pbcopy` did; a terminal never says whether it honoured OSC 52.
 
 ### Recordings
 

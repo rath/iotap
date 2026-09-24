@@ -5,15 +5,19 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use unicode_width::UnicodeWidthStr;
 
+use super::clipboard::Copied;
 use crate::model::{Category, IoEvent};
 use crate::output::text;
 use crate::session::{Filter, Notice, ProcessStatus, Session, Sink};
-use crate::stats::{Key, SortBy, Stats};
+use crate::stats::{Key, Peer, Row, SortBy, Stats};
 use crate::sys::time::LocalClock;
 
 /// Events kept for the Events tab.
 pub const EVENT_CAPACITY: usize = 10_000;
+/// Longest copied text the status line repeats whole; longer paths show their last name.
+const BRIEF: usize = 40;
 
 /// The latest events, numbered in arrival order from zero.
 #[derive(Clone, Debug)]
@@ -217,6 +221,17 @@ impl View {
         rank.unwrap_or(0)
     }
 
+    /// The selected row of the current table, when the tab has a table with rows.
+    pub fn selected_row<'s>(&mut self, stats: &'s Stats) -> Option<(&'s Key, &'s Row)> {
+        let tab = self.tab;
+        if tab == Tab::Events {
+            return None;
+        }
+        let rank = self.selected_rank(stats);
+        let mut row = stats.page(|category| tab.lists(category), self.sort, rank, 1);
+        row.pop()
+    }
+
     /// Moves the selection of a table, or scrolls the Events tab.
     fn scroll(&mut self, motion: Motion, stats: &Stats) {
         let page = self.drawn.page.max(1);
@@ -404,6 +419,8 @@ impl Model {
 pub struct App {
     pub view: View,
     pub model: Model,
+    /// Text a key asked to copy, until the frame loop copies it.
+    copy: Option<String>,
     quit: bool,
 }
 
@@ -438,6 +455,22 @@ impl App {
         self.quit
     }
 
+    /// Text a key asked to copy, once.
+    pub fn take_copy(&mut self) -> Option<String> {
+        self.copy.take()
+    }
+
+    /// Says in the status line how copying `text` went.
+    pub fn copied(&mut self, text: &str, copied: &Copied) {
+        let text = brief(text);
+        self.model.status = Some(match copied {
+            Copied::Pasteboard => format!("copied {text}"),
+            Copied::Terminal(why) => {
+                format!("asked the terminal to copy {text}; pbcopy failed: {why}")
+            }
+        });
+    }
+
     /// Applies a key press. Pausing copies what `session` holds at `now_ns`.
     pub fn key(&mut self, key: KeyEvent, session: &Session, now_ns: u64) {
         if key.kind == KeyEventKind::Release {
@@ -455,6 +488,15 @@ impl App {
             KeyCode::BackTab | KeyCode::Left => view.previous_tab(),
             KeyCode::Char('s') => view.sort = view.sort.next(),
             KeyCode::Char('p' | ' ') => self.model.toggle_pause(session, now_ns),
+            KeyCode::Char('y') => {
+                let key = view.selected_row(self.model.stats()).map(|(key, _)| key.clone());
+                if let Some(key) = key {
+                    match copy_text(&key) {
+                        Some(text) => self.copy = Some(text),
+                        None => self.model.status = Some(format!("nothing to copy for {key}")),
+                    }
+                }
+            }
             KeyCode::Char('r') => {
                 self.model.reset(session, now_ns);
                 view.offsets = [0; 2];
@@ -469,6 +511,33 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => view.scroll(Motion::Bottom, self.model.stats()),
             _ => {}
         }
+    }
+}
+
+/// What copying a target puts on the clipboard: a file's path, or a socket's address or path.
+fn copy_text(key: &Key) -> Option<String> {
+    match key {
+        Key::File(path)
+        | Key::Socket {
+            peer: Peer::Path(path),
+            ..
+        } if !path.is_empty() => Some(path.clone()),
+        Key::Socket {
+            peer: Peer::Remote(addr) | Peer::Local(addr),
+            ..
+        } => Some(addr.to_string()),
+        _ => None,
+    }
+}
+
+/// `text` as the status line repeats it: whole when short, else its last path name.
+fn brief(text: &str) -> Cow<'_, str> {
+    if text.width() <= BRIEF {
+        return Cow::Borrowed(text);
+    }
+    match text.rsplit_once('/') {
+        Some((_, name)) if !name.is_empty() => Cow::Owned(format!("…/{name}")),
+        _ => Cow::Borrowed(text),
     }
 }
 
@@ -776,6 +845,59 @@ mod tests {
             (shown.events.len(), shown.stats.totals().events),
             (1, 1),
             "what arrived while paused after the reset shows on resume"
+        );
+    }
+
+    #[test]
+    fn y_asks_to_copy_the_selected_target() {
+        use crate::model::{Endpoint, FdType, Proto};
+        let (session, _) = session();
+        let mut app = App::default();
+        let status = |app: &App| app.model.shown(&session, 0).status.map(str::to_owned);
+        app.event(&write("/b/long", 10, 0)).unwrap();
+        app.event(&write("/a", 50, 0)).unwrap();
+        app.event(&IoEvent {
+            target: Arc::new(Target::Other {
+                fd_type: FdType::Pipe,
+            }),
+            ..write("", 1, 0)
+        })
+        .unwrap();
+        app.event(&IoEvent {
+            target: Arc::new(Target::Socket(Endpoint {
+                proto: Proto::Tcp,
+                local: Some("10.0.0.1:5000".parse().unwrap()),
+                remote: Some("1.2.3.4:443".parse().unwrap()),
+                path: None,
+            })),
+            ..write("", 1, 0)
+        })
+        .unwrap();
+
+        app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy().as_deref(), Some("/a"));
+        assert_eq!(app.take_copy(), None, "each press asks once");
+        app.key(press(KeyCode::Down), &session, 0);
+        app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy().as_deref(), Some("/b/long"));
+        app.key(press(KeyCode::End), &session, 0);
+        app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy(), None);
+        assert_eq!(status(&app).as_deref(), Some("nothing to copy for <pipe>"));
+        app.key(press(KeyCode::Char('2')), &session, 0);
+        app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy().as_deref(), Some("1.2.3.4:443"));
+        app.key(press(KeyCode::Char('3')), &session, 0);
+        app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy(), None, "the Events tab has no selection");
+
+        app.copied("/b/long", &Copied::Pasteboard);
+        assert_eq!(status(&app).as_deref(), Some("copied /b/long"));
+        let long = format!("/{}/leaf.txt", "d".repeat(40));
+        app.copied(&long, &Copied::Terminal("pbcopy exit status: 1".into()));
+        assert_eq!(
+            status(&app).as_deref(),
+            Some("asked the terminal to copy …/leaf.txt; pbcopy failed: pbcopy exit status: 1")
         );
     }
 

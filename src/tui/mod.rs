@@ -4,6 +4,7 @@
 //! frames a second and handles keys. Pausing freezes only the view: tracing goes on, so the
 //! kernel buffer never waits for the user.
 
+pub mod clipboard;
 mod details;
 pub mod draw;
 pub mod state;
@@ -108,6 +109,10 @@ fn run_loop(
             loop {
                 if let Event::Key(key) = event::read()? {
                     app.key(key, session, now_ns);
+                    if let Some(text) = app.take_copy() {
+                        let copied = clipboard::copy(&text)?;
+                        app.copied(&text, &copied);
+                    }
                 }
                 // Resizes and other events only need a new frame.
                 dirty = true;
