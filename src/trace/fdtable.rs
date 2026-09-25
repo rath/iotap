@@ -5,12 +5,13 @@
 //! anything still unknown is looked up the first time it is used.
 //!
 //! libproc describes a descriptor as it is when asked, and so does `/proc` on Linux, which
-//! this module calls libproc too. That is after the traced call that made the table ask. If the process closed the descriptor in between and got its number back
-//! for a new one, the answer describes the new one. So an answer stays unconfirmed until the
-//! trace has been read past the moment it was given. If the descriptor was closed before that
-//! moment the answer is stale, and every entry that took its target from it falls back to what
-//! the trace alone says. [`Verdict`]s report how each answer turned out, so that events whose
-//! target rests on one can wait for it.
+//! this module calls libproc too. That is after the traced call that made the table ask. If
+//! the process closed the descriptor in between and got its number back for a new one, the
+//! answer describes the new one. So an answer stays unconfirmed until the trace has been read
+//! past the moment it was given. If the descriptor was closed before that moment the answer is
+//! stale, and every entry that took its target from it falls back to what the trace alone says.
+//! [`Verdict`]s report how each answer turned out, so that events whose target rests on one can
+//! wait for it.
 //!
 //! An answer given after its descriptor began to close describes whatever held the number at
 //! that moment. That can still be the same file: the descriptor on its way out, or a later one

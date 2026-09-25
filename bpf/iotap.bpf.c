@@ -39,7 +39,8 @@ enum {
 
 /* Helpers, by the numbers the kernel gives them. */
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
-static long (*bpf_map_update_elem)(void *map, const void *key, const void *value, __u64 flags) = (void *)2;
+static long (*bpf_map_update_elem)(void *map, const void *key, const void *value,
+				   __u64 flags) = (void *)2;
 static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
 static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
@@ -185,7 +186,8 @@ static __always_inline void read_memory(struct record *rec, __u32 flags)
 	__u32 fds = FDS_ARG(flags);
 
 	if (path >= 1 && path <= 6) {
-		long n = bpf_probe_read_user_str(rec->memory, MEMORY_MAX, (const void *)rec->args[path - 1]);
+		long n = bpf_probe_read_user_str(rec->memory, MEMORY_MAX,
+						 (const void *)rec->args[path - 1]);
 		if (n > 0) {
 			rec->memory_kind = MEMORY_PATH;
 			/* Without the terminator. */
@@ -195,7 +197,8 @@ static __always_inline void read_memory(struct record *rec, __u32 flags)
 		__u64 size = rec->args[len - 1];
 		if (size > SOCKADDR_MAX)
 			size = SOCKADDR_MAX;
-		if (size > 0 && !bpf_probe_read_user(rec->memory, size, (const void *)rec->args[addr - 1])) {
+		if (size > 0 &&
+		    !bpf_probe_read_user(rec->memory, size, (const void *)rec->args[addr - 1])) {
 			rec->memory_kind = MEMORY_SOCKADDR;
 			rec->memory_len = size;
 		}
