@@ -312,16 +312,17 @@ impl Watch {
             // It takes the place of any earlier process given its pid, which is gone.
             self.tracked.retain(|t| t.pid != spawn.child);
             let Some(mut child) = Tracked::probe(spawn.child) else {
-                if spawn.in_trace {
-                    // The records may not tell of its end, and the facility must let its pid go.
-                    inputs.push(Input::Exited {
+                // The records that tell of a child may not tell of its end.
+                inputs.push(if spawn.in_trace {
+                    Input::Exited {
                         pid: spawn.child,
                         ticks: time::now_ticks(),
-                    });
-                    tracer.remove_pid(spawn.child)?;
+                    }
                 } else {
-                    inputs.push(untraced);
-                }
+                    untraced
+                });
+                // The facility traces it, and must let its pid go.
+                tracer.remove_pid(spawn.child)?;
                 continue;
             };
             if spawn.in_trace {
@@ -745,8 +746,8 @@ mod tests {
             parent: Some(7),
             reason: UntracedReason::Ended,
         };
-        // Where the records tell of a child, they may not tell of its end; the facility lets
-        // its pid go.
+        // Where the records tell of a child, they may not tell of its end. Either way the
+        // facility lets its pid go.
         let inputs = watch.spawned(&mut tracer, vec![gone(true)]).unwrap();
         assert!(
             matches!(&inputs[..], [Input::Exited { pid: i32::MAX, .. }]),
@@ -757,6 +758,7 @@ mod tests {
             watch.spawned(&mut tracer, vec![gone(false)]).unwrap(),
             std::slice::from_ref(&untraced)
         );
+        assert_eq!(tracer.removed, [i32::MAX; 2]);
         // One the facility could not trace: the records say so where they tell of children.
         let refused = |in_trace| Spawn {
             traced: false,

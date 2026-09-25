@@ -24,6 +24,14 @@ pub struct Cli {
     #[arg(short = 'n', long)]
     pub name: bool,
 
+    /// Also trace the processes that traced ones start, and theirs in turn.
+    ///
+    /// Every descendant is traced, whether running already or started later. On Linux a child
+    /// is traced from its start; on macOS from a few milliseconds after, so iotap misses a child
+    /// that ends sooner, and says so.
+    #[arg(short = 'f', long)]
+    pub children: bool,
+
     /// Show a live terminal UI instead of streaming events.
     ///
     /// Keys: 1, 2 and 3 switch between the Files, Network and Events tabs; s changes the sort
@@ -109,5 +117,9 @@ mod tests {
         assert!(Cli::try_parse_from(["iotap", "--replay", "x.iotaprec"]).is_ok());
         assert!(Cli::try_parse_from(["iotap", "--tui", "--resolve", "1"]).is_ok());
         assert!(Cli::try_parse_from(["iotap", "--json", "--resolve", "1"]).is_err());
+        for flag in ["-f", "--children"] {
+            assert!(Cli::try_parse_from(["iotap", flag, "1"]).unwrap().children);
+        }
+        assert!(!Cli::try_parse_from(["iotap", "1"]).unwrap().children);
     }
 }

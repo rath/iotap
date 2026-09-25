@@ -2,8 +2,9 @@
 /*
  * iotap's eBPF program for Linux. For each process in `traced` it writes a record to the ring
  * buffer `records` when a call iotap traces returns, with the call's entry and return paired
- * here, and one when the process's last thread exits. The record layout is the one
- * `trace::linux::Record` reads; change the two together.
+ * here, and one when the process's last thread exits. When iotap follows child processes, a
+ * process a traced one starts is traced from its start, with a record that says so. The record
+ * layout is the one `trace::linux::Record` reads; change the two together.
  *
  * The program is self-contained: it declares the few kernel definitions it uses instead of
  * including kernel or libbpf headers, so building it takes only clang.
@@ -61,6 +62,10 @@ static __u64 (*bpf_ringbuf_query)(void *ringbuf, __u64 flags) = (void *)134;
 
 #define KIND_CALL 1
 #define KIND_EXIT 2
+#define KIND_FORK 5
+
+/* The clone flag that makes a thread of the caller's process rather than a process. */
+#define CLONE_THREAD 0x00010000
 
 #define MEMORY_NOTHING 0
 #define MEMORY_PATH 1
@@ -93,6 +98,16 @@ struct sched_process_exit_args {
 	__u8 group_dead;
 };
 
+/* The loader attaches `task_newtask` only where the tracepoint lays out `pid` and `clone_flags`
+ * as here: `clone_flags` is an `unsigned long` in older kernels and a `u64` in newer ones, the
+ * same eight bytes on the systems iotap supports. */
+struct task_newtask_args {
+	__u64 common;
+	__s32 pid;
+	char comm[16];
+	__u64 clone_flags;
+};
+
 /* A call under way. */
 struct call {
 	__u64 ts;
@@ -123,8 +138,9 @@ struct record {
 #define HEADER __builtin_offsetof(struct record, memory)
 _Static_assert(HEADER == 96, "trace::linux::HEADER");
 
-/* Processes to trace, by thread group id. The reader adds them; this program removes one when
- * its last thread exits, and the reader when it finds one gone. */
+/* Processes to trace, by thread group id. The reader adds them, and this program adds the
+ * processes they start when iotap follows child processes; this program removes one when its
+ * last thread exits, and the reader when it finds one gone. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 16384);
@@ -333,6 +349,43 @@ int process_exit(struct sched_process_exit_args *ctx)
 	output(rec);
 	/* A later process given the same pid is not traced. */
 	bpf_map_delete_elem(&traced, &tgid);
+	return 0;
+}
+
+/*
+ * A task was created, in the context of the task that created it and before it can run, so a
+ * child of a traced process is traced from its first call. A thread of a traced process is
+ * traced with it already.
+ */
+SEC("tracepoint/task/task_newtask")
+int task_newtask(struct task_newtask_args *ctx)
+{
+	if (ctx->clone_flags & CLONE_THREAD)
+		return 0;
+	__u64 id = bpf_get_current_pid_tgid();
+	__u32 tgid = id >> 32;
+	if (!bpf_map_lookup_elem(&traced, &tgid) || is_stopping())
+		return 0;
+	__u32 zero = 0;
+	struct record *rec = bpf_map_lookup_elem(&scratch, &zero);
+	if (!rec)
+		return 0;
+	__u32 child = ctx->pid;
+	__u8 on = 1;
+	/* 0 once the child is traced; a full map refuses it. */
+	rec->ret = bpf_map_update_elem(&traced, &child, &on, BPF_ANY);
+	rec->ts = bpf_ktime_get_ns();
+	rec->start_ns = 0;
+	for (int i = 0; i < 6; i++)
+		rec->args[i] = 0;
+	rec->args[0] = child;
+	rec->pid = tgid;
+	rec->tid = (__u32)id;
+	rec->nr = 0;
+	rec->kind = KIND_FORK;
+	rec->memory_kind = MEMORY_NOTHING;
+	rec->memory_len = 0;
+	output(rec);
 	return 0;
 }
 

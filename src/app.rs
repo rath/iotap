@@ -123,24 +123,16 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         bail!(FacilityError::NotPermitted);
     }
     let own_pid = i32::try_from(std::process::id())?;
-    let specs: Vec<Spec> = cli.targets.iter().map(|raw| Spec::parse(raw, cli.name)).collect();
-    let tracked = target::resolve(&specs, own_pid)?;
-    let follow: Vec<String> = specs
-        .iter()
-        .filter_map(|spec| match spec {
-            Spec::Name(name) => Some(name.clone()),
-            Spec::Pid(_) => None,
-        })
-        .collect();
+    let targets = Targets::resolve(cli, own_pid)?;
 
     let timebase = Timebase::host();
     let anchor = ClockAnchor::now();
-    let pids: Vec<i32> = tracked.iter().map(|t| t.pid).collect();
-    let mut facility = Facility::start(cli.buffer, &pids)?;
+    let pids: Vec<i32> = targets.tracked.iter().map(|t| t.pid).collect();
+    let mut facility = Facility::start(cli.buffer, &pids, cli.children)?;
     let info = SessionInfo {
         timebase,
         anchor,
-        processes: tracked.iter().map(Tracked::process).collect(),
+        processes: targets.tracked.iter().map(Tracked::process).collect(),
         path_records: Facility::path_records(),
         system: System::HOST,
     };
@@ -151,15 +143,15 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         None => None,
     };
     // Said once the kernel records the targets' calls and the recording, if any, is open.
-    announce(&tracked, &follow, cli.tui);
+    let _ = writeln!(io::stderr(), "iotap: {}", targets.announcement(cli));
     let mut src = Recording::new(Live, recorder);
     let mut session = Session::new(info, filter(cli), &mut src);
 
     let stop = Arc::new(AtomicBool::new(false));
     let interrupted = watch_signals(&stop)?;
     let config = ReaderConfig {
-        follow,
-        children: false,
+        follow: targets.follow,
+        children: cli.children,
         // Short, so that the system is asked about new descriptors before most are closed again.
         wait: Duration::from_millis(10),
         poll: Duration::from_millis(250),
@@ -180,7 +172,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         let reader = thread::Builder::new()
             .name("kernel-reader".into())
             .spawn_scoped(scope, move || {
-                reader::run(facility_ref, tracked, config_ref, &tx, stop_ref)
+                reader::run(facility_ref, targets.tracked, config_ref, &tx, stop_ref)
             })
             .context("cannot start the kernel reader")?;
         let mut input = LiveInput {
@@ -473,27 +465,78 @@ fn finish_output(result: io::Result<()>, failed: &'static str) -> Result<bool> {
     }
 }
 
-fn announce(tracked: &[Tracked], follow: &[String], tui: bool) {
-    let list: Vec<String> = tracked
-        .iter()
-        .map(|t| format!("{} ({})", t.pid, t.name))
-        .collect();
-    let what = match list.len() {
-        1 => list[0].clone(),
-        n => format!("{n} processes: {}", list.join(", ")),
-    };
-    let also = if follow.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<String> = follow.iter().map(|n| format!("'{n}'")).collect();
-        format!(", and new processes named {}", names.join(" or "))
-    };
-    let how = if tui {
-        "press q to quit"
-    } else {
-        "press Ctrl-C to stop"
-    };
-    let _ = writeln!(io::stderr(), "iotap: tracing {what}{also}; {how}");
+/// What the command line asks to trace.
+struct Targets {
+    /// The processes to trace from the start: those the targets name, then with `--children`
+    /// their running descendants.
+    tracked: Vec<Tracked>,
+    /// How many of `tracked` the targets name.
+    named: usize,
+    /// Names whose new processes are traced too.
+    follow: Vec<String>,
+}
+
+impl Targets {
+    fn resolve(cli: &Cli, own_pid: i32) -> Result<Self> {
+        let specs: Vec<Spec> = cli.targets.iter().map(|raw| Spec::parse(raw, cli.name)).collect();
+        let mut tracked = target::resolve(&specs, own_pid)?;
+        let named = tracked.len();
+        if cli.children {
+            // Traced from the start, as the processes the targets name are.
+            let roots: Vec<i32> = tracked.iter().map(|t| t.pid).collect();
+            tracked.extend(target::descendants(&roots, own_pid));
+        }
+        let follow = specs
+            .into_iter()
+            .filter_map(|spec| match spec {
+                Spec::Name(name) => Some(name),
+                Spec::Pid(_) => None,
+            })
+            .collect();
+        Ok(Self {
+            tracked,
+            named,
+            follow,
+        })
+    }
+
+    /// Says what iotap traces: the processes the targets name, new processes of the followed
+    /// names, and with `--children` every descendant.
+    fn announcement(&self, cli: &Cli) -> String {
+        let (targets, running) = self.tracked.split_at(self.named);
+        let list: Vec<String> = targets
+            .iter()
+            .map(|t| format!("{} ({})", t.pid, t.name))
+            .collect();
+        let mut what = vec![match list.len() {
+            1 => list[0].clone(),
+            n => format!("{n} processes: {}", list.join(", ")),
+        }];
+        if !self.follow.is_empty() {
+            let names: Vec<String> = self.follow.iter().map(|n| format!("'{n}'")).collect();
+            what.push(format!("new processes named {}", names.join(" or ")));
+        }
+        if cli.children {
+            let whose = if what.len() == 1 && list.len() == 1 {
+                "its"
+            } else {
+                "their"
+            };
+            what.push(match running.len() {
+                0 => format!("{whose} descendants"),
+                n => format!("{whose} descendants ({n} running now)"),
+            });
+        }
+        if let [_, .., last] = &mut what[..] {
+            *last = format!("and {last}");
+        }
+        let how = if cli.tui {
+            "press q to quit"
+        } else {
+            "press Ctrl-C to stop"
+        };
+        format!("tracing {}; {how}", what.join(", "))
+    }
 }
 
 /// The first signal asks for a clean stop: it sets `stop` and the returned flag. A second one
@@ -541,4 +584,57 @@ fn dump_fds(pid: i32) -> Result<ExitCode> {
         writeln!(out, "{fd:>4}  {target}")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    fn process(pid: i32, name: &str) -> Tracked {
+        Tracked {
+            pid,
+            name: name.into(),
+            start: (0, 0),
+            exe: None,
+            arg0: None,
+            parent: 1,
+        }
+    }
+
+    #[test]
+    fn the_announcement_says_what_is_traced() {
+        let cli = |args: &[&str]| Cli::try_parse_from(["iotap"].iter().chain(args)).unwrap();
+        let targets = |tracked: &[(i32, &str)], named, follow: &[&str]| Targets {
+            tracked: tracked.iter().map(|&(pid, name)| process(pid, name)).collect(),
+            named,
+            follow: follow.iter().map(|&name| name.to_owned()).collect(),
+        };
+        let make = targets(&[(10, "make")], 1, &[]);
+        assert_eq!(
+            make.announcement(&cli(&["10"])),
+            "tracing 10 (make); press Ctrl-C to stop"
+        );
+        assert_eq!(
+            make.announcement(&cli(&["-f", "10"])),
+            "tracing 10 (make), and its descendants; press Ctrl-C to stop"
+        );
+        let both = targets(&[(10, "make"), (20, "ninja"), (11, "sh"), (12, "cc")], 2, &[]);
+        assert_eq!(
+            both.announcement(&cli(&["-f", "--tui", "10", "20"])),
+            "tracing 2 processes: 10 (make), 20 (ninja), and their descendants (2 running now); \
+             press q to quit"
+        );
+        let followed = targets(&[(10, "make")], 1, &["make"]);
+        assert_eq!(
+            followed.announcement(&cli(&["make"])),
+            "tracing 10 (make), and new processes named 'make'; press Ctrl-C to stop"
+        );
+        assert_eq!(
+            followed.announcement(&cli(&["-f", "make"])),
+            "tracing 10 (make), new processes named 'make', and their descendants; \
+             press Ctrl-C to stop"
+        );
+    }
 }

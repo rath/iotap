@@ -18,7 +18,7 @@ use std::time::Duration;
 use libbpf_rs::{ErrorKind, Link, MapCore, MapFlags, MapHandle, Object, ObjectBuilder, PrintLevel};
 
 use super::time;
-use crate::reader::{Read, Tracer};
+use crate::reader::{Read, Spawn, Tracer};
 use crate::trace::kdebug::pairing::PathRecords;
 use crate::trace::linux::order::Order;
 use crate::trace::linux::{Event, Record, codes};
@@ -41,6 +41,11 @@ const HELD_MAX: usize = 1 << 16;
 const EXIT_FORMATS: [&str; 2] = [
     "/sys/kernel/tracing/events/sched/sched_process_exit/format",
     "/sys/kernel/debug/tracing/events/sched/sched_process_exit/format",
+];
+/// Where the kernel describes the task creation tracepoint, wherever tracefs is mounted.
+const NEWTASK_FORMATS: [&str; 2] = [
+    "/sys/kernel/tracing/events/task/task_newtask/format",
+    "/sys/kernel/debug/tracing/events/task/task_newtask/format",
 ];
 /// Lines of libbpf's messages kept for an error: the end of a verifier log says what failed.
 const LOG_LINES: usize = 40;
@@ -69,6 +74,10 @@ pub enum EbpfError {
     },
     #[error("cannot read the eBPF ring buffer")]
     Ring(#[source] io::Error),
+    #[error(
+        "cannot follow child processes: this kernel's task_newtask tracepoint does not lay out the new task's pid and clone flags where iotap reads them"
+    )]
+    NewTaskLayout,
     #[error("the eBPF ring buffer holds a record iotap cannot read, of {len} bytes")]
     BadRecord { len: usize },
 }
@@ -107,11 +116,15 @@ pub struct Ebpf {
 
 impl Ebpf {
     /// Loads the program, attaches it and starts tracing `pids`, with a ring buffer of as many
-    /// bytes as `buffer` records of 64 bytes take, rounded up to a power of two.
-    pub fn start(buffer: u32, pids: &[i32]) -> Result<Self, EbpfError> {
+    /// bytes as `buffer` records of 64 bytes take, rounded up to a power of two. With
+    /// `children`, a process that a traced one starts is traced too, from its start.
+    pub fn start(buffer: u32, pids: &[i32], children: bool) -> Result<Self, EbpfError> {
         libbpf_rs::set_print(Some((PrintLevel::Warn, keep_log)));
         let ring_bytes = ring_bytes(buffer);
         let group_dead = exit_tells_group_dead();
+        if children && !newtask_read_as_laid_out() {
+            return Err(EbpfError::NewTaskLayout);
+        }
         let mut builder = ObjectBuilder::default();
         let mut open = builder.open_memory(&PROGRAM.0).map_err(EbpfError::load)?;
         for mut map in open.maps_mut() {
@@ -123,6 +136,8 @@ impl Ebpf {
             if program.name() == "process_exit" {
                 // Without the field, the kernel would refuse the whole program.
                 program.set_autoload(group_dead);
+            } else if program.name() == "task_newtask" {
+                program.set_autoload(children);
             }
         }
         let object = open.load().map_err(EbpfError::load)?;
@@ -165,12 +180,14 @@ impl Ebpf {
         let ring = Ring::new(records.as_fd(), ring_bytes as usize).map_err(EbpfError::Ring)?;
         let (inflight, dropped, stopping) = (map("inflight")?, map("dropped")?, map("stopping")?);
 
-        // Entries first: a call that returns before returns are watched was over before tracing
-        // began. The other way round, every call returning in between would count as one under
-        // way when tracing began, which under a flood of calls is thousands.
+        // New processes first: a process a traced one starts from then on is traced from its
+        // start, and the reader finds those started before among the descendants of the traced
+        // processes. Then entries: a call that returns before returns are watched was over
+        // before tracing began. The other way round, every call returning in between would
+        // count as one under way when tracing began, which under a flood of calls is thousands.
         let mut links = Vec::new();
-        for name in ["sys_enter", "process_exit", "sys_exit"] {
-            if name == "process_exit" && !group_dead {
+        for name in ["task_newtask", "sys_enter", "process_exit", "sys_exit"] {
+            if (name == "process_exit" && !group_dead) || (name == "task_newtask" && !children) {
                 continue;
             }
             let link = match object.progs_mut().find(|program| program.name() == name) {
@@ -265,10 +282,11 @@ impl Tracer for Ebpf {
             // A record was still being written; the next read will likely get past it.
             self.order.release_beyond(HELD_MAX)
         };
+        let spawned = spawns(&records);
         Ok(Read {
             records: (!records.is_empty()).then_some(Records::Linux(records)),
             complete_to: complete.then_some(mark),
-            ..Read::default()
+            spawned,
         })
     }
 
@@ -319,6 +337,26 @@ impl Tracer for Ebpf {
     }
 }
 
+/// The processes that traced ones started, as `records` tell. The records tell the session too.
+fn spawns(records: &[Record]) -> Vec<Spawn> {
+    records
+        .iter()
+        .filter_map(|record| match record.event {
+            Event::Fork {
+                parent,
+                child,
+                traced,
+            } => Some(Spawn {
+                parent: Some(parent),
+                child,
+                traced,
+                in_trace: true,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Adds `pid` to the program's map of processes to trace.
 fn trace(traced: &MapHandle, pid: i32) -> Result<(), EbpfError> {
     traced
@@ -347,6 +385,28 @@ fn exit_tells_group_dead() -> bool {
             && field(line, "offset:") == Some(32)
             && field(line, "size:") == Some(1)
     })
+}
+
+/// Whether the kernel's task creation tracepoint holds the new task's pid and its clone flags
+/// where the program reads them.
+fn newtask_read_as_laid_out() -> bool {
+    NEWTASK_FORMATS
+        .iter()
+        .find_map(|path| fs::read_to_string(path).ok())
+        .is_some_and(|format| newtask_laid_out(&format))
+}
+
+/// Whether `format`, that of the task creation tracepoint, holds the pid in four bytes at 8 and
+/// the clone flags in eight bytes at 32, as `struct task_newtask_args` in the program does.
+fn newtask_laid_out(format: &str) -> bool {
+    let at = |declared: &str, offset: u32, size: u32| {
+        format.lines().any(|line| {
+            line.contains(declared)
+                && field(line, "offset:") == Some(offset)
+                && field(line, "size:") == Some(size)
+        })
+    };
+    at(" pid;", 8, 4) && at(" clone_flags;", 32, 8)
 }
 
 /// The number after `name` in a line of a tracepoint format, such as `offset:32;`.
@@ -563,6 +623,7 @@ unsafe impl Send for Mapping {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::linux::synth::Synth;
 
     #[test]
     fn ring_sizes_are_powers_of_two_the_kernel_takes() {
@@ -583,6 +644,51 @@ mod tests {
     }
 
     #[test]
+    fn checks_where_the_task_creation_tracepoint_holds_its_fields() {
+        let format = |clone_flags: &str| {
+            format!(
+                "name: task_newtask\nformat:\n\
+                 \tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n\
+                 \tfield:int common_pid;\toffset:4;\tsize:4;\tsigned:1;\n\n\
+                 \tfield:pid_t pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+                 \tfield:char comm[16];\toffset:12;\tsize:16;\tsigned:0;\n\
+                 \t{clone_flags}\n\
+                 \tfield:short oom_score_adj;\toffset:40;\tsize:2;\tsigned:1;\n"
+            )
+        };
+        // Newer kernels declare the flags u64, older ones unsigned long.
+        assert!(newtask_laid_out(&format(
+            "field:u64 clone_flags;\toffset:32;\tsize:8;\tsigned:0;"
+        )));
+        assert!(newtask_laid_out(&format(
+            "field:unsigned long clone_flags;\toffset:32;\tsize:8;\tsigned:0;"
+        )));
+        assert!(!newtask_laid_out(&format(
+            "field:u64 clone_flags;\toffset:40;\tsize:8;\tsigned:0;"
+        )));
+        assert!(!newtask_laid_out("name: task_newtask\n"));
+    }
+
+    #[test]
+    fn forks_in_the_records_are_spawns() {
+        let mut synth = Synth::new(System::HOST, 1_000, 10);
+        let records = [
+            synth.open(7, 70, "/etc/hosts", 3),
+            synth.fork(70, 71),
+            synth.exit(71),
+        ];
+        assert_eq!(
+            spawns(&records),
+            [Spawn {
+                parent: Some(70),
+                child: 71,
+                traced: true,
+                in_trace: true
+            }]
+        );
+    }
+
+    #[test]
     fn keeps_the_last_lines_libbpf_said() {
         take_log();
         keep_log(PrintLevel::Warn, "libbpf: one\n\n".into());
@@ -600,7 +706,7 @@ mod tests {
         if crate::sys::is_root() {
             return;
         }
-        let err = Ebpf::start(1024, &[]).expect_err("non-root must not load eBPF programs");
+        let err = Ebpf::start(1024, &[], false).expect_err("non-root must not load eBPF programs");
         assert!(matches!(err, EbpfError::NotPermitted), "{err:?}");
     }
 }

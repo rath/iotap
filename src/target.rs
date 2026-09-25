@@ -124,10 +124,10 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
 }
 
 /// Every running process descended from one in `roots`, parents before their children. Left
-/// out are iotap (`own_pid`) and the processes it runs under, such as the `sudo` that started
-/// it: iotap descends from the shell it was started from, and a process that relays its output,
-/// as `sudo` does through a pseudo-terminal, would have iotap trace its own output without end.
-/// Their other children are not left out.
+/// out are the roots themselves, iotap (`own_pid`) and the processes it runs under, such as the
+/// `sudo` that started it: iotap descends from the shell it was started from, and a process
+/// that relays its output, as `sudo` does through a pseudo-terminal, would have iotap trace its
+/// own output without end. Their other children are not left out.
 pub fn descendants(roots: &[i32], own_pid: i32) -> Vec<Tracked> {
     let running: Vec<ProcInfo> = proc::list_pids().into_iter().filter_map(proc::info).collect();
     let found = family(&running, roots, own_pid);
