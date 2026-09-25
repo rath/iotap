@@ -96,16 +96,23 @@ fn printable(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
 
     #[test]
-    fn names_the_loopback_address() {
-        // Every system's hosts file names it, so no DNS server is asked.
+    fn names_the_loopback_addresses() {
+        // Every system's hosts file names them, so no DNS server is asked.
         assert_eq!(
             host_name(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             Ok(Some("localhost".to_owned()))
+        );
+        // As `localhost`, or on some Linux systems `ip6-localhost`.
+        let name = host_name(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert!(
+            name.as_ref()
+                .is_ok_and(|name| name.as_deref().is_some_and(|name| name.ends_with("localhost"))),
+            "{name:?}"
         );
     }
 
