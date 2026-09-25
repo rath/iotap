@@ -39,7 +39,8 @@ const ORDER_MARGIN_NS: u64 = 5_000_000;
 /// Most records held back while reads keep stopping at a record still being written.
 const HELD_MAX: usize = 1 << 16;
 /// How long the reader pauses after a read stopped at a record still being written: the program
-/// finishes a record within microseconds, and forces no wakeup when it does.
+/// finishes a record within microseconds, and forces no wakeup when it does unless a quarter of
+/// the ring waits.
 const UNFINISHED_PAUSE: Duration = Duration::from_micros(50);
 /// Where the kernel describes the process exit tracepoint, wherever tracefs is mounted.
 const EXIT_FORMATS: [&str; 2] = [

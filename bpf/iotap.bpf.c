@@ -37,7 +37,6 @@ enum {
 #define BPF_RB_FORCE_WAKEUP 2
 #define BPF_RB_AVAIL_DATA 0
 #define BPF_RB_RING_SIZE 1
-#define BPF_RB_CONS_POS 2
 
 /* Helpers, by the numbers the kernel gives them. */
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
@@ -192,14 +191,6 @@ struct {
 	__type(value, __u64);
 } dropped SEC(".maps");
 
-/* How far the reader had read, plus one, when the program last woke it. */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u64);
-} woken SEC(".maps");
-
 /* Set by the reader before it detaches the programs: from then on no call starts to be traced,
  * and a return whose entry was not seen is no call under way when tracing began. */
 struct {
@@ -261,23 +252,18 @@ static __always_inline void output(struct record *rec)
 {
 	__u32 zero = 0;
 	__u64 *lost = bpf_map_lookup_elem(&dropped, &zero);
-	__u64 *woke = bpf_map_lookup_elem(&woken, &zero);
-	if (!lost || !woke)
+	if (!lost)
 		return;
 	rec->dropped = (__u32)*lost;
-	/* Wake the reader once a quarter of the ring waits, and not again until it has read on. It
-	 * reads every few milliseconds anyway, and waits for this wakeup rather than for records,
-	 * so that it takes them in batches; each wakeup costs the traced process an interrupt. */
-	__u64 flags = BPF_RB_NO_WAKEUP;
-	if (bpf_ringbuf_query(&records, BPF_RB_AVAIL_DATA) >=
-	    bpf_ringbuf_query(&records, BPF_RB_RING_SIZE) / 4) {
-		/* Plus one, so that no position matches the map's initial 0. */
-		__u64 read_to = bpf_ringbuf_query(&records, BPF_RB_CONS_POS) + 1;
-		if (*woke != read_to) {
-			*woke = read_to;
-			flags = BPF_RB_FORCE_WAKEUP;
-		}
-	}
+	/* Wake the reader for every record written while a quarter of the ring or more waits. It
+	 * reads every few milliseconds anyway, and waits for these wakeups rather than for records,
+	 * so that it takes them in batches. Waking it once per read instead lost about ten times as
+	 * many records to a flood with a 64 KiB ring (Linux 7.0 on arm64, September 2026): a woken
+	 * reader sometimes waited most of a millisecond to run. */
+	__u64 flags = bpf_ringbuf_query(&records, BPF_RB_AVAIL_DATA) >=
+				      bpf_ringbuf_query(&records, BPF_RB_RING_SIZE) / 4 ?
+			      BPF_RB_FORCE_WAKEUP :
+			      BPF_RB_NO_WAKEUP;
 	__u64 size = HEADER + (rec->memory_len & (MEMORY_MAX - 1));
 	if (bpf_ringbuf_output(&records, rec, size, flags))
 		__sync_fetch_and_add(lost, 1);
