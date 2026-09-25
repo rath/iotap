@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn finds_running_descendants_but_never_iotap() {
         let me = i32::try_from(std::process::id()).unwrap();
-        let sleeper = Sleeper::start(&format!("iotap-test-{me}-child"));
+        let sleeper = Sleeper::start(&format!("iotap-family-{me}"));
         let pids = |found: Vec<Tracked>| found.iter().map(|t| t.pid).collect::<Vec<_>>();
         assert!(pids(descendants(&[me], i32::MAX)).contains(&sleeper.pid()));
         // With the test in iotap's place, its parent's descendants leave out the test and what
