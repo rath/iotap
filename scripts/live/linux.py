@@ -137,7 +137,7 @@ def programs_loaded(run):
         text=True,
         check=False,
     ).stdout
-    pattern = r"^\d+: \S+\s+name (?:sys_enter|sys_exit|process_exit)\s"
+    pattern = r"^\d+: \S+\s+name (?:sys_enter|sys_exit|process_exit|task_newtask)\s"
     return len(re.findall(pattern, listing, re.MULTILINE))
 
 
@@ -145,12 +145,12 @@ def programs_loaded(run):
 def release(run):
     before = programs_loaded(run)
     sleeper = run.start(["sleep", "300"])
-    iotap = run.root_start([run.bin, "-d", "60", sleeper.pid], stderr="kill.err")
+    iotap = run.root_start([run.bin, "-f", "-d", "60", sleeper.pid], stderr="kill.err")
     run.started("kill.err")
     during = programs_loaded(run)
     run.expect(
-        during - before >= 2,
-        "iotap's programs are loaded while it traces",
+        during - before >= 3,
+        "iotap's programs are loaded while it traces, with task_newtask for -f",
         f"{before} before, {during} during",
     )
     killed = [pid for pid in descendants(iotap.pid) if command_name(pid) == "iotap"]
@@ -346,3 +346,8 @@ def replay_ui_names(run):
     shared.replay(run, ["dd", "if=/dev/zero", "of=/dev/null", "bs=1M"])
     shared.terminal_ui(run)
     shared.host_names(run)
+
+
+@check("Linux", 13, "Children")
+def children(run):
+    shared.children(run)

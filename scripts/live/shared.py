@@ -1,6 +1,7 @@
 """Parts of the live checks that run on macOS and Linux alike."""
 
 import filecmp
+import json
 import os
 import re
 import shlex
@@ -18,6 +19,8 @@ from harness import (
     PROGRAMS,
     SUMMARY,
     before_summary,
+    descendants,
+    json_lines,
     renamer,
     summary,
     traced_for,
@@ -387,3 +390,135 @@ def terminal_ui(run):
             run.expect(clipboard.restore(), "the clipboard holds again what it held before")
         run.stop(writer)
         shutil.rmtree(cache, ignore_errors=True)
+
+
+def children(run):
+    """A process tree traced with -f, and this run traced with -f, which iotap descends from."""
+    # A directory of its own, free of the ready and go files of other checks.
+    work = os.path.join(run.work, "family")
+    os.makedirs(work)
+    pids_file = run.file("family.pids")
+    program = run.start(
+        [sys.executable, PROGRAMS, "family", pids_file, work], stderr="family.program.err"
+    )
+    ready = wait_for(lambda: os.path.exists(os.path.join(work, "ready")), 10)
+    if not run.expect(ready, "the process tree starts"):
+        return
+    iotap = run.root_start(
+        [run.bin, "-f", "--json", "-d", "30", program.pid],
+        stdout="family.json",
+        stderr="family.err",
+    )
+    run.started("family.err")
+    open(os.path.join(work, "go"), "w").close()
+    rc = run.root_wait(iotap, 40)
+    # iotap stops once the tree has ended, unless something went wrong.
+    program.wait(15)
+    try:
+        with open(pids_file) as f:
+            pids = json.load(f)
+    except (OSError, ValueError) as err:
+        run.expect(False, "the process tree runs to its end", str(err))
+        return
+    err = run.read("family.err")
+    traced = Traced(run.file("family.json"), os.path.realpath(work))
+    root, early, late, by_exec, grand, brief = (
+        pids[role] for role in ("program", "early", "late", "exec", "grand", "brief")
+    )
+    seconds = traced.summary.get("duration_ns", 0) / 1e9
+    run.expect(
+        rc == 0 and "and its descendants (1 running now);" in err and 0 < seconds < 20,
+        "iotap traces the program and its descendants, and stops once they have all ended",
+        f"exit status {rc}, {seconds:.1f} s: " + (err.splitlines() or [""])[0],
+    )
+    run.expect(
+        traced.initial == {root, early} and traced.written("early") == 1 << 20,
+        "the child running from the start is traced from the start, with all its writes",
+        f"{sorted(traced.initial)}, {traced.written('early')} bytes",
+    )
+    parents = {pid: traced.attached.get(pid) for pid in (late, by_exec, grand)}
+    run.expect(
+        parents == {late: root, by_exec: root, grand: late},
+        "each child started later is traced with its parent, and so is the grandchild",
+        str(parents),
+    )
+    sizes = tuple(traced.written(name) for name in ("late", "grand", "exec"))
+    run.expect(
+        sizes == (200_000, 30_000, 300_000),
+        "with all their writes, those of the program a child ran by exec among them",
+        str(sizes),
+    )
+    run.expect(
+        all(traced.attached.get(pid, traced.untraced.get(pid)) == root for pid in brief),
+        "each of the twenty children that end at once is traced or said to have ended untraced",
+        f"{sum(pid in traced.attached for pid in brief)} traced, "
+        f"{sum(pid in traced.untraced for pid in brief)} not",
+    )
+    counted = traced.summary.get("untraced_children")
+    if LINUX:
+        run.expect(
+            not traced.untraced
+            and counted == {"ended": 0, "full": 0}
+            and traced.written("brief") == 2000,
+            "every one is traced from its start, with the write it makes at once",
+            f"{traced.written('brief')} of 2000 bytes, {counted}",
+        )
+    else:
+        run.expect(
+            counted == {"ended": len(traced.untraced), "full": 0},
+            "the summary counts those that ended untraced",
+            str(counted),
+        )
+    strangers = traced.pids - {root, early, late, by_exec, grand, *brief}
+    run.expect(
+        bool(traced.initial) and not strangers,
+        "no process outside the tree is traced",
+        str(sorted(strangers)),
+    )
+
+    me = os.getpid()
+    iotap = run.root_start(
+        [run.bin, "-f", "--json", "-d", "3", me], stdout="self.json", stderr="self.err"
+    )
+    run.started("self.err")
+    # The sudo that runs iotap, what that sudo runs, and iotap.
+    below = {iotap.pid, *descendants(iotap.pid)}
+    own = os.path.join(run.work, "own")
+    writer = run.start([sys.executable, PROGRAMS, "write", own, "1000", "1"])
+    rc = run.root_wait(iotap, 15)
+    writer.wait(10)
+    traced = Traced(run.file("self.json"), os.path.realpath(run.work))
+    run.expect(
+        rc == 0 and me in traced.initial and not below & traced.pids,
+        "traced with -f, this run takes in neither iotap nor the sudo that runs it",
+        f"{sorted(below & traced.pids)} of {sorted(below)}",
+    )
+    run.expect(
+        traced.attached.get(writer.pid) == me and traced.written("own") == 1000,
+        "but a process the run starts meanwhile, with its write",
+        f"parent {traced.attached.get(writer.pid)}, {traced.written('own')} bytes",
+    )
+
+
+class Traced:
+    """What the JSON output of iotap in `path` says was traced; files are under `work`."""
+
+    def __init__(self, path, work):
+        objects = json_lines(path)
+        self.work = work
+        start = next((o for o in objects if o.get("type") == "start"), {})
+        self.initial = {p["pid"] for p in start.get("processes", [])}
+        self.attached = {o["pid"]: o["parent"] for o in objects if o.get("type") == "attached"}
+        self.untraced = {o["pid"]: o["parent"] for o in objects if o.get("type") == "untraced"}
+        self.events = [o for o in objects if o.get("type") == "event"]
+        self.summary = next((o for o in objects if o.get("type") == "summary"), {})
+        self.pids = self.initial | set(self.attached) | {e["pid"] for e in self.events}
+
+    def written(self, name):
+        """The bytes written to the file `name` under `work`."""
+        path = os.path.join(self.work, name)
+        return sum(
+            e["bytes"] or 0
+            for e in self.events
+            if e["dir"] == "write" and e["target"].get("path") == path
+        )

@@ -13,8 +13,16 @@
     programs.py peers ADDR...      UDP sockets connected to each address, polled for a datagram
                                    every 0.2 s until killed; no packet leaves the machine
     programs.py home-writer PATH   rewrites PATH every 100 ms for 90 s
+    programs.py write PATH SIZE CHUNKS
+                                   writes SIZE bytes to PATH in CHUNKS writes, half a second
+                                   after it starts
+    programs.py family OUT DIR     a process tree, each member of which writes a file of its own
+                                   in DIR: a child that runs from the start, and once tracing
+                                   begins a child that starts a grandchild, a child that runs
+                                   `write` by exec, and twenty children that write 100 bytes each
+                                   to DIR/brief and end at once; writes the pids to OUT as JSON
 
-workload and lab create DIR/ready once set up, then wait for DIR/go before their I/O.
+workload, lab and family create DIR/ready once set up, then wait for DIR/go before their I/O.
 """
 
 import fcntl
@@ -25,10 +33,15 @@ import socket
 import sys
 import threading
 import time
+import traceback
 
 
 def ready_then_go(directory):
     open(os.path.join(directory, "ready"), "w").close()
+    wait_for_go(directory)
+
+
+def wait_for_go(directory):
     while not os.path.exists(os.path.join(directory, "go")):
         time.sleep(0.02)
 
@@ -409,6 +422,74 @@ def home_writer(path):
         time.sleep(0.1)
 
 
+def write(path, size, chunks):
+    # Unbuffered, so each chunk is a write call of its own.
+    with open(path, "wb", buffering=0) as f:
+        f.writelines(b"c" * (size // chunks) for _ in range(chunks))
+
+
+def write_later(path, size, chunks):
+    time.sleep(0.5)
+    write(path, size, chunks)
+
+
+def forked(body):
+    """Runs `body` in a child process; returns the child's pid."""
+    pid = os.fork()
+    if pid == 0:
+        try:
+            body()
+        # Whatever happens, the child must not go on with its parent's work.
+        except BaseException:  # noqa: BLE001
+            traceback.print_exc()
+            os._exit(1)
+        os._exit(0)
+    return pid
+
+
+def family(out, directory):
+    """The processes that begin after tracing, but for the twenty brief ones, wait half a
+    second before they write, so that on macOS iotap traces them by then."""
+
+    def path(name):
+        return os.path.join(directory, name)
+
+    def early():
+        wait_for_go(directory)
+        write(path("early"), 1 << 20, 4)
+
+    def late():
+        write_later(path("late"), 200_000, 2)
+        grandchild = forked(lambda: write_later(path("grand"), 30_000, 3))
+        with open(path("grand.pid"), "w") as f:
+            f.write(str(grandchild))
+        os.waitpid(grandchild, 0)
+
+    def by_exec():
+        program = os.path.abspath(__file__)
+        os.execv(sys.executable, [sys.executable, program, "write", path("exec"), "300000", "3"])
+
+    def brief():
+        with open(path("brief"), "ab", buffering=0) as f:
+            f.write(b"b" * 100)
+
+    pids = {"program": os.getpid(), "early": forked(early)}
+    ready_then_go(directory)
+    pids["late"] = forked(late)
+    pids["exec"] = forked(by_exec)
+    pids["brief"] = []
+    for _ in range(20):
+        pid = forked(brief)
+        os.waitpid(pid, 0)
+        pids["brief"].append(pid)
+    for role in ("early", "late", "exec"):
+        os.waitpid(pids[role], 0)
+    with open(path("grand.pid")) as f:
+        pids["grand"] = int(f.read())
+    with open(out, "w") as f:
+        json.dump(pids, f)
+
+
 def main():
     name, args = sys.argv[1], sys.argv[2:]
     if name == "sockets":
@@ -423,6 +504,10 @@ def main():
         peers(args)
     elif name == "home-writer":
         home_writer(*args)
+    elif name == "write":
+        write_later(args[0], int(args[1]), int(args[2]))
+    elif name == "family":
+        family(*args)
     else:
         sys.exit(f"programs.py: no program named {name!r}")
 

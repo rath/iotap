@@ -372,6 +372,11 @@ def calls_and_targets(run):
     workload(run)
 
 
+@check("Darwin", 12, "Children")
+def children(run):
+    shared.children(run)
+
+
 def traced_program(run, name, *args):
     """Starts a program of programs.py that waits to be traced, traces it until it exits, and
     returns what it wrote about itself and the events iotap saw."""

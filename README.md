@@ -459,11 +459,21 @@ checks need Python's pyte package, and the host-name checks a connection to the 
     every file under the path the kernel gives its descriptor (`F_GETPATH`), every call with its
     size, and no socket with a wrong end. A socket closed at once may lack its ends, as
     [Limitations](#limitations) says.
+12. **Children.** Trace with `-f` a process that has a child running, and that then starts a child
+    that starts one of its own, a child that runs another program by exec, and twenty children
+    that each write a little and end at once, such as `family` in `scripts/live/programs.py`.
+    Expect the running child among the processes traced from the start, a "now tracing" notice
+    naming its parent for each later child, and every write of the children that wait half a
+    second before writing. Each child that ended at once must be traced or reported to have
+    ended before iotap could trace it, and the summary must count the latter. Traced with `-f`,
+    a process that iotap runs under, such as the shell that started it, must take in neither
+    iotap nor its sudo, but must take in a process it starts meanwhile.
 
 ### Linux
 
 Run these on each processor the change affects. `bpftool prog show` lists the eBPF programs
-loaded; iotap's are named `sys_enter`, `sys_exit` and, from Linux 6.16, `process_exit`.
+loaded; iotap's are named `sys_enter`, `sys_exit`, from Linux 6.16 `process_exit`, and with `-f`
+`task_newtask`.
 
 1. **Root.** Without sudo, iotap must fail with "tracing with eBPF requires root".
 2. **Writes to a file.** Run
@@ -482,8 +492,8 @@ loaded; iotap's are named `sys_enter`, `sys_exit` and, from Linux 6.16, `process
    should go on. Signal it from a root shell: where sudo runs commands in a pty, as Ubuntu's
    does, a stopped command makes sudo stop its own process group, the script that started it
    included.
-6. **Release.** After iotap exits in any way, even by `sudo kill -KILL`, `sudo bpftool prog show`
-   must no longer list its programs.
+6. **Release.** After iotap exits in any way, even by `sudo kill -KILL` while tracing with `-f`,
+   `sudo bpftool prog show` must no longer list its programs.
 7. **Several at once.** Two iotap runs tracing the same process must both report all its calls.
 8. **A flood.** Record `yes > /dev/null` for three seconds and replay it with `--json`. No event
    may lack its latency but for calls truly under way when tracing began, and the summary must
@@ -500,6 +510,8 @@ loaded; iotap's are named `sys_enter`, `sys_exit` and, from Linux 6.16, `process
     must note one call that began before tracing, and with `--json` count one unfinished call.
 12. **Replay**, **terminal UI** and **host names**, as on macOS, the last with a download from a
     public server.
+13. **Children**, as on macOS, except that every child is traced from its start: each of the
+    children that end at once must be traced, with the write it makes.
 
 When scripting these checks, signal iotap itself, or send the signal from another process group.
 sudo does not pass on a signal that comes from its own process group, which is where `kill -INT $!`
