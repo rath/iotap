@@ -100,6 +100,7 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
         pid,
         name,
         start: (bsd.pbi_start_tvsec, bsd.pbi_start_tvusec),
+        parent: bsd.pbi_ppid.cast_signed(),
     })
 }
 
@@ -348,6 +349,7 @@ mod tests {
     fn finds_own_process() {
         let own = info(me()).expect("own process info");
         assert!(!own.name.is_empty());
+        assert_eq!(own.parent, std::os::unix::process::parent_id().cast_signed());
         assert!(list_pids().contains(&me()));
         assert!(exe_path(me()).is_some_and(|p| p.starts_with('/')));
         assert!(cwd(me()).is_some_and(|p| p.starts_with('/')));

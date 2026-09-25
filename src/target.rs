@@ -1,7 +1,9 @@
 //! Resolves command-line targets to running processes.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use crate::session::Process;
-use crate::sys::proc;
+use crate::sys::proc::{self, ProcInfo};
 
 /// A target as given on the command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +114,54 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
         }
     }
     Ok(tracked)
+}
+
+/// Every running process descended from one in `roots`, parents before their children. Left
+/// out are iotap (`own_pid`) and the processes it runs under, such as the `sudo` that started
+/// it: iotap descends from the shell it was started from, and a process that relays its output,
+/// as `sudo` does through a pseudo-terminal, would have iotap trace its own output without end.
+/// Their other children are not left out.
+pub fn descendants(roots: &[i32], own_pid: i32) -> Vec<Tracked> {
+    let running: Vec<ProcInfo> = proc::list_pids().into_iter().filter_map(proc::info).collect();
+    family(&running, roots, own_pid)
+        .into_iter()
+        .filter_map(Tracked::probe)
+        .collect()
+}
+
+/// The pids of the processes in `running` that descend from one in `roots`, in the order and
+/// with the exceptions of [`descendants`].
+fn family(running: &[ProcInfo], roots: &[i32], own_pid: i32) -> Vec<i32> {
+    let parents: HashMap<i32, i32> = running.iter().map(|info| (info.pid, info.parent)).collect();
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for info in running {
+        children.entry(info.parent).or_default().push(info.pid);
+    }
+    // The processes iotap runs under, up to the first that is not running.
+    let mut above = HashSet::new();
+    let mut pid = own_pid;
+    while let Some(&parent) = parents.get(&pid) {
+        if !above.insert(parent) {
+            break;
+        }
+        pid = parent;
+    }
+    let mut seen: HashSet<i32> = roots.iter().copied().collect();
+    let mut queue: VecDeque<i32> = roots.iter().copied().collect();
+    let mut found = Vec::new();
+    while let Some(pid) = queue.pop_front() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            // What iotap starts is never traced, so neither is anything below it.
+            if child == own_pid || !seen.insert(child) {
+                continue;
+            }
+            if !above.contains(&child) {
+                found.push(child);
+            }
+            queue.push_back(child);
+        }
+    }
+    found
 }
 
 /// Every running process except `own_pid`.
@@ -229,6 +279,62 @@ mod tests {
         let mut titled = process("sleep", None, Some("nap\x1b[31m"));
         titled.pid = 7;
         assert_eq!(similar(&[titled], "NAP"), "; similar: nap?[31m (7)");
+    }
+
+    /// Running processes, each given as its pid and its parent's.
+    fn running(tree: &[(i32, i32)]) -> Vec<ProcInfo> {
+        tree.iter()
+            .map(|&(pid, parent)| ProcInfo {
+                pid,
+                name: format!("p{pid}"),
+                start: (0, 0),
+                parent,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_family_is_everything_below_its_roots() {
+        // 10 started 11 and 12, 12 started 13, and 20 is no relative.
+        let tree = running(&[(1, 0), (10, 1), (11, 10), (12, 10), (13, 12), (20, 1)]);
+        assert_eq!(family(&tree, &[10], 99), [11, 12, 13]);
+        assert_eq!(
+            family(&tree, &[12, 10], 99),
+            [13, 11],
+            "roots are not their own descendants"
+        );
+        assert!(family(&tree, &[20], 99).is_empty());
+        assert!(family(&tree, &[99], 99).is_empty());
+        // Parents that name each other, which no kernel reports, end the searches all the same.
+        let circle = running(&[(5, 6), (6, 5)]);
+        assert_eq!(family(&circle, &[5], 99), [6]);
+        assert!(family(&circle, &[5], 5).is_empty(), "6 is above iotap");
+    }
+
+    #[test]
+    fn a_family_leaves_out_iotap_and_what_it_runs_under() {
+        // A shell (10) ran sudo (11), which runs iotap (12), which runs 13; the shell's job 14
+        // runs 15.
+        let tree = running(&[(1, 0), (10, 1), (11, 10), (12, 11), (13, 12), (14, 10), (15, 14)]);
+        assert_eq!(family(&tree, &[10], 12), [14, 15]);
+        assert_eq!(family(&tree, &[1], 12), [14, 15]);
+        assert_eq!(family(&tree, &[1], 99), [10, 11, 14, 12, 15, 13]);
+    }
+
+    #[test]
+    fn finds_running_descendants_but_never_iotap() {
+        let me = i32::try_from(std::process::id()).unwrap();
+        let sleeper = Sleeper::start(&format!("iotap-test-{me}-child"));
+        let pids = |found: Vec<Tracked>| found.iter().map(|t| t.pid).collect::<Vec<_>>();
+        assert!(pids(descendants(&[me], i32::MAX)).contains(&sleeper.pid()));
+        // With the test in iotap's place, its parent's descendants leave out the test and what
+        // it started.
+        let parent = std::os::unix::process::parent_id().cast_signed();
+        let below = pids(descendants(&[parent], me));
+        assert!(
+            !below.contains(&me) && !below.contains(&sleeper.pid()),
+            "{below:?}"
+        );
     }
 
     #[test]

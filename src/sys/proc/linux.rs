@@ -67,6 +67,7 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
         pid,
         name: stat.comm,
         start: (stat.start, 0),
+        parent: stat.parent,
     })
 }
 
@@ -190,6 +191,8 @@ fn table_of(name: &str) -> Option<usize> {
 struct Stat {
     comm: String,
     state: u8,
+    /// The parent's pid.
+    parent: i32,
     flags: u64,
     /// Clock ticks from boot to the start.
     start: u64,
@@ -213,6 +216,7 @@ impl Stat {
         Some(Self {
             comm,
             state: *field(3)?.as_bytes().first()?,
+            parent: field(4)?.parse().ok()?,
             flags: field(9)?.parse().ok()?,
             start: field(22)?.parse().ok()?,
         })
@@ -515,6 +519,7 @@ mod tests {
         let own = info(me()).expect("own process info");
         assert!(!own.name.is_empty());
         assert!(own.start.0 > 0);
+        assert_eq!(own.parent, std::os::unix::process::parent_id().cast_signed());
         assert!(list_pids().contains(&me()));
         assert!(exe_path(me()).is_some_and(|p| p.starts_with('/')));
         assert!(cwd(me()).is_some_and(|p| p.starts_with('/')));
@@ -579,6 +584,7 @@ mod tests {
             Stat {
                 comm: "a (b) c".into(),
                 state: b'S',
+                parent: 1,
                 flags: 4_194_560,
                 start: 12_345,
             }

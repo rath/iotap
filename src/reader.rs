@@ -488,6 +488,7 @@ mod tests {
             pid: 70,
             name: name.into(),
             start: (start, 0),
+            parent: 1,
         };
         let mut checks = |info: &ProcInfo| (0..20).filter(|_| watch.due(info)).count();
         // When first seen, and on the polls after, in which it may still name itself.

@@ -22,6 +22,9 @@ pub struct ProcInfo {
     /// When it started, which tells it apart from a later process given the same pid: seconds
     /// and microseconds on macOS, clock ticks since boot and 0 on Linux.
     pub start: (u64, u64),
+    /// Pid of its parent: the process that started it, or the one it was handed to when that
+    /// one exited.
+    pub parent: i32,
 }
 
 /// A `sleep` started for tests under a chosen first argument, killed when dropped.
