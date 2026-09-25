@@ -95,6 +95,10 @@ pub struct Ebpf {
     traced: MapHandle,
     inflight: MapHandle,
     dropped: MapHandle,
+    stopping: MapHandle,
+    /// When the program was wholly attached: calls under way that entered before then may have
+    /// returned unseen.
+    attached_at: u64,
     /// The ring buffer's map, whose descriptor `wait` polls.
     records: MapHandle,
     /// Owns the programs and maps as libbpf loaded them; kept until the links are gone.
@@ -159,12 +163,13 @@ impl Ebpf {
         }
         let records = map("records")?;
         let ring = Ring::new(records.as_fd(), ring_bytes as usize).map_err(EbpfError::Ring)?;
-        let (inflight, dropped) = (map("inflight")?, map("dropped")?);
+        let (inflight, dropped, stopping) = (map("inflight")?, map("dropped")?, map("stopping")?);
 
-        // Returns first: a call whose entry was recorded then has its return watched, and one
-        // that entered before counts as already under way when tracing began.
+        // Entries first: a call that returns before returns are watched was over before tracing
+        // began. The other way round, every call returning in between would count as one under
+        // way when tracing began, which under a flood of calls is thousands.
         let mut links = Vec::new();
-        for name in ["sys_exit", "process_exit", "sys_enter"] {
+        for name in ["sys_enter", "process_exit", "sys_exit"] {
             if name == "process_exit" && !group_dead {
                 continue;
             }
@@ -184,6 +189,8 @@ impl Ebpf {
             traced,
             inflight,
             dropped,
+            stopping,
+            attached_at: time::now_ticks(),
             records,
             _object: object,
         })
@@ -204,6 +211,21 @@ impl Ebpf {
             }
             _ => Err(EbpfError::BadRecord { len: bytes.len() }),
         })
+    }
+
+    /// Calls that entered while the program was wholly attached and have not returned. An
+    /// earlier entry may be of a call that returned before returns were watched.
+    fn calls_under_way(&self) -> u64 {
+        let entered = |key: &[u8]| {
+            let value = self.inflight.lookup(key, MapFlags::ANY).ok().flatten()?;
+            // `struct call` starts with the time of the entry.
+            let ts = u64::from_le_bytes(value.get(..8)?.try_into().ok()?);
+            Some(ts)
+        };
+        self.inflight
+            .keys()
+            .filter(|key| entered(key).is_some_and(|ts| ts >= self.attached_at))
+            .count() as u64
     }
 
     /// The program's count of records the ring buffer had no room for.
@@ -269,16 +291,24 @@ impl Tracer for Ebpf {
     /// Detaches the program, then passes on everything the ring buffer holds, what was dropped
     /// after it, and how many calls were still under way.
     fn finish(&mut self) -> Result<Option<Records>, EbpfError> {
+        // Detaching takes a while, up to a tenth of a second. Meanwhile the program starts on no
+        // new call, and only returns of calls it saw enter are recorded.
+        self.stopping
+            .update(&0_u32.to_le_bytes(), &1_u32.to_le_bytes(), MapFlags::ANY)
+            .map_err(|source| EbpfError::Map {
+                what: "tell the eBPF program to stop",
+                source,
+            })?;
         // Entries go first, so that what is left in `inflight` below is exactly the calls that
         // had not returned when returns stopped being watched.
-        while let Some(link) = self.links.pop() {
+        for link in self.links.drain(..) {
             drop(link);
         }
         self.take()?;
         let now = time::now_ticks();
         let dropped = self.dropped()? as u32;
         let mut records = self.order.release_all(now, dropped);
-        let calls = self.inflight.keys().count() as u64;
+        let calls = self.calls_under_way();
         records.push(Record {
             ts: now,
             dropped,

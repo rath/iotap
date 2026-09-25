@@ -170,6 +170,15 @@ struct {
 	__type(value, __u64);
 } dropped SEC(".maps");
 
+/* Set by the reader before it detaches the programs: from then on no call starts to be traced,
+ * and a return whose entry was not seen is no call under way when tracing began. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} stopping SEC(".maps");
+
 /* The flags of call `nr` if the current process is traced and iotap traces the call. */
 static __always_inline __u32 traced_call(__u32 tgid, __u32 nr)
 {
@@ -177,6 +186,13 @@ static __always_inline __u32 traced_call(__u32 tgid, __u32 nr)
 		return 0;
 	__u32 *flags = bpf_map_lookup_elem(&calls, &nr);
 	return flags && (*flags & TRACE) ? *flags : 0;
+}
+
+static __always_inline int is_stopping(void)
+{
+	__u32 zero = 0;
+	__u32 *flag = bpf_map_lookup_elem(&stopping, &zero);
+	return flag && *flag;
 }
 
 /* Reads what the call's flags ask for from the caller's memory, as the call returns. */
@@ -234,7 +250,7 @@ int sys_enter(struct sys_enter_args *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
 	__u32 tgid = id >> 32, tid = (__u32)id, nr = (__u32)ctx->id;
-	if (!traced_call(tgid, nr))
+	if (!traced_call(tgid, nr) || is_stopping())
 		return 0;
 	struct call call = {
 		.ts = bpf_ktime_get_ns(),
@@ -275,6 +291,11 @@ int sys_exit(struct sys_exit_args *ctx)
 			rec->args[i] = call->args[i];
 		read_memory(rec, flags);
 	} else {
+		if (is_stopping()) {
+			if (call)
+				bpf_map_delete_elem(&inflight, &tid);
+			return 0;
+		}
 		/* It entered the kernel before tracing began. */
 		rec->start_ns = 0;
 		for (int i = 0; i < 6; i++)
