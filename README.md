@@ -1,13 +1,23 @@
 # iotap
 
-Trace the file and network I/O of processes on macOS and Linux.
+See what a process on your machine is really doing: which files it reads and writes, which
+addresses it talks to, and how many bytes go each way. For macOS and Linux.
 
-Give iotap process IDs or names and it reports every read and write syscall those processes make:
-the descriptor, the size asked for and the size moved, the latency, and what the descriptor refers
-to, a file path or a socket endpoint. It reads what the kernel records of those calls: on macOS
-the kernel trace facility (kdebug), the source `fs_usage` uses, and on Linux a small eBPF program
-of iotap's own on the syscall tracepoints. So it needs no debugger, no code injection and no
-changes to the traced program.
+## Why
+
+Something on your machine is busy and you want to know with what. A process is chewing through
+the disk, an app you just installed is talking to somewhere you never asked for, a build step is
+slow and you suspect I/O, or a program keeps failing and you want to see which file or
+connection it trips on. The usual tools each show a piece: `lsof` and `netstat` list what is open
+right now but not what moves through it, Activity Monitor and `top` count bytes but do not say
+where they went, and a packet capture shows the traffic of the whole machine with no process
+behind it.
+
+iotap watches the processes you name and reports every read and write they make as it happens:
+the file or the remote address, how many bytes were asked for and how many moved, how long the
+call took, and whether it failed. When the process exits or you press Ctrl-C, it sums this up per
+file and per endpoint. Point it at a name and it also picks up processes started later under that
+name.
 
 ```
 $ sudo iotap curl
@@ -37,11 +47,54 @@ Totals
   5 calls, 1 failed
 ```
 
+Read top to bottom, this is the whole life of one `curl`: it sent a 517-byte request to
+93.184.216.34 on port 443, asked for 16 KiB back and got 4 KiB, asked again and found nothing
+waiting yet (`EAGAIN`), wrote the 4 KiB to `page.html` and 20 bytes of progress to the terminal,
+then exited. The summary at the end is the same story per file and per endpoint.
+
+For a process that runs longer, `--tui` shows the same tables live and lets you drill into any
+file or connection, `--json` streams every event as one line for `jq` or a log, and `--record`
+saves the trace so you can replay it later, in any of these forms, without root.
+
+## Why it needs root
+
+iotap does not attach a debugger, inject code or change the program it watches; the program runs
+exactly as it would otherwise. Instead iotap reads the kernel's own record of what the program
+asks for. Every read, write, open and connect a program makes is a system call, and the kernel
+can be told to log each one as it happens, with the process it came from, its arguments and its
+result.
+
+- On macOS that log is the kernel trace facility, kdebug, the same source Apple's `fs_usage`
+  reads. It is built into the kernel, so nothing has to be installed and System Integrity
+  Protection stays on.
+- On Linux, iotap loads a small eBPF program of its own onto the kernel's syscall tracepoints.
+  The kernel verifies the program before running it and unloads it when iotap exits.
+
+Both are a view into every process on the machine, and that is what only root gets. A user who
+could switch on kdebug or load an eBPF program could watch every other user's programs, so the
+kernel allows neither to anyone else. That is why tracing needs `sudo`, exactly as `fs_usage`
+does, and why iotap says so and stops before it touches anything when run without it. Replaying a
+recording reads nothing from the kernel, so it needs no root.
+
+What iotap does with that access is deliberately narrow:
+
+- **Metadata only.** It records the call, the descriptor, byte counts, latency, the path and the
+  socket endpoint. It never reads or stores the data being transferred: a process reading your
+  SSH key shows up as a read of that file and its size, never its contents. Recordings hold the
+  same and nothing more.
+- **Only the processes you name.** The kernel is asked to record their calls and no others.
+- **Nothing left behind.** On macOS only one program can own kdebug at a time, so iotap releases
+  it on every exit path, including errors, signals and panics. On Linux the kernel drops the
+  eBPF program the moment iotap exits, however it exits. The terminal UI restores the terminal
+  the same way.
+- **One binary, no daemon.** iotap runs only while you run it, and makes no connections of its
+  own; the optional host name lookups (`--resolve`) go through the system's resolver.
+
 ## Requirements
 
 - macOS, or Linux 5.8 or later on 64-bit Arm or x86-64 with BPF and syscall tracepoints, as
-  distribution kernels have them. Tracing needs root, so run iotap with `sudo`; replaying a
-  recording does not.
+  distribution kernels have them. Tracing needs root, so run iotap with `sudo` (see
+  [Why it needs root](#why-it-needs-root)); replaying a recording does not.
 - To build: Rust 1.97.1, which `rust-toolchain.toml` selects, and
   - on macOS, the Xcode Command Line Tools, for the small C file that reads descriptor details
     from libproc;
