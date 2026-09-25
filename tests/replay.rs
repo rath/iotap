@@ -7,19 +7,24 @@ use std::process::{Command, Output};
 
 use iotap::model::{Endpoint, Proto, Target};
 use iotap::record::{Recorder, Recording};
+#[cfg(target_os = "macos")]
+use iotap::session::UntracedReason;
 use iotap::session::{Collect, Filter, Input, Process, Session, SessionInfo};
 use iotap::sys::time::{ClockAnchor, Timebase};
 use iotap::trace::kdebug::pairing::PathRecords;
 #[cfg(target_os = "macos")]
 use iotap::trace::kdebug::synth::{Call, Synth};
 #[cfg(target_os = "linux")]
-use iotap::trace::linux::Memory;
-#[cfg(target_os = "linux")]
 use iotap::trace::linux::synth::{Call, Synth, inet_addr};
+#[cfg(target_os = "linux")]
+use iotap::trace::linux::{Event, Memory, Record};
 use iotap::trace::procs::{Fixed, Snapshot};
 use iotap::trace::{Records, System};
 
 const PID: i32 = 4242;
+/// A child of `PID`, and one that iotap could not trace.
+const CHILD: i32 = 4243;
+const UNTRACED: i32 = 4244;
 
 struct TempDir(PathBuf);
 
@@ -105,11 +110,87 @@ fn traced() -> (Records, Timebase, PathRecords, u64) {
     )
 }
 
-/// Records the session the way a live trace does: through the same session and recording
-/// wrapper.
-fn write_recording(path: &Path) {
-    let (records, timebase, path_records, end) = traced();
-    let info = SessionInfo {
+/// A shell that starts a child, which writes to the terminal it has from the shell, and another
+/// child that iotap could not trace, as this system's facility and reader tell of them. Returns
+/// the inputs, and the timebase and path layout they use.
+#[cfg(target_os = "macos")]
+fn family() -> (Vec<Input>, Timebase, PathRecords) {
+    let mut synth = Synth::new(24_100_000, 2_400);
+    let fork = synth.call(Call {
+        ret: u64::from(CHILD.cast_unsigned()),
+        ..Call::new(1, PID, 2, [0; 4])
+    });
+    let mut records = synth.io(5, CHILD, 4, 1, 20, 20);
+    records.push(synth.proc_exit(5, CHILD, 0));
+    records.push(synth.proc_exit(1, PID, 0));
+    let inputs = vec![
+        Input::Records(Records::Kdebug(fork)),
+        // The reader takes up the children the kdebug records show.
+        Input::Attached {
+            process: Process {
+                pid: CHILD,
+                name: "sh".into(),
+            },
+            parent: Some(PID),
+        },
+        Input::Untraced {
+            pid: UNTRACED,
+            parent: Some(PID),
+            reason: UntracedReason::Ended,
+        },
+        Input::Records(Records::Kdebug(records)),
+    ];
+    let timebase = Timebase { numer: 125, denom: 3 };
+    (
+        with_end(inputs, timebase, synth.now()),
+        timebase,
+        PathRecords::Whole,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn family() -> (Vec<Input>, Timebase, PathRecords) {
+    let mut synth = Synth::new(System::HOST, 24_100_000, 100_000);
+    // The program tells of each child in the records, and of one it had no room for.
+    let untraced = Record {
+        event: Event::Fork {
+            parent: PID,
+            child: UNTRACED,
+            traced: false,
+        },
+        ..synth.fork(PID, UNTRACED)
+    };
+    let records = vec![
+        synth.fork(PID, CHILD),
+        untraced,
+        synth.io(5, CHILD, "write", 1, 20, 20),
+        synth.exit(CHILD),
+        synth.exit(PID),
+    ];
+    let inputs = vec![Input::Records(Records::Linux(records))];
+    let timebase = Timebase { numer: 1, denom: 1 };
+    (
+        with_end(inputs, timebase, synth.now()),
+        timebase,
+        PathRecords::default(),
+    )
+}
+
+/// `inputs`, then what the reader sends as the trace ends at `end`: the exits of the processes,
+/// and a second later the stop.
+fn with_end(mut inputs: Vec<Input>, timebase: Timebase, end: u64) -> Vec<Input> {
+    for pid in [CHILD, PID] {
+        inputs.push(Input::Exited { pid, ticks: end });
+    }
+    inputs.push(Input::Stopped {
+        ticks: end + timebase.nanos_to_ticks(1_000_000_000),
+    });
+    inputs
+}
+
+/// Where a trace of `name` (`PID`) begins.
+fn info(name: &str, timebase: Timebase, path_records: PathRecords) -> SessionInfo {
+    SessionInfo {
         timebase,
         anchor: ClockAnchor {
             ticks: 24_000_000,
@@ -117,14 +198,18 @@ fn write_recording(path: &Path) {
         },
         processes: vec![Process {
             pid: PID,
-            name: "curl".into(),
+            name: name.into(),
         }],
         path_records,
         system: System::HOST,
-    };
-    let mut procs = Fixed::default();
+    }
+}
+
+/// What libproc or `/proc` would say of the descriptors of `pid` when tracing it began: its
+/// output goes to the terminal.
+fn at_the_terminal(procs: &mut Fixed, pid: i32) {
     procs.snapshots.insert(
-        PID,
+        pid,
         Snapshot {
             fds: vec![(
                 1,
@@ -135,6 +220,24 @@ fn write_recording(path: &Path) {
             cwd: Some("/Users/me".into()),
         },
     );
+}
+
+/// Records `inputs` the way a live trace does: through the same session and recording wrapper.
+fn record(path: &Path, info: SessionInfo, procs: Fixed, inputs: &[Input]) {
+    let mut recording = Recording::new(procs, Some(Recorder::create(path, &info).unwrap()));
+    let mut session = Session::new(info, Filter::ALL, &mut recording);
+    let mut sink = Collect::default();
+    for input in inputs {
+        recording.input(input);
+        session.handle(input, &mut recording, &mut sink).unwrap();
+    }
+    recording.finish().unwrap();
+}
+
+fn write_recording(path: &Path) {
+    let (records, timebase, path_records, end) = traced();
+    let mut procs = Fixed::default();
+    at_the_terminal(&mut procs, PID);
     procs.targets.insert(
         (PID, 5),
         Target::Socket(Endpoint {
@@ -144,21 +247,25 @@ fn write_recording(path: &Path) {
             path: None,
         }),
     );
-
-    let mut recording = Recording::new(procs, Some(Recorder::create(path, &info).unwrap()));
-    let mut session = Session::new(info, Filter::ALL, &mut recording);
-    let mut sink = Collect::default();
-    for input in [
+    let inputs = [
         Input::Records(records),
         Input::Exited { pid: PID, ticks: end },
         Input::Stopped {
             ticks: end + timebase.nanos_to_ticks(1_000_000_000),
         },
-    ] {
-        recording.input(&input);
-        session.handle(&input, &mut recording, &mut sink).unwrap();
-    }
-    recording.finish().unwrap();
+    ];
+    record(path, info("curl", timebase, path_records), procs, &inputs);
+}
+
+fn write_family_recording(path: &Path) {
+    let (inputs, timebase, path_records) = family();
+    let mut procs = Fixed::default();
+    at_the_terminal(&mut procs, PID);
+    // A child on Linux gets a copy of its parent's descriptors from the trace; on macOS iotap
+    // asks libproc about it as it does about any process it begins to trace.
+    #[cfg(target_os = "macos")]
+    at_the_terminal(&mut procs, CHILD);
+    record(path, info("sh", timebase, path_records), procs, &inputs);
 }
 
 fn iotap(args: &[&str]) -> Output {
@@ -290,4 +397,68 @@ fn tui_needs_a_terminal() {
         stderr,
         "iotap: --tui needs a terminal, but stdout is redirected\n"
     );
+}
+
+#[test]
+fn replay_tells_of_children() {
+    let dir = TempDir::new("children");
+    let path = dir.0.join("sh.iotaprec");
+    write_family_recording(&path);
+    let path = path.to_str().unwrap();
+    let output = iotap(&["--replay", path, "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let lines: Vec<serde_json::Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let of = |kind: &str| -> Vec<&serde_json::Value> { lines.iter().filter(|l| l["type"] == kind).collect() };
+    assert_eq!(
+        of("attached"),
+        [&serde_json::json!({"type": "attached", "pid": CHILD, "name": "sh", "parent": PID})]
+    );
+    // kdebug finds a child that ended before iotap could trace it; the eBPF program has no room
+    // for a child once it traces as many processes as it can.
+    let (reason, counted) = if cfg!(target_os = "macos") {
+        ("ended", serde_json::json!({"ended": 1, "full": 0}))
+    } else {
+        ("full", serde_json::json!({"ended": 0, "full": 1}))
+    };
+    assert_eq!(
+        of("untraced"),
+        [&serde_json::json!({"type": "untraced", "pid": UNTRACED, "parent": PID, "reason": reason})]
+    );
+    let events = of("event");
+    assert_eq!(events.len(), 1, "{lines:?}");
+    assert_eq!(events[0]["pid"], CHILD);
+    assert_eq!(
+        events[0]["target"],
+        serde_json::json!({"kind": "file", "path": "/dev/ttys004"})
+    );
+    let summary = of("summary")[0];
+    assert_eq!(summary["untraced_children"], counted);
+    assert_eq!(
+        summary["processes"],
+        serde_json::json!([{"pid": PID, "name": "sh"}, {"pid": CHILD, "name": "sh"}])
+    );
+
+    let output = iotap(&["--replay", path, "--quiet"]);
+    let text = stdout(&output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("now tracing 4243 (sh), a child of 4242\n"),
+        "{stderr}"
+    );
+    let (notice, gap) = if cfg!(target_os = "macos") {
+        (
+            "4244, a child of 4242, ended before iotap could trace it\n",
+            "Note: 1 child process ended before iotap could trace it.\n",
+        )
+    } else {
+        (
+            "4244, a child of 4242, is not traced: iotap is tracing as many processes as it can\n",
+            "Warning: 1 child process was not traced, as iotap was tracing as many processes as it can.\n",
+        )
+    };
+    assert!(stderr.contains(notice), "{stderr}");
+    assert!(text.contains(gap), "{text}");
 }
