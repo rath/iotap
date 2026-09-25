@@ -1,6 +1,8 @@
 //! A syscall as the trace shows it once its records are put together, whatever format they
 //! came in: the part it plays, its arguments and result, and the path it looked up.
 
+use std::net::SocketAddr;
+
 use crate::model::Op;
 
 /// Kind of descriptor a syscall returns when iotap cannot learn more from the trace.
@@ -77,6 +79,8 @@ pub struct Completed {
     pub rval: [u32; 2],
     /// The first path looked up during the call.
     pub lookup: Option<Lookup>,
+    /// The Internet address a `connect` named, when the trace carries it, as on Linux.
+    pub remote: Option<SocketAddr>,
 }
 
 /// A path a call looked up, as the trace reports it.

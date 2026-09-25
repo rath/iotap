@@ -1,6 +1,8 @@
 //! Builds records exactly as iotap's eBPF program writes them, so tests and fixtures can
 //! exercise the whole pipeline without root.
 
+use std::net::SocketAddr;
+
 use super::{Event, Memory, RawCall, Record, codes};
 use crate::trace::System;
 
@@ -156,6 +158,26 @@ pub fn abstract_addr(name: &[u8]) -> Vec<u8> {
     let mut addr = vec![1, 0, 0];
     addr.extend_from_slice(name);
     addr
+}
+
+/// An Internet socket address as a process passes it: a `sockaddr_in` or a `sockaddr_in6`.
+pub fn inet_addr(addr: SocketAddr) -> Vec<u8> {
+    let [port_high, port_low] = addr.port().to_be_bytes();
+    let mut out = Vec::new();
+    match addr {
+        SocketAddr::V4(v4) => {
+            out.extend_from_slice(&[2, 0, port_high, port_low]);
+            out.extend_from_slice(&v4.ip().octets());
+            out.extend_from_slice(&[0; 8]);
+        }
+        SocketAddr::V6(v6) => {
+            out.extend_from_slice(&[10, 0, port_high, port_low]);
+            out.extend_from_slice(&v6.flowinfo().to_be_bytes());
+            out.extend_from_slice(&v6.ip().octets());
+            out.extend_from_slice(&v6.scope_id().to_le_bytes());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

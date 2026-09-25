@@ -7,6 +7,8 @@ pub mod codes;
 pub mod order;
 pub mod synth;
 
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
 use super::call::{Completed, Lookup, PathForm, Syscall};
 use super::{Decode, Step, System, Traced};
 
@@ -27,8 +29,10 @@ const MEMORY_PATH: u8 = 1;
 const MEMORY_SOCKADDR: u8 = 2;
 const MEMORY_FDS: u8 = 3;
 
-/// `AF_UNIX` on Linux.
+// Address families on Linux.
 const AF_UNIX: u16 = 1;
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
 /// Largest errno a Linux call returns, negated, in place of a result.
 const MAX_ERRNO: i64 = 4095;
 
@@ -259,6 +263,7 @@ impl Decoder {
             errno,
             rval,
             lookup: lookup(&call.memory),
+            remote: inet_address(&call.memory),
         })
     }
 }
@@ -306,6 +311,25 @@ fn lookup(memory: &Memory) -> Option<Lookup> {
     })
 }
 
+/// The Internet address a call's memory holds, with an IPv4 address mapped into IPv6 written
+/// as IPv4, as `/proc` gives it.
+fn inet_address(memory: &Memory) -> Option<SocketAddr> {
+    let Memory::Sockaddr(addr) = memory else {
+        return None;
+    };
+    // `sockaddr_in` and `sockaddr_in6` hold the port at 2, in network byte order, and the
+    // address at 4 and 8.
+    if addr.len() < 4 {
+        return None;
+    }
+    let ip = match u16::from_le_bytes(word(addr, 0)) {
+        AF_INET if addr.len() >= 8 => IpAddr::from(word::<4>(addr, 4)),
+        AF_INET6 if addr.len() >= 24 => Ipv6Addr::from(word::<16>(addr, 8)).to_canonical(),
+        _ => return None,
+    };
+    Some(SocketAddr::new(ip, u16::from_be_bytes(word(addr, 2))))
+}
+
 /// The path in a Unix-domain socket address: a file, or `@` and a name in the abstract
 /// namespace, in which NUL bytes are shown as `@` too, as the kernel shows them.
 fn unix_path(addr: &[u8]) -> Option<(String, PathForm)> {
@@ -332,7 +356,7 @@ fn unix_path(addr: &[u8]) -> Option<(String, PathForm)> {
 
 #[cfg(test)]
 mod tests {
-    use super::synth::{Call, Synth, abstract_addr, unix_addr};
+    use super::synth::{Call, Synth, abstract_addr, inet_addr, unix_addr};
     use super::*;
 
     const SYSTEM: System = System::LinuxAarch64;
@@ -467,6 +491,34 @@ mod tests {
         assert_eq!(lookup_of(vec![1, 0]), None);
         assert_eq!(lookup_of(vec![2, 0, 0, 80, 127, 0, 0, 1]), None);
         assert_eq!(lookup(&Memory::Path(Vec::new())), None);
+    }
+
+    #[test]
+    fn internet_addresses_give_the_remote_end() {
+        let remote_of = |addr: &str| inet_address(&Memory::Sockaddr(inet_addr(addr.parse().unwrap())));
+        let addr = |text: &str| Some(text.parse::<SocketAddr>().unwrap());
+        assert_eq!(remote_of("93.184.216.34:443"), addr("93.184.216.34:443"));
+        assert_eq!(remote_of("[2001:db8::1]:53"), addr("[2001:db8::1]:53"));
+        assert_eq!(remote_of("[::ffff:127.0.0.1]:8080"), addr("127.0.0.1:8080"));
+        // Only a whole Internet address: not a Unix-domain one, not AF_UNSPEC, which dissolves
+        // a UDP socket's association, and not one cut short.
+        assert_eq!(inet_address(&Memory::Sockaddr(unix_addr("/run/x.sock"))), None);
+        assert_eq!(inet_address(&Memory::Sockaddr(vec![0; 16])), None);
+        let v6 = inet_addr("[2001:db8::1]:53".parse().unwrap());
+        assert_eq!(inet_address(&Memory::Sockaddr(v6[..20].to_vec())), None);
+        assert_eq!(inet_address(&Memory::Path(b"/x".to_vec())), None);
+
+        let mut synth = Synth::new(SYSTEM, 1_000, 10);
+        let connect = synth.call(Call {
+            // EINPROGRESS on Linux.
+            ret: -115,
+            memory: Memory::Sockaddr(inet_addr("10.0.0.2:443".parse().unwrap())),
+            ..Call::new(7, 70, "connect", [5, 0xffff_e000, 16, 0, 0, 0])
+        });
+        let Some(Traced::Call(done)) = Decoder::new(SYSTEM).decode(&connect).unwrap().traced else {
+            panic!()
+        };
+        assert_eq!((done.remote, done.lookup), (addr("10.0.0.2:443"), None));
     }
 
     #[test]

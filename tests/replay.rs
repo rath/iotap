@@ -13,7 +13,9 @@ use iotap::trace::kdebug::pairing::PathRecords;
 #[cfg(target_os = "macos")]
 use iotap::trace::kdebug::synth::{Call, Synth};
 #[cfg(target_os = "linux")]
-use iotap::trace::linux::synth::{Call, Synth};
+use iotap::trace::linux::Memory;
+#[cfg(target_os = "linux")]
+use iotap::trace::linux::synth::{Call, Synth, inet_addr};
 use iotap::trace::procs::{Fixed, Snapshot};
 use iotap::trace::{Records, System};
 
@@ -80,6 +82,7 @@ fn traced() -> (Records, Timebase, PathRecords, u64) {
         }),
         synth.call(Call {
             ret: -i64::from(libc::EINPROGRESS),
+            memory: Memory::Sockaddr(inet_addr("93.184.216.34:443".parse().unwrap())),
             ..Call::new(2, PID, "connect", [5, 0x7fff_0000, 16, 0, 0, 0])
         }),
         synth.io(2, PID, "sendto", 5, 517, 517),

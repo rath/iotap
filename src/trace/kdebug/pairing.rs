@@ -143,6 +143,8 @@ impl Pairer {
             errno: low_i32(event.args[0]),
             rval: [event.args[1] as u32, event.args[2] as u32],
             lookup,
+            // kdebug records no socket addresses.
+            remote: None,
         }
     }
 

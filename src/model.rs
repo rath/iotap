@@ -209,7 +209,8 @@ impl Endpoint {
     pub fn is_incomplete(&self) -> bool {
         match self.proto {
             Proto::Unix => self.path.is_none(),
-            Proto::Tcp => self.remote.is_none(),
+            // The trace can name the peer of a connection whose local end only a lookup knows.
+            Proto::Tcp => self.remote.is_none() || self.local.is_none(),
             _ => self.local.is_none_or(|addr| addr.port() == 0) || self.remote.is_none(),
         }
     }

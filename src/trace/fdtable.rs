@@ -19,6 +19,7 @@
 //! everything that may have held the number then refers to that file.
 
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::call::{Completed, Lookup, NewFd, PathForm, Role};
@@ -317,7 +318,7 @@ impl FdTable {
             Role::Connect => {
                 if let Some(fd) = done.arg_i32(0) {
                     let path = done.lookup.as_ref().map(|lookup| self.guess(pid, None, lookup));
-                    self.connect(pid, fd, path.as_deref(), ts, src);
+                    self.connect(pid, fd, (path.as_deref(), done.remote), ts, src);
                 }
             }
             Role::Pipe => {
@@ -780,7 +781,16 @@ impl FdTable {
         }
     }
 
-    fn connect(&mut self, pid: i32, fd: i32, path: Option<&str>, ts: u64, src: &mut dyn ProcSource) {
+    /// Notes a connect of `fd` to the path a Unix-domain connect looked up, or to the Internet
+    /// address the trace carries.
+    fn connect(
+        &mut self,
+        pid: i32,
+        fd: i32,
+        (path, remote): (Option<&str>, Option<SocketAddr>),
+        ts: u64,
+        src: &mut dyn ProcSource,
+    ) {
         let retry_at = ts.saturating_add(self.retry_ticks);
         if self.entry(pid, fd).is_none() {
             self.holder_arrives((pid, fd), (0, ts), 0);
@@ -796,8 +806,9 @@ impl FdTable {
         };
         // Only a Unix-domain connect looks up a path: the socket file, found from the caller's
         // directory. libproc reports the address the peer was bound with instead, which can be
-        // relative, and nothing once the socket is closed.
-        let traced = Arc::new(with_unix_path(&known, path));
+        // relative, and nothing once the socket is closed. The address an Internet connect
+        // named outlasts the socket too, but libproc knows the local end as well.
+        let traced = Arc::new(with_remote(with_unix_path(&known, path), remote));
         let answered = match described.target {
             Some(Target::Socket(endpoint)) if same_kind(&known, &endpoint) => {
                 Some(with_unix_path(&Target::Socket(endpoint), path))
@@ -894,6 +905,22 @@ fn with_unix_path(target: &Target, path: Option<&str>) -> Target {
             })
         }
         _ => target.clone(),
+    }
+}
+
+/// A socket target with `remote`, the Internet address a connect named, as its remote end.
+/// Other targets, and any target when the trace carries no address, are returned as they are.
+fn with_remote(target: Target, remote: Option<SocketAddr>) -> Target {
+    match (target, remote) {
+        (Target::Socket(endpoint), Some(remote))
+            if endpoint.proto.has_addresses() || endpoint.proto == Proto::Other =>
+        {
+            Target::Socket(Endpoint {
+                remote: Some(remote),
+                ..endpoint
+            })
+        }
+        (target, _) => target,
     }
 }
 
@@ -995,6 +1022,7 @@ mod tests {
                 vnode: 0,
                 form: PathForm::Kernel,
             }),
+            remote: None,
         }
     }
 
@@ -1490,6 +1518,52 @@ mod tests {
         let connect = done(98, 9, 10, [5, 0, 0, 0], 0, &["@bus"]);
         table.apply(&in_form(connect, PathForm::Abstract), &mut src);
         assert_eq!(target_of(&mut table, 5, 11, &mut src).0, unix(Some("@bus")));
+    }
+
+    #[test]
+    fn the_address_a_connect_named_outlasts_its_socket() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        let (inet, dgram) = (i64::from(libc::AF_INET), i64::from(libc::SOCK_DGRAM));
+        let dns: SocketAddr = "127.0.0.53:53".parse().unwrap();
+        let udp = |local: Option<&str>| {
+            Target::Socket(Endpoint {
+                local: local.map(|addr| addr.parse().unwrap()),
+                remote: Some(dns),
+                ..Endpoint::unresolved(Proto::Udp)
+            })
+        };
+        let connect = |fd: i64, (start, end): (u64, u64)| Completed {
+            remote: Some(dns),
+            ..done(98, start, end, [fd, 0, 16, 0], 0, &[])
+        };
+        // A query socket, closed before libproc could be asked about it.
+        table.apply(&done(97, 1, 2, [inet, dgram, 0, 0], 4, &[]), &mut src);
+        table.apply(&connect(4, (3, 4)), &mut src);
+        assert_eq!(
+            target_of(&mut table, 4, 5, &mut src),
+            (udp(None), Provenance::Traced)
+        );
+        // Asked in time, libproc adds the local end. Should the socket turn out closed before
+        // the answer, what the trace said stands.
+        src.live.insert((PID, 5), udp(Some("127.0.0.1:40000")));
+        table.apply(&done(97, 6, 7, [inet, dgram, 0, 0], 5, &[]), &mut src);
+        table.apply(&connect(5, (8, 9)), &mut src);
+        let found = table.target(PID, 5, 10, &mut src);
+        assert_eq!(*found.target, udp(Some("127.0.0.1:40000")));
+        let answer = found.answer.expect("unconfirmed");
+        table.apply(&close_of(11, 12, 5), &mut src);
+        assert_eq!(
+            table.take_verdicts(),
+            [Verdict::Stale {
+                answer,
+                target: Arc::new(udp(None)),
+                provenance: Provenance::Traced,
+            }]
+        );
     }
 
     #[test]

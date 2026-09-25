@@ -66,6 +66,10 @@ pub enum Records {
 
 /// What the trace shows once records are put together.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "each lives from decoding a record to handling it; a box would cost an allocation per call"
+)]
 pub enum Traced {
     /// A syscall returned.
     Call(Completed),
