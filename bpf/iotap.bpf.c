@@ -47,7 +47,6 @@ static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
 static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
 static long (*bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)112;
-static long (*bpf_probe_read_kernel)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)113;
 static long (*bpf_probe_read_user_str)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)114;
 static long (*bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) = (void *)130;
 static __u64 (*bpf_ringbuf_query)(void *ringbuf, __u64 flags) = (void *)134;
@@ -79,39 +78,22 @@ static __u64 (*bpf_ringbuf_query)(void *ringbuf, __u64 flags) = (void *)134;
 #define SOCKADDR_MAX 128
 
 /*
- * The syscall programs attach to the raw tracepoints, which cost each syscall of every process
- * far less than the tracepoints that lay out a record first. They are passed the registers, a
- * `struct pt_regs`, and the call's number on entry or its result on return, so the program reads
- * the arguments and, on return, the number from the registers, where the kernel's headers for
- * each architecture keep them. build.rs names the architecture.
+ * The tracepoints' records, after their common 8-byte header. The raw tracepoints, which pass
+ * the registers instead, were tried on Linux 7.0 on arm64 in September 2026: with them a write
+ * took 40-60% longer in a process iotap did not trace, and the programs stayed attached for
+ * seconds after iotap was killed.
  */
-#if defined(__TARGET_ARCH_x86)
-/* rdi, rsi, rdx, r10, r8 and r9, among the 64-bit words from r10 (at 56) to orig_rax. */
-#define REGS_AT 56
-#define REGS_WORDS 9
-#define ARG0 7
-#define ARG1 6
-#define ARG2 5
-#define ARG3 0
-#define ARG4 2
-#define ARG5 1
-/* orig_rax, whose low 32 bits hold the number. */
-#define NR_AT 120
-#elif defined(__TARGET_ARCH_arm64)
-/* x0 to x5, the first six words; x0 still holds the first argument when the call enters. */
-#define REGS_AT 0
-#define REGS_WORDS 6
-#define ARG0 0
-#define ARG1 1
-#define ARG2 2
-#define ARG3 3
-#define ARG4 4
-#define ARG5 5
-/* syscallno, 32 bits after orig_x0. */
-#define NR_AT 280
-#else
-#error "no register layout for this architecture; build.rs defines __TARGET_ARCH_x86 or _arm64"
-#endif
+struct sys_enter_args {
+	__u64 common;
+	__s64 id;
+	__u64 args[6];
+};
+
+struct sys_exit_args {
+	__u64 common;
+	__s64 id;
+	__s64 ret;
+};
 
 /* The loader attaches `process_exit` only where the tracepoint has `group_dead` here. */
 struct sched_process_exit_args {
@@ -230,12 +212,10 @@ struct {
 /* The flags of call `nr` if the current process is traced and iotap traces the call. */
 static __always_inline __u32 traced_call(__u32 tgid, __u32 nr)
 {
-	/* The call first: most calls are of kinds iotap does not trace, and looking one up in the
-	 * array costs less than looking the process up in the hash map. */
-	__u32 *flags = bpf_map_lookup_elem(&calls, &nr);
-	if (!flags || !(*flags & TRACE))
+	if (!bpf_map_lookup_elem(&traced, &tgid))
 		return 0;
-	return bpf_map_lookup_elem(&traced, &tgid) ? *flags : 0;
+	__u32 *flags = bpf_map_lookup_elem(&calls, &nr);
+	return flags && (*flags & TRACE) ? *flags : 0;
 }
 
 static __always_inline int is_stopping(void)
@@ -303,42 +283,31 @@ static __always_inline void output(struct record *rec)
 		__sync_fetch_and_add(lost, 1);
 }
 
-/* ctx[0] is the registers, ctx[1] the call's number. */
-SEC("raw_tracepoint/sys_enter")
-int sys_enter(__u64 *ctx)
+SEC("tracepoint/raw_syscalls/sys_enter")
+int sys_enter(struct sys_enter_args *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
-	__u32 tgid = id >> 32, tid = (__u32)id, nr = (__u32)ctx[1];
+	__u32 tgid = id >> 32, tid = (__u32)id, nr = (__u32)ctx->id;
 	if (!traced_call(tgid, nr) || is_stopping())
-		return 0;
-	__u64 regs[REGS_WORDS];
-	if (bpf_probe_read_kernel(regs, sizeof(regs), (const void *)(ctx[0] + REGS_AT)))
 		return 0;
 	struct call call = {
 		.ts = bpf_ktime_get_ns(),
-		.args = {regs[ARG0], regs[ARG1], regs[ARG2], regs[ARG3], regs[ARG4], regs[ARG5]},
 		.nr = nr,
 	};
+	for (int i = 0; i < 6; i++)
+		call.args[i] = ctx->args[i];
 	bpf_map_update_elem(&inflight, &tid, &call, BPF_ANY);
 	return 0;
 }
 
-/* ctx[0] is the registers, ctx[1] the call's result. */
-SEC("raw_tracepoint/sys_exit")
-int sys_exit(__u64 *ctx)
+SEC("tracepoint/raw_syscalls/sys_exit")
+int sys_exit(struct sys_exit_args *ctx)
 {
 	__u64 id = bpf_get_current_pid_tgid();
-	__u32 tgid = id >> 32, tid = (__u32)id;
-	/* The process first here: the call's number takes a read of the registers. */
-	if (!bpf_map_lookup_elem(&traced, &tgid))
+	__u32 tgid = id >> 32, tid = (__u32)id, nr = (__u32)ctx->id;
+	__u32 flags = traced_call(tgid, nr);
+	if (!flags)
 		return 0;
-	__u32 nr;
-	if (bpf_probe_read_kernel(&nr, sizeof(nr), (const void *)(ctx[0] + NR_AT)))
-		return 0;
-	__u32 *call_flags = bpf_map_lookup_elem(&calls, &nr);
-	if (!call_flags || !(*call_flags & TRACE))
-		return 0;
-	__u32 flags = *call_flags;
 	__u32 zero = 0;
 	struct record *rec = bpf_map_lookup_elem(&scratch, &zero);
 	if (!rec)
@@ -346,7 +315,7 @@ int sys_exit(__u64 *ctx)
 	/* The record's place in time, taken before it is written: the reader relies on a record
 	 * reaching the ring within moments of this. */
 	rec->ts = bpf_ktime_get_ns();
-	rec->ret = (__s64)ctx[1];
+	rec->ret = ctx->ret;
 	rec->pid = tgid;
 	rec->tid = tid;
 	rec->nr = nr;

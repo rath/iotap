@@ -313,8 +313,7 @@ that system's numbers for errors, address families and flags.
 
 1. On macOS, iotap configures kdebug to record BSD syscalls, file-system path lookups and process
    exits, and only for the traced processes. On Linux, it loads its eBPF program onto the
-   kernel's syscall entry and exit tracepoints, attached raw, which adds least to the syscalls of
-   the processes it does not trace, and, from Linux 6.16, onto its process exit tracepoint.
+   kernel's syscall entry and exit tracepoints and, from Linux 6.16, its process exit tracepoint.
    The program pairs the entry and return of each call of a traced process in the kernel, and
    writes one record per call to a ring buffer, with the path, socket address or pair of new
    descriptors the call took, read from the process's memory as the call returns.

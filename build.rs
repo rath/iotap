@@ -31,16 +31,9 @@ fn program() {
     };
     let object = PathBuf::from(out).join("iotap.bpf.o");
     let clang = env::var_os("CLANG").unwrap_or_else(|| "clang".into());
-    // The program reads a syscall's arguments from the registers where the target keeps them.
-    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("x86_64") => "-D__TARGET_ARCH_x86",
-        Ok("aarch64") => "-D__TARGET_ARCH_arm64",
-        other => panic!("iotap's eBPF program supports x86_64 and aarch64, not {other:?}"),
-    };
     // -g gives the object the BTF that describes its maps to libbpf.
     let status = Command::new(&clang)
         .args(["-O2", "-g", "-target", "bpfel", "-Wall", "-Wextra", "-Werror"])
-        .arg(arch)
         .args(["-c", "bpf/iotap.bpf.c", "-o"])
         .arg(&object)
         .status();
