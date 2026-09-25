@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::session::Input;
-use crate::sys::proc;
+use crate::sys::proc::{self, ProcInfo};
 use crate::sys::time;
 use crate::target::{self, Tracked};
 use crate::trace::Records;
@@ -162,8 +162,9 @@ struct Watch {
     tracked: Vec<Tracked>,
     follow: Vec<String>,
     own_pid: i32,
-    /// Start times of processes already checked against `follow`.
-    seen: HashMap<i32, (u64, u64)>,
+    /// Start times and names of processes already checked against `follow`. exec renames a
+    /// process without starting it anew, and the new name may be one to follow.
+    seen: HashMap<i32, ((u64, u64), String)>,
 }
 
 impl Watch {
@@ -177,7 +178,7 @@ impl Watch {
         if !watch.follow.is_empty() {
             // Processes running now were matched at startup; only later ones are new.
             for process in target::all_processes(watch.own_pid) {
-                watch.seen.insert(process.pid, process.start);
+                watch.seen.insert(process.pid, (process.start, process.name));
             }
         }
         watch
@@ -231,7 +232,7 @@ impl Watch {
                 continue;
             }
             let Some(info) = proc::info(pid) else { continue };
-            if self.seen.insert(pid, info.start) == Some(info.start) {
+            if !self.first_sight(&info) {
                 continue;
             }
             let exe = proc::exe_path(pid);
@@ -251,6 +252,18 @@ impl Watch {
                 };
                 inputs.push(Input::Attached(process.process()));
                 self.tracked.push(process);
+            }
+        }
+    }
+
+    /// Notes the process `info` describes. False when it was checked before under the same
+    /// name; true when it is new, or exec has renamed it since.
+    fn first_sight(&mut self, info: &ProcInfo) -> bool {
+        match self.seen.get(&info.pid) {
+            Some((start, name)) if *start == info.start && *name == info.name => false,
+            _ => {
+                self.seen.insert(info.pid, (info.start, info.name.clone()));
+                true
             }
         }
     }
@@ -441,6 +454,23 @@ mod tests {
             tracer.added
         );
         assert_eq!(tracer.removed, [i32::MAX], "only the process that is gone");
+    }
+
+    #[test]
+    fn a_process_renamed_by_exec_is_checked_again() {
+        let mut watch = Watch::new(Vec::new(), &config(Duration::ZERO));
+        let process = |name: &str, start: u64| ProcInfo {
+            pid: 70,
+            name: name.into(),
+            start: (start, 0),
+        };
+        assert!(watch.first_sight(&process("sh", 5)));
+        assert!(!watch.first_sight(&process("sh", 5)), "checked already");
+        // exec keeps the process and its start time, and names it after the new program.
+        assert!(watch.first_sight(&process("python3", 5)));
+        assert!(!watch.first_sight(&process("python3", 5)));
+        // A later process given the same pid.
+        assert!(watch.first_sight(&process("python3", 6)));
     }
 
     #[test]
