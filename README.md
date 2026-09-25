@@ -286,9 +286,10 @@ that system's numbers for errors, address families and flags.
   trace does not show, as by exec for a close-on-exec descriptor, can still leave a lookup naming
   a later descriptor.
 - **Children.** Forked children are not traced. A name target picks up processes that start with
-  that name, or take it by exec, within 250 ms and misses their first calls under it. A process
-  that gives itself the name in `argv[0]` later, as Node.js programs do through `process.title`,
-  is picked up only if it does so within two seconds of starting or of its latest exec.
+  that name, or take it by exec, within 250 ms and misses their first calls under it. On macOS, a
+  process that gives itself the name in `argv[0]` later, as Node.js programs do through
+  `process.title`, is picked up only if it does so within two seconds of starting or of its latest
+  exec. On Linux such programs rename the process too, which iotap notices whenever it happens.
 - **exec, on macOS.** exec gives a process a new kernel identity without the trace flag. iotap
   flags the process again within 250 ms and misses the calls in between. On Linux tracing goes on
   through exec.
