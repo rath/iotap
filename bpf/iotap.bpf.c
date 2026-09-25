@@ -78,9 +78,9 @@ static __u64 (*bpf_ringbuf_query)(void *ringbuf, __u64 flags) = (void *)134;
 
 /*
  * The tracepoints' records, after their common 8-byte header. The raw tracepoints, which pass
- * the registers instead, were tried on Linux 7.0 on arm64 in September 2026: with them a write
- * took 40-60% longer in a process iotap did not trace, and the programs stayed attached for
- * seconds after iotap was killed.
+ * the registers instead, were tried on Linux 7.0 on arm64 in September 2026: a call ran about
+ * 180 fewer instructions with them, but took as many cycles, and their programs stayed loaded
+ * for seconds after iotap was killed.
  */
 struct sys_enter_args {
 	__u64 common;
