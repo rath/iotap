@@ -2,7 +2,7 @@
 name = "iotap"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 description = "Trace the file and network I/O of processes, through kdebug on macOS and eBPF on Linux"
 license = "MIT"
 publish = false

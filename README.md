@@ -95,7 +95,7 @@ What iotap does with that access is deliberately narrow:
 - macOS, or Linux 5.8 or later on 64-bit Arm or x86-64 with BPF and syscall tracepoints, as
   distribution kernels have them. Tracing needs root, so run iotap with `sudo` (see
   [Why it needs root](#why-it-needs-root)); replaying a recording does not.
-- To build: Rust 1.97.1, which `rust-toolchain.toml` selects, and
+- To build: Rust 1.98.1, which `rust-toolchain.toml` selects, and
   - on macOS, the Xcode Command Line Tools, for the small C file that reads descriptor details
     from libproc;
   - on Linux, clang for the eBPF program, and what the libbpf bundled with libbpf-rs needs to

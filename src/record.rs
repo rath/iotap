@@ -467,12 +467,10 @@ fn kdebug_records(payload: &[u8]) -> Result<Vec<KdBuf>, String> {
         ));
     }
     Ok(payload
-        .chunks_exact(KdBuf::SIZE)
-        .map(|chunk| {
-            let mut bytes = [0u8; KdBuf::SIZE];
-            bytes.copy_from_slice(chunk);
-            KdBuf::from_le_bytes(&bytes)
-        })
+        .as_chunks::<{ KdBuf::SIZE }>()
+        .0
+        .iter()
+        .map(KdBuf::from_le_bytes)
         .collect())
 }
 
