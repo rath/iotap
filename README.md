@@ -383,6 +383,13 @@ streams laid out the way XNU and iotap's eBPF program write them, but they canno
 kernel interface itself. After changing `src/sys/`, `src/reader.rs`, a syscall table, `csrc/` or
 `bpf/`, run the checks for each system the change affects.
 
+`scripts/live/run.py` runs them and judges every expectation, printing PASS or FAIL; given check
+numbers, it runs only those. Build with `cargo build --release`, then start it in a terminal
+where `sudo -v` has been answered: each root step uses `sudo -n`, and the run ends with
+`sudo -k`. On macOS, `open -a Terminal scripts/live/macos.command` asks sudo and runs it in a
+window of its own, where sudo can use Touch ID. Its outputs go to `target/live/`. The terminal UI
+checks need Python's pyte package, and the host-name checks a connection to the Internet.
+
 ### macOS
 
 1. **Writes to a file.** Run `yes > /dev/null &` and then `sudo ./target/release/iotap $!`. Expect
@@ -415,6 +422,12 @@ kernel interface itself. After changing `src/sys/`, `src/reader.rs`, a syscall t
     server's host name in place of its address in the summary and in the Network and Events tabs,
     the address and the name in the details panel, and `n` switching between names and
     addresses.
+11. **Calls and targets.** Trace a program that opens files through links, along long paths and
+    relative to other directories, and one that makes known calls on files, a pipe and TCP, UDP
+    and Unix-domain sockets, such as `lab` and `workload` in `scripts/live/programs.py`. Expect
+    every file under the path the kernel gives its descriptor (`F_GETPATH`), every call with its
+    size, and no socket with a wrong end. A socket closed at once may lack its ends, as
+    [Limitations](#limitations) says.
 
 ### Linux
 

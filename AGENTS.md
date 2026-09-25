@@ -24,6 +24,11 @@ to stable releases.
 On Linux the build compiles `bpf/iotap.bpf.c` with clang (`CLANG` names another compiler), and
 libbpf-rs builds its bundled libbpf, which needs the libelf and zlib development files.
 
+The Python scripts under `scripts/` run on Python 3.9, which macOS ships, and later, and pass
+`ruff check scripts && ruff format --check scripts` with the settings in `ruff.toml`. ruff holds
+them to the syntax of 3.9 but not to its library; `uvx vermin --target=3.9- --violations scripts`
+checks both.
+
 ## Rules
 
 - Tracing needs root (`sudo`). Only one process can own kdebug at a time; iotap must always
@@ -43,32 +48,36 @@ libbpf-rs builds its bundled libbpf, which needs the libelf and zlib development
   with `trace::kdebug::synth` and `trace::linux::synth`, the TUI by rendering into ratatui's
   `TestBackend`. After changing anything under `src/sys/`, `src/reader.rs`, the syscall tables,
   `csrc/` or `bpf/`, run the root-only checks in README.md ("Checking against a live kernel") on
-  each system the change affects, and say which ones you ran.
+  each system the change affects, as "Running the live checks" says, and say which ones you ran.
 
 ## Running the live checks
 
-The checks in README.md need root, which only the user gives, once for each run. Never ask for
-the password or use it if the user offers it, never add a `NOPASSWD` rule, and never get root
-another way, such as through the docker group. sudo remembers an approval only for the terminal
-it was given in, so a run is one script that runs in that terminal: every root step uses
-`sudo -n`, which fails rather than asks, and the script ends with `sudo -k`. It prints a PASS or
-FAIL line for each expectation it can test, and keeps every output in files to read afterwards.
+`scripts/live/run.py` runs the checks in README.md for the system it runs on, prints PASS or FAIL
+for each expectation and a tally at the end, and exits with 0 only when every expectation held.
+`run.py 3 8` runs only those checks, and `--list` names them. It checks `target/release/iotap`,
+so build that first, and writes every output to `target/live/`, the verdicts to
+`target/live/run.log` as well.
+
+The checks need root, which only the user gives, once for each run. Never ask for the password
+or use it if the user offers it, never add a `NOPASSWD` rule, and never get root another way,
+such as through the docker group. sudo remembers an approval only for the terminal it was given
+in, so run.py runs in that terminal: every root step uses `sudo -n`, which fails rather than
+asks, and the run ends with `sudo -k`.
 
 - **macOS.** sudo cannot use Touch ID inside tmux, and an agent's shell cannot answer it at all,
-  so the run opens a terminal of its own. Make the script an executable `.command` file that
-  begins with `sudo -v` and creates a marker file as its last step, and start it with
-  `open -a Terminal run.command`. In the new window the user answers the prompt, with Touch ID
-  where `/etc/pam.d/sudo_local` enables `pam_tid.so`, or else with the password, which the agent
-  never sees. Wait by testing for the marker in a loop, not by following the log with
-  `tail -f | grep`, which can outlive the run. Before a run, make sure no `iotap`, `fs_usage` or
-  `ktrace` is running, as kdebug has one owner at a time; if the user's own is, ask them to quit
-  it.
+  so the run opens a terminal of its own: `open -a Terminal scripts/live/macos.command`. In its
+  window the user answers sudo, with Touch ID where `/etc/pam.d/sudo_local` enables `pam_tid.so`,
+  or else with the password, which the agent never sees. `target/live/done` then holds the exit
+  status; wait for it by testing for the file in a loop, not by following the log with
+  `tail -f | grep`, which can outlive the run. run.py will not start while an `iotap`,
+  `fs_usage` or `ktrace` runs, as kdebug has one owner at a time: ask the user to quit theirs,
+  and not to copy anything during the run, since the terminal UI check uses the pasteboard.
 - **Linux.** Before each run the user runs `sudo -v` in pane 0.0 of a tmux session named `iotap`
-  (`tmux new -s iotap`, `sudo -v`, then detach). The script stops unless `sudo -n true`
-  succeeds, and the agent types it into that pane and waits for it:
+  (`tmux new -s iotap`, `sudo -v`, then detach), and the agent types the run into that pane and
+  waits for it:
 
   ```
-  tmux send-keys -t iotap:0.0 'bash ~/iotap-run/run.sh > ~/iotap-run/run.out 2>&1; tmux wait-for -S iotap-run' Enter
+  tmux send-keys -t iotap:0.0 'cd ~/work/iotap && python3 scripts/live/run.py; echo $? > target/live/done; tmux wait-for -S iotap-run' Enter
   timeout 1800 tmux wait-for iotap-run
   ```
 
@@ -78,33 +87,24 @@ FAIL line for each expectation it can test, and keeps every output in files to r
   `rsync -az --delete --exclude target --exclude .git ./ <host>:work/iotap/`. A command run
   through ssh may lack cargo on its `PATH`; `source ~/.cargo/env` first.
 
-When writing a run:
+The terminal UI checks need pyte for the Python that runs run.py, installed or on `PYTHONPATH`;
+without it they are skipped. When changing the scripts:
 
-- Try it without root first, through `--replay` of a recording from an earlier run, so that a
-  mistake in the script does not cost an approval.
-- Keep the run directory's path short: a Unix-domain socket path must stay under 104 bytes on
-  macOS and 108 on Linux, and agents' temporary directories come close.
-- Kill only the processes the run started, by the pids it saved, never by name with `pkill` or
-  `killall`: the user's own processes run on the same machine, their iotap among them. After
-  `f &`, `$!` is the pid of the subshell that runs the shell function `f`, so `f` should `exec`
-  a program whose pid matters.
-- A step that hangs can outlast sudo's timeout (five minutes on macOS), after which every later
-  `sudo -n` fails. Point `fs_usage` at one quiet process and stop it with INT, INT and TERM under
-  a time limit: a system-wide `fs_usage -w` under a flood once took minutes to stop after the
-  first INT.
-- Drive the terminal UI from a script run with `sudo -n`, so that no sudo stands between it and
-  iotap: it starts iotap in a pseudo-terminal, sends keys, and reads the screen through a
-  terminal emulator such as Python's pyte. ratatui can overwrite the left half of a wide
-  character, which a terminal clears whole but pyte's `Screen.display` fails on; render
-  `screen.buffer` instead. sudo drops `PYTHONPATH`, so pass it as
-  `sudo -n env PYTHONPATH=… python3 …`.
-- `y` in the terminal UI replaces the clipboard. Save the clipboard before the run and restore it
-  after, skip the copy check when it holds more than text, and ask the user not to copy anything
-  while the run goes on.
-- For a slow download from an address with a host name (checks 3 and 10), fetch
-  `https://proof.ovh.net/files/100Mb.dat` with `curl -4 --limit-rate 150k -o /dev/null`; its IPv6
-  address has no name. A UDP socket connected to any address and polled with `recv` and
-  `MSG_DONTWAIT` makes a network row for that address without sending a packet.
+- Try them without root first, so that a mistake costs no approval. A stand-in `sudo` early on
+  `PATH`, which runs its command as the caller and ignores `-n`, `-v` and `-k`, takes run.py
+  through every step with iotap failing, and tui.py runs as the user against a stand-in iotap
+  that replays a recording.
+- An expectation that something is absent must also require what shows that iotap ran, or a run
+  without root passes it.
+- Kill only processes the run started, by their pids, never by name with `pkill` or `killall`:
+  the user's own processes run on the same machine, their iotap among them.
+- Give every root step a time limit. A step that hangs can outlast sudo's timeout (five minutes
+  on macOS), after which every later `sudo -n` fails; a system-wide `fs_usage -w` under a flood
+  once took minutes to stop after its first SIGINT.
+- sudo passes a signal on only when it comes from outside its own process group, which is the
+  run's: send it from another group, or signal iotap from the root shell that started it.
+- Keep Unix-domain socket paths under 104 bytes on macOS and 108 on Linux; the traced programs'
+  files go to a short directory under `/tmp` for that.
 
 ## Module map
 
@@ -138,6 +138,7 @@ When writing a run:
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
+| `scripts/live/` | The live checks: `run.py` runs README.md's checks for this system with the user's sudo and judges each expectation; `macos.py`, `linux.py` and `shared.py` hold the checks, `harness.py` what they share, `tui.py` drives the terminal UI in a pseudo-terminal, `programs.py` holds programs for them to trace, and `macos.command` starts a run in Terminal.app |
 
 ## Commits
 
