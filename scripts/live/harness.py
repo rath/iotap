@@ -307,12 +307,6 @@ def traced_for(text):
     return float(m.group(1)) if m else None
 
 
-def written_calls(text):
-    """The file write calls the summary's totals count, or None."""
-    m = re.search(r"^  files +read .*, written .* \((\d+) calls?\)$", text, re.MULTILINE)
-    return int(m.group(1)) if m else None
-
-
 EVENT = re.compile(
     r"^(\d\d:\d\d:\d\d\.\d{6})\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+"
     r"(-|\d+\.\d{3} ms)  (.*)$"

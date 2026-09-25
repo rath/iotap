@@ -431,9 +431,10 @@ checks need Python's pyte package, and the host-name checks a connection to the 
    `sudo ./target/release/iotap curl`. Expect `tcp … -> <server>:443` rows, and a summary when
    curl exits.
 4. **Dropped records.** The kernel buffer holds at least 8192 records per CPU, whatever `--buffer`
-   asks for, so make iotap fall behind instead. While it traces the `yes` process, stop it with
-   `sudo kill -STOP <iotap pid>` and continue it two seconds later with `sudo kill -CONT`. Expect
-   the dropped-records notice, and tracing should go on.
+   asks for, so make iotap fall behind instead. While it traces the `yes` process and one waiting
+   to write, stop it with `sudo kill -STOP <iotap pid>` and continue it two seconds later with
+   `sudo kill -CONT`. Then kill `yes` and let the other process write a known number of times.
+   Expect the dropped-records notice, and tracing to go on and count every one of those writes.
 5. **Single owner.** While `sudo fs_usage` runs, iotap must fail with the "another tool … is using
    the kernel trace facility" error.
 6. **Release.** After iotap exits by Ctrl-C, by `--duration` or because the target exited,
@@ -487,11 +488,13 @@ loaded; iotap's are named `sys_enter`, `sys_exit`, from Linux 6.16 `process_exit
    the abstract namespace, a pipe and a UDP socket on `::1`, then keeps them open for a second.
    Expect `unix` rows with the path and with `@name`, a `udp [::1]:…` row, and a `pipe` row among
    the other descriptors.
-5. **Dropped records.** Trace `yes > /dev/null &` with `--buffer 1024`, stop iotap with
-   `kill -STOP` and continue it two seconds later. Expect the dropped-records notice, and tracing
-   should go on. Signal it from a root shell: where sudo runs commands in a pty, as Ubuntu's
-   does, a stopped command makes sudo stop its own process group, the script that started it
-   included.
+5. **Dropped records.** Trace `yes > /dev/null &` and a process waiting to write with
+   `--buffer 1024`, stop iotap with `kill -STOP` and continue it two seconds later. Then kill
+   `yes` and let the other process write a known number of times. Expect the dropped-records
+   notice, and tracing to go on and count every one of those writes: `yes` can make calls twice
+   as fast in one run as in another, so its own count cannot show what iotap missed. Signal iotap
+   from a root shell: where sudo runs commands in a pty, as Ubuntu's does, a stopped command
+   makes sudo stop its own process group, the script that started it included.
 6. **Release.** After iotap exits in any way, even by `sudo kill -KILL` while tracing with `-f`,
    `sudo bpftool prog show` must no longer list its programs.
 7. **Several at once.** Two iotap runs tracing the same process must both report all its calls.

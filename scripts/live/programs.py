@@ -16,13 +16,17 @@
     programs.py write PATH SIZE CHUNKS
                                    writes SIZE bytes to PATH in CHUNKS writes, half a second
                                    after it starts
+    programs.py paced DIR SIZE CHUNKS
+                                   writes SIZE bytes to DIR/paced in CHUNKS writes, 32 every
+                                   millisecond, then waits a minute
     programs.py family OUT DIR     a process tree, each member of which writes a file of its own
                                    in DIR: a child that runs from the start, and once tracing
                                    begins a child that starts a grandchild, a child that runs
                                    `write` by exec, and twenty children that write 100 bytes each
                                    to DIR/brief and end at once; writes the pids to OUT as JSON
 
-workload, lab and family create DIR/ready once set up, then wait for DIR/go before their I/O.
+workload, lab, family and paced create DIR/ready once set up, then wait for DIR/go before their
+I/O.
 """
 
 import fcntl
@@ -433,6 +437,19 @@ def write_later(path, size, chunks):
     write(path, size, chunks)
 
 
+def paced(directory, size, chunks):
+    """Writes too slowly for the records of its writes to fill a trace buffer, however small."""
+    ready_then_go(directory)
+    chunk = b"p" * (size // chunks)
+    with open(os.path.join(directory, "paced"), "wb", buffering=0) as f:
+        for n in range(chunks):
+            f.write(chunk)
+            if n % 32 == 31:
+                time.sleep(0.001)
+    # Traced until the check that started it stops it.
+    time.sleep(60)
+
+
 def forked(body):
     """Runs `body` in a child process; returns the child's pid."""
     pid = os.fork()
@@ -506,6 +523,8 @@ def main():
         home_writer(*args)
     elif name == "write":
         write_later(args[0], int(args[1]), int(args[2]))
+    elif name == "paced":
+        paced(args[0], int(args[1]), int(args[2]))
     elif name == "family":
         family(*args)
     else:

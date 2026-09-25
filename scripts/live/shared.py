@@ -22,10 +22,10 @@ from harness import (
     descendants,
     json_lines,
     renamer,
+    row,
     summary,
     traced_for,
     wait_for,
-    written_calls,
 )
 
 # A server with large test files, whose IPv4 address has a host name; its IPv6 address has none.
@@ -36,16 +36,36 @@ SLOW = "93.184.215.14"
 
 
 def dropped(run, *options):
-    """Stops iotap for two seconds from a root shell, so that the kernel drops records, and
-    compares how many calls it counted with a run that was not stopped."""
+    """Stops iotap for two seconds from a root shell while `yes` floods, so that the kernel drops
+    records, then kills `yes` and has a program write a known number of times, each of which
+    iotap must count. The flood's own count cannot show what iotap missed: `yes` can make calls
+    twice as fast in one run as in another, depending on the cores iotap's reader runs on."""
+    size, writes = 1 << 20, 4096
+    work = os.path.join(run.work, "dropped")
+    os.makedirs(work)
+    # As iotap names the file: macOS resolves /tmp to /private/tmp.
+    work = os.path.realpath(work)
     yes = run.start(["yes"])
-    time.sleep(0.5)
-    run.iotap("-q", "-d", "3", *options, yes.pid, stdout="base.out", stderr="base.err")
+    writer = run.start([sys.executable, PROGRAMS, "paced", work, size, writes], stderr="paced.err")
+    if not run.expect(
+        wait_for(lambda: os.path.exists(os.path.join(work, "ready")), 10), "the writer starts"
+    ):
+        return
     script = (
-        '"$1" -q -d 8 ' + " ".join(map(shlex.quote, options)) + ' "$2" > "$3" 2> "$4" &'
-        ' p=$!; sleep 1.5; kill -STOP "$p"; sleep 2; kill -CONT "$p"; wait "$p"'
+        '"$1" -q -d 8 ' + " ".join(map(shlex.quote, options)) + ' "$2" "$3" > "$4" 2> "$5" &'
+        ' p=$!; sleep 1.5; kill -STOP "$p"; sleep 2; kill -CONT "$p"; sleep 0.5;'
+        # Then only the writer's calls are traced, which come too slowly to fill any buffer.
+        ' kill "$2"; : > "$6"; wait "$p"'
     )
-    rc = run.root_shell(script, run.bin, yes.pid, run.file("stopped.out"), run.file("stopped.err"))
+    rc = run.root_shell(
+        script,
+        run.bin,
+        yes.pid,
+        writer.pid,
+        run.file("stopped.out"),
+        run.file("stopped.err"),
+        os.path.join(work, "go"),
+    )
     out, err = run.read("stopped.out"), run.read("stopped.err")
     run.expect("the kernel dropped trace records" in err, "the notice of dropped records")
     run.expect(
@@ -57,21 +77,12 @@ def dropped(run, *options):
         "tracing goes on to the end",
         f"exit status {rc}, traced for {seconds} s",
     )
-    base, base_seconds, calls = (
-        written_calls(run.read("base.out")),
-        traced_for(run.read("base.out")),
-        written_calls(out),
+    written = row(out, os.path.join(work, "paced"))
+    run.expect(
+        (written or ())[2:5] == ("1.0 MiB", str(writes), "0"),
+        f"all {writes} writes made after the loss are counted",
+        str(written),
     )
-    if base and base_seconds and calls:
-        rate = base / base_seconds
-        # Stopped for 2 of 8 s: more than 5 s worth of calls means counting went on afterwards.
-        run.expect(
-            calls >= rate * 5,
-            "calls are counted after the loss",
-            f"{calls} calls, {calls / rate:.1f} s worth at {rate:,.0f} a second",
-        )
-    else:
-        run.expect(False, "calls are counted after the loss", f"{base} {base_seconds} {calls}")
 
 
 def replay(run, workload):
