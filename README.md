@@ -1,11 +1,13 @@
 # iotap
 
-Trace the file and network I/O of macOS processes.
+Trace the file and network I/O of processes on macOS and Linux.
 
 Give iotap process IDs or names and it reports every read and write syscall those processes make:
 the descriptor, the size asked for and the size moved, the latency, and what the descriptor refers
-to, a file path or a socket endpoint. It reads the kernel trace facility (kdebug), the source
-`fs_usage` uses, so it needs no debugger, no code injection and no changes to the traced program.
+to, a file path or a socket endpoint. It reads what the kernel records of those calls: on macOS
+the kernel trace facility (kdebug), the source `fs_usage` uses, and on Linux a small eBPF program
+of iotap's own on the syscall tracepoints. So it needs no debugger, no code injection and no
+changes to the traced program.
 
 ```
 $ sudo iotap curl
@@ -37,9 +39,16 @@ Totals
 
 ## Requirements
 
-- macOS. Tracing needs root, so run iotap with `sudo`; replaying a recording does not.
-- To build: Rust 1.97.1, which `rust-toolchain.toml` selects, and the Xcode Command Line Tools
-  for the small C file that reads descriptor details from libproc.
+- macOS, or Linux 5.8 or later on 64-bit Arm or x86-64 with BPF and syscall tracepoints, as
+  distribution kernels have them. Tracing needs root, so run iotap with `sudo`; replaying a
+  recording does not.
+- To build: Rust 1.97.1, which `rust-toolchain.toml` selects, and
+  - on macOS, the Xcode Command Line Tools, for the small C file that reads descriptor details
+    from libproc;
+  - on Linux, clang for the eBPF program, and what the libbpf bundled with libbpf-rs needs to
+    build: make, pkg-config, a C compiler, and the libelf and zlib development files. On Debian
+    and Ubuntu that is `sudo apt install build-essential clang pkg-config libelf-dev zlib1g-dev`.
+    The binary links libelf and zlib.
 
 ## Build
 
@@ -58,6 +67,8 @@ iotap --replay <FILE> [OPTIONS]
 A TARGET is a process ID or a process name. A name matches every running process whose name or
 executable file name equals it, ignoring case, and iotap also traces processes started later under
 that name. At least one process must match when iotap starts. `-n` makes numeric targets names.
+On Linux a process's name is the one the kernel keeps, at most 15 characters, so a longer name
+matches only the executable's file name.
 
 ```
 sudo iotap 1234                        # one process
@@ -78,7 +89,7 @@ iotap --replay t.iotaprec              # the same output again, without root
 | `--files-only`, `--net-only` | Report one kind of I/O |
 | `-d`, `--duration SECS` | Stop after this many seconds |
 | `--top N` | Rows per table in the text summary; default 30 |
-| `--buffer RECORDS` | Kernel buffer size in 64-byte records; default 524288, which is 32 MiB |
+| `--buffer RECORDS` | Kernel buffer size in 64-byte records; default 524288, which is 32 MiB. On Linux the ring buffer takes as many bytes, rounded up to a power of two |
 | `--record FILE` | Also save the trace for `--replay` |
 | `--replay FILE` | Replay a saved trace through any output mode |
 
@@ -115,7 +126,8 @@ epoch.
 A `target` is `{"kind":"file","path":…}`, `{"kind":"socket","proto":…,"local":…,"remote":…}`
 with a `path` for Unix-domain sockets, `{"kind":"other","fd_type":…}` or `{"kind":"unknown"}`.
 A file `path` that starts with `…` is only the end of a longer path (see
-[Limitations](#limitations)). `resolved` says how iotap learned the target:
+[Limitations](#limitations)). An `errno` is the traced system's own number, which `error` names.
+`resolved` says how iotap learned the target:
 
 - **`traced`** means iotap saw the call that created the descriptor.
 - **`snapshot`** means the descriptor was already open when tracing of the process began.
@@ -184,84 +196,110 @@ For a file or a Unix-domain socket with a path, the panel also shows what the pa
 size, time since modification, permissions and owner. It reads this metadata with `lstat` each time
 it draws, never the contents, so a replay shows the file on the replaying machine.
 
-`y` copies in two ways at once:
+`y` copies in every way the system has:
 
 - **The terminal's clipboard (OSC 52).** This reaches the machine you sit at, even over SSH, in
   terminals that allow it: iTerm2 (once "Applications in terminal may access clipboard" is on),
   kitty, WezTerm, Ghostty and Alacritty. tmux passes it on with `set-clipboard on`. Terminal.app
   ignores it.
-- **The Mac's pasteboard.** `pbcopy` runs as the user who ran sudo, so it works in any terminal
-  on the Mac that iotap runs on.
+- **The Mac's pasteboard, on macOS.** `pbcopy` runs as the user who ran sudo, so it works in any
+  terminal on the Mac that iotap runs on.
 
-The status line reports what `pbcopy` did; a terminal never says whether it honoured OSC 52.
+On macOS the status line reports what `pbcopy` did. A terminal never says whether it honoured
+OSC 52, so on Linux the status line says only that the terminal was asked.
 
 ### Recordings
 
-`--record FILE` saves the raw kernel records together with every answer libproc gave and when it
-gave it, and `--replay FILE` feeds them through the same processing, so a replay reproduces the
-output of the live run in any output mode. A recording holds paths and addresses but no
-transferred data. It replays on the operating system it was made on, since its calls use that
-system's numbers for errors, address families and flags.
+`--record FILE` saves the raw kernel records together with every answer libproc or `/proc` gave
+and when it gave it, and `--replay FILE` feeds them through the same processing, so a replay
+reproduces the output of the live run in any output mode. A recording holds paths and addresses
+but no transferred data. It replays on the operating system it was made on, since its calls use
+that system's numbers for errors, address families and flags.
 
 ## How it works
 
-1. iotap configures kdebug to record BSD syscalls, file-system path lookups and process exits,
-   and only for the traced processes.
+1. On macOS, iotap configures kdebug to record BSD syscalls, file-system path lookups and process
+   exits, and only for the traced processes. On Linux, it loads its eBPF program onto the
+   kernel's syscall entry and exit tracepoints and, from Linux 6.16, its process exit tracepoint.
+   The program pairs the entry and return of each call of a traced process in the kernel, and
+   writes one record per call to a ring buffer, with the path, socket address or pair of new
+   descriptors the call took, read from the process's memory as the call returns.
 2. A reader thread drains the kernel buffer at least every 10 ms, so that descriptors can be looked
    up while they are still open. Every 250 ms it also checks the processes for exits, exec and new
-   processes with a traced name.
-3. The main thread pairs the entry and return record of each syscall, reassembles paths from the
-   lookup records, and tracks what each descriptor refers to. When a process is attached, its open
-   descriptors come from libproc; after that, the traced open, socket, connect, accept, dup, fcntl
-   and close calls keep the table current.
-4. libproc describes a descriptor as it is when asked, a few milliseconds after the traced call.
-   In between, the process may have closed it and received the same number for another one. So
-   an event whose target comes from libproc is held back until the trace has been read past the
-   moment libproc answered. If the trace shows the descriptor closed before then, the answer
-   described whatever held the number at that moment. It still stands when that was the same
-   file, which the kernel's lookups tell by the file's vnode; otherwise the event gets what the
-   trace alone knows. An event waits about 10 ms for this, at most about 100 ms, and longer only
-   while iotap lags behind the kernel.
-5. Processing after the reader depends only on the records and on libproc's answers, never on
-   the clock, which is why recordings replay exactly. Only the live terminal UI reads the clock,
-   for its elapsed time and its current second.
+   processes with a traced name. On Linux, calls that return on different processors reach the
+   ring buffer slightly out of order, so the reader holds each record until 5 ms after its call
+   returned and passes the records on in the order the calls returned.
+3. The main thread pairs the entry and return record of each syscall on macOS, reassembles paths
+   from the lookup records, and tracks what each descriptor refers to. When a process is attached,
+   its open descriptors come from libproc on macOS and from `/proc` on Linux; after that, the
+   traced open, socket, connect, accept, dup, fcntl and close calls keep the table current.
+4. libproc and `/proc` describe a descriptor as it is when asked, a few milliseconds after the
+   traced call. In between, the process may have closed it and received the same number for
+   another one. So an event whose target comes from such an answer is held back until the trace
+   has been read past the moment of the answer. If the trace shows the descriptor closed before
+   then, the answer described whatever held the number at that moment. It still stands when that
+   was the same file, which on macOS the kernel's lookups tell by the file's vnode; otherwise the
+   event gets what the trace alone knows. An event waits about 10 ms for this, at most about
+   100 ms, and longer only while iotap lags behind the kernel.
+5. Processing after the reader depends only on the records and on the answers of libproc or
+   `/proc`, never on the clock, which is why recordings replay exactly. Only the live terminal UI
+   reads the clock, for its elapsed time and its current second.
 
 ## Limitations
 
-- **One owner.** Only one program can use kdebug at a time. iotap cannot run alongside fs_usage,
-  ktrace, Instruments or tailspin.
+- **One owner, on macOS.** Only one program can use kdebug at a time. iotap cannot run alongside
+  fs_usage, ktrace, Instruments or tailspin. On Linux several iotap runs, and other eBPF tools,
+  can trace at once.
 - **Only syscalls.** Memory-mapped file I/O and I/O the kernel does on a process's behalf, such as
-  page-cache writeback, never appear.
-- **Unknown sizes.** `sendfile` returns its byte count through a pointer the trace does not carry,
-  and `sendmsg_x` and `recvmsg_x` return message counts, so iotap counts those calls without bytes.
-- **Stale lookups.** iotap discards a libproc answer when the trace shows the descriptor closed
-  before libproc answered, unless the number was by then held by a descriptor on the same file.
-  A descriptor closed in a way the trace does not show, as by exec for a close-on-exec
-  descriptor, can still leave a lookup naming a later descriptor.
-- **Children.** The kernel's trace flag is not inherited by forked children, so they are not
-  traced. A name target picks up new processes with that name within 250 ms and misses their
-  first calls.
-- **exec.** exec gives a process a new kernel identity without the trace flag. iotap flags the
-  process again within 250 ms and misses the calls in between.
+  page-cache writeback, never appear. On Linux neither does I/O submitted through io_uring, nor
+  data that `splice`, `tee` or `copy_file_range` move between descriptors.
+- **Unknown sizes.** On macOS, `sendfile` returns its byte count through a pointer the trace does
+  not carry, and `sendmsg_x` and `recvmsg_x` return message counts, so iotap counts those calls
+  without bytes. On Linux, `sendmmsg` and `recvmmsg` return message counts, and `sendfile` counts
+  as a write to its output descriptor.
+- **Stale lookups.** iotap discards an answer of libproc or `/proc` when the trace shows the
+  descriptor closed before the answer was given, unless the number was by then held by a
+  descriptor on the same file, which only macOS lets iotap tell. A descriptor closed in a way the
+  trace does not show, as by exec for a close-on-exec descriptor, can still leave a lookup naming
+  a later descriptor.
+- **Children.** Forked children are not traced. A name target picks up processes that start with
+  that name, or take it by exec, within 250 ms and misses their first calls under it.
+- **exec, on macOS.** exec gives a process a new kernel identity without the trace flag. iotap
+  flags the process again within 250 ms and misses the calls in between. On Linux tracing goes on
+  through exec.
 - **Short-lived sockets.** A socket closed before iotap could look it up shows only what the trace
   reveals: its protocol, such as `tcp ?`, the path of a Unix-domain connect, the protocol and
-  bound address of the socket it was accepted on, or just `socket`. Descriptors from
-  `socketpair` reach the process through memory, so iotap learns them only through libproc.
+  bound address of the socket it was accepted on, or just `socket`. On Linux the trace also
+  carries the address a connect named, so such a socket keeps its remote end, as in
+  `udp -> 127.0.0.53:53`. On macOS, descriptors from `socketpair` reach the process through
+  memory, so iotap learns them only through libproc.
 - **Dropped records.** Under heavy load the kernel buffer can overflow. iotap reports it and the
   totals undercount; a larger `--buffer` helps.
-- **Paths.** The kernel reports a path as it resolved it, after following symbolic links, and
-  before macOS 15.4 only its last 184 bytes. iotap takes the full name from libproc when the new
-  descriptor, or a later one on the same file, still holds its number by the time iotap asks.
-  Otherwise a relative path is joined to the working directory or the directory descriptor,
-  which is wrong after a link with a relative target other than `/etc`, `/tmp` and `/var`, and a
-  truncated path is shown as `…` followed by its end.
-- **Recording size.** A recording grows by about 64 bytes per kernel record.
+- **Paths.** The macOS kernel reports a path as it resolved it, after following symbolic links,
+  and before macOS 15.4 only its last 184 bytes. On Linux the program reads a path as the process
+  passed it. iotap takes the full name from libproc or `/proc` when the new descriptor, or on
+  macOS a later one on the same file, still holds its number by the time iotap asks. Otherwise a
+  relative path is joined to the working directory or the directory descriptor. On macOS that is
+  wrong after a link with a relative target other than `/etc`, `/tmp` and `/var`, and a truncated
+  path is shown as `…` followed by its end.
+- **32-bit processes, on Linux.** iotap knows the call numbers of 64-bit processes. A 32-bit
+  program numbers its calls differently, so its trace is misread; do not trace one.
+- **Exits, on Linux before 6.16.** Only from Linux 6.16 does the kernel tell the program when a
+  process's last thread exits. On older kernels iotap learns of an exit from its poll of `/proc`,
+  up to 250 ms later.
+- **Containers, on Linux.** The program knows processes by their IDs outside any PID namespace,
+  so run iotap on the host, where it traces processes in containers by those IDs.
+- **Recording size.** A recording grows by about 64 bytes per kernel record on macOS, and by
+  96 bytes plus the path or address it took per call on Linux.
 
 ## Checking against a live kernel
 
 The automated tests need no root. They cover everything after the kernel with synthetic record
-streams laid out the way XNU emits them, but they cannot exercise the kernel interface itself.
-After changing `src/sys/`, `src/reader.rs`, the syscall table or the C file, run these checks:
+streams laid out the way XNU and iotap's eBPF program write them, but they cannot exercise the
+kernel interface itself. After changing `src/sys/`, `src/reader.rs`, a syscall table, `csrc/` or
+`bpf/`, run the checks for each system the change affects.
+
+### macOS
 
 1. **Writes to a file.** Run `yes > /dev/null &` and then `sudo ./target/release/iotap $!`. Expect
    a stream of `write` lines to `/dev/null`, and after Ctrl-C a summary with one file row.
@@ -282,6 +320,46 @@ After changing `src/sys/`, `src/reader.rs`, the syscall table or the C file, run
    `iotap --json --replay t.iotaprec`. The replayed output must be identical to the live output.
 8. **Terminal UI.** Run `sudo ./target/release/iotap --tui $!` against the `yes` process. Try every
    key, then quit; the terminal must be restored and the summary printed.
+9. **Names.** While iotap traces a name, start a process that takes it by exec a second after it
+   starts, such as `sh -c 'sleep 1; exec ./mycat'` for a copy of `cat` named `mycat` that waits
+   for its input. Expect the "now tracing" notice for it.
+
+### Linux
+
+Run these on each processor the change affects. `bpftool prog show` lists the eBPF programs
+loaded; iotap's are named `sys_enter`, `sys_exit` and, from Linux 6.16, `process_exit`.
+
+1. **Root.** Without sudo, iotap must fail with "tracing with eBPF requires root".
+2. **Writes to a file.** Run
+   `sh -c 'sleep 1; exec dd if=/dev/zero of=/tmp/x bs=1M count=10 status=none' &` and trace `$!`
+   at once. Expect ten `write` lines of 1048576 bytes to `/tmp/x`, and a summary when dd exits.
+   dd is gone too soon for an exec notice; trace `sh -c 'sleep 1; exec sleep 1'` for one.
+3. **Network.** Serve a file with `python3 -m http.server 8000 --bind 127.0.0.1` and trace a
+   `curl -o /dev/null` of it. Expect `tcp 127.0.0.1:… -> 127.0.0.1:8000` rows whose received
+   bytes add up to more than the file's size.
+4. **Sockets and pipes.** Trace a program that talks over a Unix-domain socket with a path, one in
+   the abstract namespace, a pipe and a UDP socket on `::1`, then keeps them open for a second.
+   Expect `unix` rows with the path and with `@name`, a `udp [::1]:…` row, and a `pipe` row among
+   the other descriptors.
+5. **Dropped records.** Trace `yes > /dev/null &` with `--buffer 1024`, stop iotap with
+   `kill -STOP` and continue it two seconds later. Expect the dropped-records notice, and tracing
+   should go on. Signal it from a root shell: where sudo runs commands in a pty, as Ubuntu's
+   does, a stopped command makes sudo stop its own process group, the script that started it
+   included.
+6. **Release.** After iotap exits in any way, even by `sudo kill -KILL`, `sudo bpftool prog show`
+   must no longer list its programs.
+7. **Several at once.** Two iotap runs tracing the same process must both report all its calls.
+8. **A flood.** Record `yes > /dev/null` for three seconds and replay it with `--json`. No event
+   may lack its latency but for calls truly under way when tracing began, and the summary must
+   count none that were dropped.
+9. **Names.** Trace a name, then start a new process with that name and one that takes it by exec,
+   each blocked in a read for a second. Expect the "now tracing" notice for both, and their calls.
+10. **Short-lived connections.** Trace a program that connects UDP sockets to a local server and
+    closes each at once. Expect `udp -> 127.0.0.1:…` rows, not `udp ?`.
+11. **Calls under way.** Trace a process whose read began before iotap started and ends while it
+    runs, and one whose read begins while iotap runs and has not ended when it stops. The summary
+    must note one call that began before tracing, and with `--json` count one unfinished call.
+12. **Replay** and **terminal UI**, as on macOS.
 
 When scripting these checks, signal iotap itself, or send the signal from another process group.
 sudo does not pass on a signal that comes from its own process group, which is where `kill -INT $!`
