@@ -1,7 +1,8 @@
 //! The record format of iotap's Linux eBPF program (`bpf/iotap.bpf.c`): a record for each
 //! syscall of a traced process that returned, its entry and return put together in the kernel,
-//! and one for each traced process that exited. Loading the program and reading its ring buffer
-//! is up to `sys::ebpf`; everything here is plain data handling.
+//! one for each traced process that exited, and one for each process a traced one started when
+//! iotap follows child processes. Loading the program and reading its ring buffer is up to
+//! `sys::ebpf`; everything here is plain data handling.
 
 pub mod codes;
 pub mod order;
@@ -17,11 +18,15 @@ pub const HEADER: usize = 96;
 /// Most bytes the program reads from a caller's memory: a path of `PATH_MAX` bytes.
 pub const MEMORY_MAX: usize = 4096;
 
-// Kinds of records. The program writes calls and exits; the reader adds the rest.
+// Kinds of records. The program writes calls, exits and forks; the reader adds the rest.
 const KIND_CALL: u16 = 1;
 const KIND_EXIT: u16 = 2;
 const KIND_LOST: u16 = 3;
 const KIND_IN_PROGRESS: u16 = 4;
+const KIND_FORK: u16 = 5;
+/// What a fork's record holds in place of a result when the child could not be traced:
+/// `E2BIG` negated, which a full map gives.
+const FULL: i64 = -7;
 
 // What follows the fixed part of a call's record.
 const MEMORY_NOTHING: u8 = 0;
@@ -39,9 +44,10 @@ const MAX_ERRNO: i64 = 4095;
 /// One record, as the eBPF program or the reader writes it.
 ///
 /// Layout, little-endian: `ts` at 0, the call's `start_ns` at 8, its six arguments from 16 (a
-/// count in the first for lost and in-progress records), `ret` at 64, `pid` at 72, `tid` at 76,
-/// the call's number at 80, the kind at 84, the memory's length at 86 and its kind at 88,
-/// `dropped` at 92, then the memory itself.
+/// count in the first for lost and in-progress records, the child's pid for a fork), `ret` at
+/// 64 (for a fork, 0 once the child is traced), `pid` at 72, `tid` at 76, the call's number at
+/// 80, the kind at 84, the memory's length at 86 and its kind at 88, `dropped` at 92, then the
+/// memory itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     /// `CLOCK_MONOTONIC` nanoseconds when the call returned or the event happened. Records
@@ -59,6 +65,9 @@ pub enum Event {
     Call(RawCall),
     /// The last thread of process `pid` exited.
     Exit { pid: i32 },
+    /// Process `parent`, a traced one, started process `child`, which the program traces from
+    /// then on unless its map of traced processes was full.
+    Fork { parent: i32, child: i32, traced: bool },
     /// The ring buffer was full, and the program dropped `count` records before this point.
     Lost { count: u64 },
     /// Tracing stopped with `calls` calls of the traced processes still in progress.
@@ -145,6 +154,11 @@ impl Record {
             KIND_EXIT if memory.is_empty() => Event::Exit {
                 pid: u32_at(72).cast_signed(),
             },
+            KIND_FORK if memory.is_empty() => Event::Fork {
+                parent: u32_at(72).cast_signed(),
+                child: u32_at(16).cast_signed(),
+                traced: u64_at(64) == 0,
+            },
             KIND_LOST if memory.is_empty() => Event::Lost { count: u64_at(16) },
             KIND_IN_PROGRESS if memory.is_empty() => Event::InProgress { calls: u64_at(16) },
             _ => return None,
@@ -178,6 +192,16 @@ impl Record {
             Event::Exit { pid } => {
                 put(72, &pid.to_le_bytes());
                 (KIND_EXIT, Memory::Nothing.bytes())
+            }
+            Event::Fork {
+                parent,
+                child,
+                traced,
+            } => {
+                put(72, &parent.to_le_bytes());
+                put(16, &u64::from(child.cast_unsigned()).to_le_bytes());
+                put(64, &(if *traced { 0 } else { FULL }).to_le_bytes());
+                (KIND_FORK, Memory::Nothing.bytes())
             }
             Event::Lost { count } => {
                 put(16, &count.to_le_bytes());
@@ -275,6 +299,15 @@ impl Decode for Decoder {
         let traced = match &record.event {
             Event::Call(call) => Some(Traced::Call(self.completed(call, record.ts)?)),
             Event::Exit { pid } => Some(Traced::ProcExit { pid: *pid }),
+            Event::Fork {
+                parent,
+                child,
+                traced,
+            } => Some(Traced::Fork {
+                parent: *parent,
+                child: *child,
+                traced: *traced,
+            }),
             Event::Lost { .. } => Some(Traced::LostEvents),
             Event::InProgress { calls } => {
                 self.in_progress = *calls;
@@ -386,6 +419,16 @@ mod tests {
                 ret: -11,
                 ..Call::new(8, 70, "read", [0; 6])
             }),
+            synth.fork(70, 71),
+            Record {
+                ts: synth.now() + 1,
+                dropped: 0,
+                event: Event::Fork {
+                    parent: 70,
+                    child: 72,
+                    traced: false,
+                },
+            },
             synth.exit(70),
             synth.lost(12),
             Record {
@@ -522,9 +565,30 @@ mod tests {
     }
 
     #[test]
-    fn decodes_exits_losses_and_what_was_left_running() {
+    fn decodes_forks_exits_losses_and_what_was_left_running() {
         let mut synth = Synth::new(SYSTEM, 1_000, 10);
         let mut decoder = Decoder::new(SYSTEM);
+        assert_eq!(
+            decoder.decode(&synth.fork(70, 71)).unwrap().traced,
+            Some(Traced::Fork {
+                parent: 70,
+                child: 71,
+                traced: true
+            })
+        );
+        // The program writes the negated errno of a map that was full.
+        let mut bytes = Vec::new();
+        synth.fork(70, 72).write(&mut bytes);
+        bytes[64..72].copy_from_slice(&(-12_i64).to_le_bytes());
+        let (full, _) = Record::parse(&bytes).unwrap();
+        assert_eq!(
+            decoder.decode(&full).unwrap().traced,
+            Some(Traced::Fork {
+                parent: 70,
+                child: 72,
+                traced: false
+            })
+        );
         assert_eq!(
             decoder.decode(&synth.exit(70)).unwrap().traced,
             Some(Traced::ProcExit { pid: 70 })

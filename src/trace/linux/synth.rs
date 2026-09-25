@@ -98,6 +98,19 @@ impl Synth {
         ))
     }
 
+    /// `parent` started `child`, which the program traces from then on.
+    pub fn fork(&mut self, parent: i32, child: i32) -> Record {
+        Record {
+            ts: self.next(),
+            dropped: 0,
+            event: Event::Fork {
+                parent,
+                child,
+                traced: true,
+            },
+        }
+    }
+
     /// The last thread of `pid` exited.
     pub fn exit(&mut self, pid: i32) -> Record {
         Record {

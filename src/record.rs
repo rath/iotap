@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::model::Target;
-use crate::session::{Input, Process, SessionInfo};
+use crate::session::{Input, Process, SessionInfo, UntracedReason};
 use crate::trace::kdebug::KdBuf;
 use crate::trace::linux;
 use crate::trace::procs::{Described, ProcSource, Snapshot};
@@ -37,11 +37,28 @@ const TAG_SNAPSHOT: u8 = 7;
 const TAG_DESCRIBE: u8 = 8;
 const TAG_WATERMARK: u8 = 9;
 const TAG_LINUX_RECORDS: u8 = 10;
+const TAG_UNTRACED: u8 = 11;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
     info: SessionInfo,
     created_by: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AttachedFrame {
+    pid: i32,
+    name: String,
+    /// Absent from recordings made before iotap followed child processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UntracedFrame {
+    pid: i32,
+    parent: Option<i32>,
+    reason: UntracedReason,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,7 +145,22 @@ impl<W: Write> Recorder<W> {
                 }
                 self.frame(TAG_LINUX_RECORDS, &payload)
             }
-            Input::Attached(process) => self.json(TAG_ATTACHED, process),
+            Input::Attached { process, parent } => self.json(
+                TAG_ATTACHED,
+                &AttachedFrame {
+                    pid: process.pid,
+                    name: process.name.clone(),
+                    parent: *parent,
+                },
+            ),
+            Input::Untraced { pid, parent, reason } => self.json(
+                TAG_UNTRACED,
+                &UntracedFrame {
+                    pid: *pid,
+                    parent: *parent,
+                    reason: *reason,
+                },
+            ),
             Input::Exec { pid, path } => self.json(
                 TAG_EXEC,
                 &ExecFrame {
@@ -346,32 +378,6 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         let corrupt = |reason: String| ReplayError::Corrupt { index, tag, reason };
         match tag {
             TAG_HEADER => header = Some(json(&payload).map_err(corrupt)?),
-            TAG_KDEBUG_RECORDS => inputs.push(Input::Records(Records::Kdebug(
-                kdebug_records(&payload).map_err(corrupt)?,
-            ))),
-            TAG_LINUX_RECORDS => inputs.push(Input::Records(Records::Linux(
-                linux_records(&payload).map_err(corrupt)?,
-            ))),
-            TAG_ATTACHED => inputs.push(Input::Attached(json::<Process>(&payload).map_err(corrupt)?)),
-            TAG_EXEC => {
-                let frame: ExecFrame = json(&payload).map_err(corrupt)?;
-                inputs.push(Input::Exec {
-                    pid: frame.pid,
-                    path: frame.path,
-                });
-            }
-            TAG_EXITED => {
-                let frame: ExitedFrame = json(&payload).map_err(corrupt)?;
-                inputs.push(Input::Exited {
-                    pid: frame.pid,
-                    ticks: frame.ticks,
-                });
-            }
-            TAG_STOPPED => {
-                inputs.push(Input::Stopped {
-                    ticks: json::<StoppedFrame>(&payload).map_err(corrupt)?.ticks,
-                });
-            }
             TAG_SNAPSHOT => {
                 let frame: SnapshotFrame<Snapshot> = json(&payload).map_err(corrupt)?;
                 answers
@@ -391,11 +397,7 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
                         at: frame.at,
                     });
             }
-            TAG_WATERMARK => inputs.push(Input::Watermark {
-                ticks: json::<WatermarkFrame>(&payload).map_err(corrupt)?.ticks,
-            }),
-            // Frames from newer versions of the same layout are skipped.
-            _ => {}
+            _ => inputs.extend(input_frame(tag, &payload).map_err(corrupt)?),
         }
         index += 1;
     }
@@ -407,6 +409,54 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         answers,
         truncated,
     })
+}
+
+/// The reader input a frame of `tag` holds; `None` for a tag of no input, such as one a newer
+/// version of the same layout added, which is skipped.
+fn input_frame(tag: u8, payload: &[u8]) -> Result<Option<Input>, String> {
+    Ok(Some(match tag {
+        TAG_KDEBUG_RECORDS => Input::Records(Records::Kdebug(kdebug_records(payload)?)),
+        TAG_LINUX_RECORDS => Input::Records(Records::Linux(linux_records(payload)?)),
+        TAG_ATTACHED => {
+            let frame: AttachedFrame = json(payload)?;
+            Input::Attached {
+                process: Process {
+                    pid: frame.pid,
+                    name: frame.name,
+                },
+                parent: frame.parent,
+            }
+        }
+        TAG_UNTRACED => {
+            let frame: UntracedFrame = json(payload)?;
+            Input::Untraced {
+                pid: frame.pid,
+                parent: frame.parent,
+                reason: frame.reason,
+            }
+        }
+        TAG_EXEC => {
+            let frame: ExecFrame = json(payload)?;
+            Input::Exec {
+                pid: frame.pid,
+                path: frame.path,
+            }
+        }
+        TAG_EXITED => {
+            let frame: ExitedFrame = json(payload)?;
+            Input::Exited {
+                pid: frame.pid,
+                ticks: frame.ticks,
+            }
+        }
+        TAG_STOPPED => Input::Stopped {
+            ticks: json::<StoppedFrame>(payload)?.ticks,
+        },
+        TAG_WATERMARK => Input::Watermark {
+            ticks: json::<WatermarkFrame>(payload)?.ticks,
+        },
+        _ => return Ok(None),
+    }))
 }
 
 fn kdebug_records(payload: &[u8]) -> Result<Vec<KdBuf>, String> {
@@ -601,6 +651,47 @@ mod tests {
     }
 
     #[test]
+    fn attached_processes_keep_their_parent_and_untraced_ones_their_reason() {
+        let (info, _, _) = fixture();
+        let mut recorder = Recorder::new(Vec::new(), &info).unwrap();
+        let process = |pid: i32| Process {
+            pid,
+            name: "cc".into(),
+        };
+        let inputs = [
+            Input::Attached {
+                process: process(301),
+                parent: Some(300),
+            },
+            Input::Attached {
+                process: process(302),
+                parent: None,
+            },
+            Input::Untraced {
+                pid: 303,
+                parent: Some(300),
+                reason: UntracedReason::Ended,
+            },
+        ];
+        for input in &inputs {
+            recorder.input(input).unwrap();
+        }
+        let mut bytes = recorder.finish().unwrap();
+        // An attach frame from before iotap followed child processes.
+        let old = br#"{"pid":304,"name":"cc"}"#;
+        bytes.push(TAG_ATTACHED);
+        bytes.extend_from_slice(&u32::try_from(old.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(old);
+
+        let replay = parse(bytes.as_slice()).unwrap();
+        let old = Input::Attached {
+            process: process(304),
+            parent: None,
+        };
+        assert_eq!(replay.inputs, [&inputs[..], &[old]].concat());
+    }
+
+    #[test]
     fn truncated_recordings_keep_complete_frames() {
         let (info, _, inputs) = fixture();
         let mut recorder = Recorder::new(Vec::new(), &info).unwrap();
@@ -658,6 +749,7 @@ mod tests {
         let records = vec![
             synth.open(1, 300, "/tmp/out.html", 4),
             synth.io(1, 300, "write", 4, 10, 10),
+            synth.fork(300, 301),
             synth.lost(2),
             synth.exit(300),
         ];

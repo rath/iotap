@@ -66,15 +66,14 @@ pub enum Records {
 
 /// What the trace shows once records are put together.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "each lives from decoding a record to handling it; a box would cost an allocation per call"
-)]
 pub enum Traced {
     /// A syscall returned.
     Call(Completed),
     /// A process began to exit.
     ProcExit { pid: i32 },
+    /// Process `parent` started process `child`, which is `traced` from here on, unless iotap
+    /// was already tracing as many processes as it can.
+    Fork { parent: i32, child: i32, traced: bool },
     /// The kernel dropped records before this point because its buffer overflowed.
     LostEvents,
 }

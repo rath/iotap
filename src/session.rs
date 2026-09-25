@@ -49,12 +49,41 @@ pub struct SessionInfo {
     pub system: System,
 }
 
+/// Why a process that a traced one started is not traced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntracedReason {
+    /// It ended before iotap could begin to trace it, as a child can on macOS.
+    Ended,
+    /// iotap was tracing as many processes as it can.
+    Full,
+}
+
+/// Processes that traced ones started and that were not traced, by why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct UntracedChildren {
+    /// Ended before iotap could begin to trace them.
+    pub ended: u64,
+    /// Started while iotap was tracing as many processes as it can.
+    pub full: u64,
+}
+
 /// What the kernel reader delivers, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     Records(Records),
-    /// A newly started process matching a traced name is now traced too.
-    Attached(Process),
+    /// A process is now traced too: a newly started one matching a traced name, or one that
+    /// `parent`, a traced process, started. What it did before is not in the trace.
+    Attached {
+        process: Process,
+        parent: Option<i32>,
+    },
+    /// A process that `parent`, a traced process, started is not traced.
+    Untraced {
+        pid: i32,
+        parent: Option<i32>,
+        reason: UntracedReason,
+    },
     /// A traced process replaced its program image.
     Exec {
         pid: i32,
@@ -83,7 +112,17 @@ pub enum Notice {
     LostEvents {
         time_ns: u64,
     },
-    Attached(Process),
+    /// A process is now traced too; `parent` is set for one that a traced process started.
+    Attached {
+        process: Process,
+        parent: Option<i32>,
+    },
+    /// A process that a traced one started is not traced.
+    Untraced {
+        pid: i32,
+        parent: Option<i32>,
+        reason: UntracedReason,
+    },
     Exec {
         pid: i32,
         path: String,
@@ -137,6 +176,7 @@ pub struct Summary {
     pub unfinished_calls: u64,
     /// Calls whose START was not seen, mostly calls already blocked when tracing began.
     pub calls_started_before_trace: u64,
+    pub untraced_children: UntracedChildren,
     pub files: Vec<SummaryRow>,
     pub network: Vec<SummaryRow>,
     pub other: Vec<SummaryRow>,
@@ -204,6 +244,7 @@ pub struct Session {
     stats: Stats,
     processes: BTreeMap<i32, ProcessState>,
     lost_events: u64,
+    untraced: UntracedChildren,
     last_ticks: u64,
     stopped_ticks: Option<u64>,
     unknown: Arc<Target>,
@@ -227,6 +268,7 @@ impl Session {
             stats: Stats::default(),
             processes: BTreeMap::new(),
             lost_events: 0,
+            untraced: UntracedChildren::default(),
             last_ticks: info.anchor.ticks,
             stopped_ticks: None,
             unknown: Arc::new(Target::Unknown),
@@ -318,7 +360,7 @@ impl Session {
                     }
                 }
             }
-            Input::Attached(process) => {
+            Input::Attached { process, parent } => {
                 let alive = self.fds.attach(process.pid, src);
                 self.processes.insert(
                     process.pid,
@@ -327,8 +369,13 @@ impl Session {
                         alive,
                     },
                 );
-                self.hold(Held::Notice(Notice::Attached(process.clone())), sink)?;
+                let attached = Notice::Attached {
+                    process: process.clone(),
+                    parent: *parent,
+                };
+                self.hold(Held::Notice(attached), sink)?;
             }
+            Input::Untraced { pid, parent, reason } => self.untraced(*pid, *parent, *reason, sink)?,
             Input::Exec { pid, path } => {
                 if let Some(name) = path.rsplit('/').next().filter(|n| !n.is_empty())
                     && let Some(state) = self.processes.get_mut(pid)
@@ -389,6 +436,7 @@ impl Session {
             lost_events: self.lost_events,
             unfinished_calls: self.decoder.unfinished_calls(),
             calls_started_before_trace: self.decoder.calls_started_before_trace(),
+            untraced_children: self.untraced,
             files: self.stats.summary_rows(Category::File),
             network: self.stats.summary_rows(Category::Network),
             other: self.stats.summary_rows(Category::Other),
@@ -403,12 +451,59 @@ impl Session {
         match step.traced {
             Some(Traced::Call(done)) => self.completed(&done, src, sink)?,
             Some(Traced::ProcExit { pid }) => self.exited(pid, sink)?,
+            Some(Traced::Fork {
+                parent,
+                child,
+                traced: true,
+            }) => self.forked(parent, child, sink)?,
+            Some(Traced::Fork {
+                parent,
+                child,
+                traced: false,
+            }) => self.untraced(child, Some(parent), UntracedReason::Full, sink)?,
             Some(Traced::LostEvents) => self.lost(step.ts, src, sink)?,
             None => {}
         }
         // Every record up to this one has been seen now.
         self.fds.advance(step.ts);
         self.settle(sink)
+    }
+
+    /// Traces `child`, which `parent` has just started. Until it calls exec, the child runs its
+    /// parent's program, with a copy of its parent's descriptors.
+    fn forked(&mut self, parent: i32, child: i32, sink: &mut dyn Sink) -> io::Result<()> {
+        let name = self
+            .processes
+            .get(&parent)
+            .map_or_else(|| "?".to_owned(), |state| state.name.clone());
+        self.fds.fork(parent, child);
+        self.processes.insert(
+            child,
+            ProcessState {
+                name: name.clone(),
+                alive: true,
+            },
+        );
+        let attached = Notice::Attached {
+            process: Process { pid: child, name },
+            parent: Some(parent),
+        };
+        self.hold(Held::Notice(attached), sink)
+    }
+
+    /// Counts a process that a traced one started and that is not traced, and says so.
+    fn untraced(
+        &mut self,
+        pid: i32,
+        parent: Option<i32>,
+        reason: UntracedReason,
+        sink: &mut dyn Sink,
+    ) -> io::Result<()> {
+        match reason {
+            UntracedReason::Ended => self.untraced.ended += 1,
+            UntracedReason::Full => self.untraced.full += 1,
+        }
+        self.hold(Held::Notice(Notice::Untraced { pid, parent, reason }), sink)
     }
 
     /// Reloads the descriptor tables after the kernel dropped records before trace time `ts`,
@@ -755,16 +850,14 @@ mod tests {
         };
         // The close came before the answer, so the first send keeps what the trace knows.
         assert_eq!(shown(&sink), ["Some(10) tcp ?"]);
-        session
-            .handle(
-                &Input::Attached(Process {
-                    pid: 9,
-                    name: "late".into(),
-                }),
-                &mut src,
-                &mut sink,
-            )
-            .unwrap();
+        let late = Input::Attached {
+            process: Process {
+                pid: 9,
+                name: "late".into(),
+            },
+            parent: None,
+        };
+        session.handle(&late, &mut src, &mut sink).unwrap();
         assert!(sink.notices.is_empty(), "the notice waits behind the second send");
         session
             .handle(&Input::Watermark { ticks: 50_000 }, &mut src, &mut sink)
@@ -1062,6 +1155,100 @@ mod tests {
         assert!(session.all_exited());
     }
 
+    #[test]
+    fn a_child_is_traced_with_its_parents_descriptors() {
+        const CHILD: i32 = 777;
+        let mut src = procs();
+        let info = SessionInfo {
+            system: System::LinuxX86_64,
+            ..info()
+        };
+        let mut session = Session::new(info, Filter::ALL, &mut src);
+        let mut synth = LinuxSynth::new(System::LinuxX86_64, 2_000, 10);
+        let untraced = Record {
+            ts: synth.now() + 1,
+            dropped: 0,
+            event: Event::Fork {
+                parent: PID,
+                child: 778,
+                traced: false,
+            },
+        };
+        let records = vec![
+            synth.open(7, PID, "/srv/data.txt", 3),
+            untraced,
+            synth.fork(PID, CHILD),
+            synth.io(CHILD, CHILD, "read", 3, 4096, 1000),
+            synth.io(CHILD, CHILD, "write", 1, 12, 12),
+            synth.close(CHILD, CHILD, 3),
+            synth.open(CHILD, CHILD, "/srv/log.txt", 4),
+            synth.io(CHILD, CHILD, "write", 4, 3, 3),
+            synth.io(7, PID, "read", 3, 4096, 20),
+            synth.exit(CHILD),
+        ];
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Linux(records)), &mut src, &mut sink)
+            .unwrap();
+        let shown: Vec<String> = sink
+            .events
+            .iter()
+            .map(|e| format!("{} {} {:?} {}", e.pid, e.syscall, e.bytes, e.target))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "777 read Some(1000) /srv/data.txt",
+                "777 write Some(12) /dev/ttys001",
+                "777 write Some(3) /srv/log.txt",
+                "501 read Some(20) /srv/data.txt",
+            ]
+        );
+        let demo = |pid| Process {
+            pid,
+            name: "demo".into(),
+        };
+        assert_eq!(
+            sink.notices,
+            [
+                Notice::Untraced {
+                    pid: 778,
+                    parent: Some(PID),
+                    reason: UntracedReason::Full
+                },
+                Notice::Attached {
+                    process: demo(CHILD),
+                    parent: Some(PID)
+                },
+                Notice::Exited(demo(CHILD)),
+            ]
+        );
+        let summary = session.summary();
+        assert_eq!(summary.processes, [demo(PID), demo(CHILD)]);
+        assert_eq!(summary.untraced_children, UntracedChildren { ended: 0, full: 1 });
+        assert!(!session.all_exited(), "the parent runs on");
+    }
+
+    #[test]
+    fn untraced_children_are_counted_by_why() {
+        let mut src = procs();
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut sink = Collect::default();
+        for pid in [600, 601] {
+            let untraced = Input::Untraced {
+                pid,
+                parent: None,
+                reason: UntracedReason::Ended,
+            };
+            session.handle(&untraced, &mut src, &mut sink).unwrap();
+        }
+        assert_eq!(sink.notices.len(), 2);
+        assert_eq!(
+            session.summary().untraced_children,
+            UntracedChildren { ended: 2, full: 0 }
+        );
+    }
+
     /// Linux records whose numbers are Linux's own.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1138,9 +1325,11 @@ mod tests {
             pid: 777,
             name: "demo".into(),
         };
-        session
-            .handle(&Input::Attached(child.clone()), &mut src, &mut sink)
-            .unwrap();
+        let attached = Input::Attached {
+            process: child.clone(),
+            parent: Some(PID),
+        };
+        session.handle(&attached, &mut src, &mut sink).unwrap();
         session
             .handle(
                 &Input::Exec {
@@ -1152,7 +1341,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.process_name(PID), Some("other"));
-        assert_eq!(sink.notices[0], Notice::Attached(child));
+        assert_eq!(
+            sink.notices[0],
+            Notice::Attached {
+                process: child,
+                parent: Some(PID)
+            }
+        );
         assert!(!session.all_exited());
         session
             .handle(&Input::Exited { pid: 777, ticks: 0 }, &mut src, &mut Discard)

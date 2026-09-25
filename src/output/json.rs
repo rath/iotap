@@ -1,7 +1,7 @@
 //! JSON Lines output: one object per line, each with a `type` field.
 //!
-//! Types: `start` (once), `event` (one per call), `lost_events`, `attached`, `exec`, `exited`,
-//! and `summary` (last). Times are nanoseconds since the Unix epoch.
+//! Types: `start` (once), `event` (one per call), `lost_events`, `attached`, `untraced`, `exec`,
+//! `exited`, and `summary` (last). Times are nanoseconds since the Unix epoch.
 
 use std::borrow::Cow;
 use std::io::{self, Write};
@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use serde::Serialize;
 
 use crate::model::{Dir, IoEvent, Op, Provenance, Target, errno_name};
-use crate::session::{Notice, Process, SessionInfo, Sink, Summary};
+use crate::session::{Notice, Process, SessionInfo, Sink, Summary, UntracedReason};
 
 #[derive(Serialize)]
 struct Start<'a> {
@@ -43,10 +43,27 @@ struct Event<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum NoticeRecord<'a> {
-    LostEvents { time_ns: u64 },
-    Attached { pid: i32, name: &'a str },
-    Exec { pid: i32, path: &'a str },
-    Exited { pid: i32, name: &'a str },
+    LostEvents {
+        time_ns: u64,
+    },
+    Attached {
+        pid: i32,
+        name: &'a str,
+        parent: Option<i32>,
+    },
+    Untraced {
+        pid: i32,
+        parent: Option<i32>,
+        reason: UntracedReason,
+    },
+    Exec {
+        pid: i32,
+        path: &'a str,
+    },
+    Exited {
+        pid: i32,
+        name: &'a str,
+    },
 }
 
 #[derive(Serialize)]
@@ -124,9 +141,15 @@ impl<W: Write> Sink for JsonSink<W> {
     fn notice(&mut self, notice: &Notice) -> io::Result<()> {
         let record = match notice {
             Notice::LostEvents { time_ns } => NoticeRecord::LostEvents { time_ns: *time_ns },
-            Notice::Attached(process) => NoticeRecord::Attached {
+            Notice::Attached { process, parent } => NoticeRecord::Attached {
                 pid: process.pid,
                 name: &process.name,
+                parent: *parent,
+            },
+            Notice::Untraced { pid, parent, reason } => NoticeRecord::Untraced {
+                pid: *pid,
+                parent: *parent,
+                reason: *reason,
             },
             Notice::Exec { pid, path } => NoticeRecord::Exec { pid: *pid, path },
             Notice::Exited(process) => NoticeRecord::Exited {
@@ -186,6 +209,20 @@ mod tests {
             name: "dig".into(),
         }))
         .unwrap();
+        sink.notice(&Notice::Attached {
+            process: Process {
+                pid: 8,
+                name: "sh".into(),
+            },
+            parent: Some(7),
+        })
+        .unwrap();
+        sink.notice(&Notice::Untraced {
+            pid: 9,
+            parent: None,
+            reason: UntracedReason::Ended,
+        })
+        .unwrap();
         let out = lines(&sink.into_inner());
         assert_eq!(
             out[0],
@@ -198,6 +235,14 @@ mod tests {
             })
         );
         assert_eq!(out[1], json!({"type": "exited", "pid": 7, "name": "dig"}));
+        assert_eq!(
+            out[2],
+            json!({"type": "attached", "pid": 8, "name": "sh", "parent": 7})
+        );
+        assert_eq!(
+            out[3],
+            json!({"type": "untraced", "pid": 9, "parent": null, "reason": "ended"})
+        );
     }
 
     #[test]

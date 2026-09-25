@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 use super::{bytes, count, duration, latency};
 use crate::hosts::Hosts;
 use crate::model::{IoEvent, errno_name};
-use crate::session::{Filter, Notice, Sink, Summary};
+use crate::session::{Filter, Notice, Sink, Summary, UntracedReason};
 use crate::stats::SummaryRow;
 use crate::sys::time::LocalClock;
 
 /// Longest wait for the host names of the summary's network rows.
 const HOST_NAMES_WAIT: Duration = Duration::from_secs(2);
+/// Most processes the summary names; it counts the rest.
+const SUMMARY_PROCESSES: usize = 10;
 
 /// Writes one line per event; notices go to stderr so stdout stays a clean event stream.
 #[derive(Debug)]
@@ -86,7 +88,29 @@ pub fn notice_text(notice: &Notice, clock: &mut LocalClock) -> String {
             "{} the kernel dropped trace records because its buffer was full; totals are incomplete (try a larger --buffer)",
             clock.format(*time_ns)
         ),
-        Notice::Attached(process) => format!("now tracing {} ({})", process.pid, process.name),
+        Notice::Attached {
+            process,
+            parent: None,
+        } => format!("now tracing {} ({})", process.pid, process.name),
+        Notice::Attached {
+            process,
+            parent: Some(parent),
+        } => format!(
+            "now tracing {} ({}), a child of {parent}",
+            process.pid, process.name
+        ),
+        Notice::Untraced { pid, parent, reason } => {
+            let child = match parent {
+                Some(parent) => format!("{pid}, a child of {parent},"),
+                None => format!("{pid}, a child process,"),
+            };
+            match reason {
+                UntracedReason::Ended => format!("{child} ended before iotap could trace it"),
+                UntracedReason::Full => {
+                    format!("{child} is not traced: iotap is tracing as many processes as it can")
+                }
+            }
+        }
         Notice::Exec { pid, path } => format!("{pid} is now running {path}"),
         Notice::Exited(process) => format!("{} ({}) exited", process.pid, process.name),
     }
@@ -138,11 +162,16 @@ pub fn write_summary(
             .collect();
         hosts.look_up(&shown, Instant::now() + HOST_NAMES_WAIT);
     }
-    let processes: Vec<String> = summary
+    let mut processes: Vec<String> = summary
         .processes
         .iter()
+        .take(SUMMARY_PROCESSES)
         .map(|p| format!("{} ({})", p.pid, p.name))
         .collect();
+    if summary.processes.len() > SUMMARY_PROCESSES {
+        let more = summary.processes.len() - SUMMARY_PROCESSES;
+        processes.push(format!("and {more} more"));
+    }
     writeln!(out)?;
     writeln!(
         out,
@@ -205,7 +234,11 @@ pub fn write_summary(
         )?;
     }
     writeln!(out, "  {}, {} failed", count(t.events, "call"), t.errors)?;
+    write_gaps(out, summary)
+}
 
+/// Says what the trace is missing, if anything.
+fn write_gaps(out: &mut dyn Write, summary: &Summary) -> io::Result<()> {
     if summary.lost_events > 0 {
         writeln!(
             out,
@@ -220,7 +253,29 @@ pub fn write_summary(
             count(summary.calls_started_before_trace, "call")
         )?;
     }
+    let untraced = summary.untraced_children;
+    if untraced.full > 0 {
+        let (children, were) = children(untraced.full);
+        writeln!(
+            out,
+            "Warning: {children} {were} not traced, as iotap was tracing as many processes as it can."
+        )?;
+    }
+    if untraced.ended > 0 {
+        let (children, _) = children(untraced.ended);
+        let them = if untraced.ended == 1 { "it" } else { "them" };
+        writeln!(out, "Note: {children} ended before iotap could trace {them}.")?;
+    }
     Ok(())
+}
+
+/// `n child processes` and the verb that goes with it.
+fn children(n: u64) -> (String, &'static str) {
+    if n == 1 {
+        ("1 child process".to_owned(), "was")
+    } else {
+        (format!("{n} child processes"), "were")
+    }
 }
 
 /// Writes one table of targets; with `hosts`, sockets show the host names found for their
@@ -286,7 +341,7 @@ mod tests {
     use super::*;
     use crate::hosts::HostName;
     use crate::model::{Category, Endpoint, Op, Proto, Provenance, Target};
-    use crate::session::Process;
+    use crate::session::{Process, UntracedChildren};
     use crate::stats::Stats;
 
     /// A summary of reads from three servers: two with names, one without.
@@ -328,6 +383,7 @@ mod tests {
             lost_events: 0,
             unfinished_calls: 0,
             calls_started_before_trace: 0,
+            untraced_children: UntracedChildren::default(),
             files: Vec::new(),
             network: stats.summary_rows(Category::Network),
             other: Vec::new(),
@@ -338,6 +394,55 @@ mod tests {
         let mut out = Vec::new();
         write_summary(&mut out, summary, top, Filter::ALL, hosts).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn the_summary_names_ten_processes_and_counts_untraced_children() {
+        let mut summary = summary();
+        summary.processes = (1..=12)
+            .map(|pid| Process {
+                pid,
+                name: "cc".into(),
+            })
+            .collect();
+        summary.untraced_children = UntracedChildren { ended: 1, full: 2 };
+        let text = written(&summary, 30, None);
+        assert!(
+            text.contains("iotap summary: 1 (cc), 2 (cc), ")
+                && text.contains(", 10 (cc), and 2 more traced for 1.0 s\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\nWarning: 2 child processes were not traced, as iotap was tracing as many processes as it can.\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\nNote: 1 child process ended before iotap could trace it.\n"),
+            "{text}"
+        );
+        let mut clock = LocalClock::default();
+        let untraced = Notice::Untraced {
+            pid: 9,
+            parent: Some(7),
+            reason: UntracedReason::Ended,
+        };
+        assert_eq!(
+            notice_text(&untraced, &mut clock),
+            "9, a child of 7, ended before iotap could trace it"
+        );
+        let attached = Notice::Attached {
+            process: Process {
+                pid: 9,
+                name: "cc".into(),
+            },
+            parent: Some(7),
+        };
+        assert_eq!(
+            notice_text(&attached, &mut clock),
+            "now tracing 9 (cc), a child of 7"
+        );
     }
 
     #[test]

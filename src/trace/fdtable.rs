@@ -202,6 +202,33 @@ impl FdTable {
         self.procs.contains_key(&pid)
     }
 
+    /// Gives `child`, which `parent` has just started, a copy of its parent's descriptors and
+    /// working directory. A copy refers to the same open file as the original, so the answer an
+    /// original waits on settles its copy too. Descriptors of a parent the table does not know
+    /// are looked up when the child uses them.
+    pub fn fork(&mut self, parent: i32, child: i32) {
+        // Whatever an earlier process with the child's pid left behind.
+        self.detach(child);
+        let Some(from) = self.procs.get(&parent) else {
+            return;
+        };
+        let fds = from.fds.clone();
+        let cwd = from.cwd.clone();
+        for (&fd, entry) in &fds {
+            if let Some(answer) = entry.answer
+                && let Some(unconfirmed) = self.unconfirmed.get_mut(&answer)
+            {
+                unconfirmed.entries.push((child, fd));
+            }
+        }
+        let copy = ProcFds {
+            fds,
+            cwd,
+            misses: HashMap::new(),
+        };
+        self.procs.insert(child, copy);
+    }
+
     /// Target of `fd` at trace time `ts`, looking it up if the table does not know it.
     pub fn target(&mut self, pid: i32, fd: i32, ts: u64, src: &mut dyn ProcSource) -> Found {
         let due = self
@@ -1064,6 +1091,58 @@ mod tests {
             remote: remote.map(|r| r.parse().unwrap()),
             ..Endpoint::unresolved(Proto::Tcp)
         })
+    }
+
+    #[test]
+    fn a_child_gets_a_copy_of_its_parents_descriptors() {
+        const CHILD: i32 = 43;
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let tty = Snapshot {
+            fds: vec![(1, file("/dev/ttys001"))],
+            cwd: Some("/work".into()),
+        };
+        src.snapshots.insert(PID, tty);
+        assert!(table.attach(PID, &mut src));
+        // What an earlier process with the child's pid left behind goes.
+        let earlier = Snapshot {
+            fds: vec![(9, file("/earlier"))],
+            cwd: None,
+        };
+        src.snapshots.insert(CHILD, earlier);
+        assert!(table.attach(CHILD, &mut src));
+        // The name of fd 3 rests on an answer libproc gives at 100.
+        let answer = open_web2(&mut table, &mut src);
+        table.fork(PID, CHILD);
+        let copied = table.target(CHILD, 1, 4, &mut src);
+        assert_eq!(
+            (&*copied.target, copied.provenance, copied.answer),
+            (&file("/dev/ttys001"), Provenance::Snapshot, None)
+        );
+        let web2 = table.target(CHILD, 3, 4, &mut src);
+        assert_eq!(
+            (&*web2.target, web2.answer),
+            (&file("/usr/share/dict/web2"), Some(answer))
+        );
+        assert_eq!(*table.target(CHILD, 9, 4, &mut src).target, Target::Unknown);
+        // The child opens a file in the directory it inherited, and closes its copy of fd 1,
+        // which leaves the parent's alone.
+        let child = |call: Completed| Completed { pid: CHILD, ..call };
+        table.apply(&child(open_of(5, 6, "notes.txt", 0xb0, 4)), &mut src);
+        table.apply(&child(close_of(7, 8, 1)), &mut src);
+        assert_eq!(
+            *table.target(CHILD, 4, 9, &mut src).target,
+            file("/work/notes.txt")
+        );
+        assert_eq!(*table.target(CHILD, 1, 9, &mut src).target, Target::Unknown);
+        assert_eq!(target_of(&mut table, 1, 9, &mut src).0, file("/dev/ttys001"));
+        // Once the trace passes the answer, it holds for the copy too.
+        table.advance(101);
+        assert_eq!(table.take_verdicts(), [Verdict::Confirmed(answer)]);
+        assert_eq!(table.target(CHILD, 3, 102, &mut src).answer, None);
+        // A child of a process the table does not know has its descriptors looked up.
+        table.fork(7, 70);
+        assert!(!table.is_attached(70));
     }
 
     #[test]

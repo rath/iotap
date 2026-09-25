@@ -265,7 +265,10 @@ impl Watch {
                 continue;
             }
             if tracer.add_pid(pid).is_ok() {
-                inputs.push(Input::Attached(process.process()));
+                inputs.push(Input::Attached {
+                    process: process.process(),
+                    parent: None,
+                });
                 self.tracked.push(process);
             }
         }
@@ -513,7 +516,10 @@ mod tests {
         let mut tracer = Scripted::new([], None);
         let inputs = watch.poll(&mut tracer).unwrap();
         assert!(
-            matches!(&inputs[..], [Input::Attached(process)] if process.pid == sleeper.pid()),
+            matches!(
+                &inputs[..],
+                [Input::Attached { process, parent: None }] if process.pid == sleeper.pid()
+            ),
             "{inputs:?}"
         );
         assert_eq!(tracer.added, [sleeper.pid()]);
