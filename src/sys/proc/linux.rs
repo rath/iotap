@@ -2,6 +2,7 @@
 //! to.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt;
@@ -83,13 +84,12 @@ pub fn fds(pid: i32) -> Option<Vec<(i32, Target)>> {
             let entry = entry.ok()?;
             let fd = entry.file_name().to_str()?.parse().ok()?;
             // A descriptor closed since the listing is left out.
-            let target = fs::read_link(entry.path()).ok()?;
-            Some((fd, Link::parse(target.as_os_str().as_bytes())))
+            Some((fd, fd_link(&entry.path())?))
         })
         .collect();
     links.sort_unstable_by_key(|&(fd, _)| fd);
-    let inodes: HashSet<u64> = links.iter().filter_map(|(_, link)| link.socket()).collect();
-    let sockets = sockets(pid, &inodes);
+    let wanted: Vec<Socket> = links.iter().filter_map(|(_, link)| link.socket()).collect();
+    let sockets = sockets(pid, &wanted);
     Some(
         links
             .into_iter()
@@ -100,10 +100,67 @@ pub fn fds(pid: i32) -> Option<Vec<(i32, Target)>> {
 
 /// What `fd` of `pid` refers to now; `None` if it is not open.
 pub fn fd_target(pid: i32, fd: i32) -> Option<Target> {
-    let target = fs::read_link(format!("/proc/{pid}/fd/{fd}")).ok()?;
-    let link = Link::parse(target.as_os_str().as_bytes());
-    let inodes: HashSet<u64> = link.socket().into_iter().collect();
-    Some(link.target(&sockets(pid, &inodes)))
+    let link = fd_link(Path::new(&format!("/proc/{pid}/fd/{fd}")))?;
+    let wanted: Vec<Socket> = link.socket().into_iter().collect();
+    Some(link.target(&sockets(pid, &wanted)))
+}
+
+/// What the descriptor behind `path`, a link in `/proc/<pid>/fd`, refers to; `None` if it is
+/// not open.
+fn fd_link(path: &Path) -> Option<Link> {
+    let link = Link::parse(fs::read_link(path).ok()?.as_os_str().as_bytes());
+    let Link::Socket(socket) = link else {
+        return Some(link);
+    };
+    // The kernel's name for the socket's protocol tells which table lists the socket, so that
+    // only that one is read. The number may have been closed and reused meanwhile, so the name
+    // counts only while the link leads to the same socket.
+    let table = protocol_name(path).and_then(|name| table_of(&name));
+    let again = Link::parse(fs::read_link(path).ok()?.as_os_str().as_bytes());
+    Some(Link::Socket(match again {
+        Link::Socket(same) if same.inode == socket.inode => Socket { table, ..socket },
+        _ => socket,
+    }))
+}
+
+/// The kernel's name for the protocol of the socket behind `path`, such as `TCP` or
+/// `UNIX-STREAM`: the socket's `system.sockprotoname` attribute.
+fn protocol_name(path: &Path) -> Option<String> {
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // Protocol names are shorter than 32 bytes with their NUL.
+    let mut name = [0u8; 32];
+    // SAFETY: both strings end in NUL, and `name` is writable for the length given.
+    let len = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            c"system.sockprotoname".as_ptr(),
+            name.as_mut_ptr().cast(),
+            name.len(),
+        )
+    };
+    let name = name.get(..usize::try_from(len).ok()?)?;
+    let name = name.strip_suffix(&[0]).unwrap_or(name);
+    std::str::from_utf8(name).ok().map(str::to_owned)
+}
+
+/// Which of [`TABLES`] lists the sockets of the protocol the kernel calls `name`; `None` for a
+/// protocol no table lists, or one iotap does not know.
+fn table_of(name: &str) -> Option<usize> {
+    let table = match name {
+        "TCP" => "tcp",
+        "TCPv6" => "tcp6",
+        "UDP" => "udp",
+        "UDPv6" => "udp6",
+        "UNIX" | "UNIX-STREAM" => "unix",
+        "NETLINK" => "netlink",
+        "PING" => "icmp",
+        "PINGv6" => "icmp6",
+        "RAW" => "raw",
+        "RAWv6" => "raw6",
+        "PACKET" => "packet",
+        _ => return None,
+    };
+    TABLES.iter().position(|&(listed, _)| listed == table)
 }
 
 /// The fields of `/proc/<pid>/stat` iotap reads.
@@ -186,18 +243,26 @@ fn undeleted(path: String) -> String {
 #[derive(Debug, PartialEq, Eq)]
 enum Link {
     File(String),
-    /// A socket, by inode.
-    Socket(u64),
+    Socket(Socket),
     Other(FdType),
 }
 
+/// A socket, by inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Socket {
+    inode: u64,
+    /// Which of [`TABLES`] lists sockets of its protocol; `None` when that is not known.
+    table: Option<usize>,
+}
+
 impl Link {
+    /// What a link's text names. A socket's protocol is not in the text.
     fn parse(link: &[u8]) -> Self {
         if link.starts_with(b"/") {
             return Self::File(undeleted(String::from_utf8_lossy(link).into_owned()));
         }
         if let Some(inode) = bracketed(link, b"socket:") {
-            return Self::Socket(inode);
+            return Self::Socket(Socket { inode, table: None });
         }
         if link.starts_with(b"pipe:") {
             return Self::Other(FdType::Pipe);
@@ -208,9 +273,9 @@ impl Link {
         }
     }
 
-    fn socket(&self) -> Option<u64> {
+    fn socket(&self) -> Option<Socket> {
         match self {
-            Self::Socket(inode) => Some(*inode),
+            Self::Socket(socket) => Some(*socket),
             _ => None,
         }
     }
@@ -219,13 +284,13 @@ impl Link {
     fn target(self, sockets: &HashMap<u64, Endpoint>) -> Target {
         match self {
             Self::File(path) => Target::File { path },
-            // A socket of a family no table lists, such as vsock.
-            Self::Socket(inode) => Target::Socket(
-                sockets
-                    .get(&inode)
-                    .cloned()
-                    .unwrap_or_else(|| Endpoint::unresolved(Proto::Other)),
-            ),
+            // A socket no table lists: one of a family such as vsock, or one no table lists in
+            // its state, such as a TCP socket neither bound nor connected.
+            Self::Socket(socket) => {
+                Target::Socket(sockets.get(&socket.inode).cloned().unwrap_or_else(|| {
+                    Endpoint::unresolved(socket.table.map_or(Proto::Other, |table| TABLES[table].1.proto()))
+                }))
+            }
             Self::Other(fd_type) => Target::Other { fd_type },
         }
     }
@@ -263,12 +328,18 @@ fn anonymous(name: &[u8]) -> FdType {
     }
 }
 
-/// Endpoints of the sockets in `inodes`, from the tables of the network namespace `pid` is in.
-fn sockets(pid: i32, inodes: &HashSet<u64>) -> HashMap<u64, Endpoint> {
+/// Endpoints of the `wanted` sockets, from the tables of the network namespace `pid` is in:
+/// each looked for in the table of its protocol, or in every table when that is not known.
+/// Reading a table costs up to milliseconds, however few sockets it lists.
+fn sockets(pid: i32, wanted: &[Socket]) -> HashMap<u64, Endpoint> {
+    let inodes: HashSet<u64> = wanted.iter().map(|socket| socket.inode).collect();
     let mut found = HashMap::new();
-    for (name, layout) in TABLES {
-        if found.len() == inodes.len() {
-            break;
+    for (index, (name, layout)) in TABLES.into_iter().enumerate() {
+        let needed = wanted.iter().any(|socket| {
+            socket.table.is_none_or(|table| table == index) && !found.contains_key(&socket.inode)
+        });
+        if !needed {
+            continue;
         }
         let Ok(table) = fs::read(format!("/proc/{pid}/net/{name}")) else {
             continue;
@@ -301,6 +372,17 @@ enum Layout {
 }
 
 impl Layout {
+    /// The protocol of the sockets a table lists; a raw table's ICMP sockets aside.
+    fn proto(self) -> Proto {
+        match self {
+            Self::Inet(proto) => proto,
+            Self::Raw => Proto::Raw,
+            Self::Unix => Proto::Unix,
+            Self::Netlink => Proto::Netlink,
+            Self::Packet => Proto::Packet,
+        }
+    }
+
     /// The inode and endpoint of the socket a line describes.
     fn parse(self, line: &str) -> Option<(u64, Endpoint)> {
         let fields: Vec<&str> = line.split_ascii_whitespace().collect();
@@ -393,7 +475,7 @@ mod tests {
     use std::fs::File;
     use std::io;
     use std::net::{TcpListener, TcpStream, UdpSocket};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::Command;
     use std::sync::mpsc;
@@ -481,7 +563,13 @@ mod tests {
             Link::parse(b"/var/log/syslog (deleted)"),
             Link::File("/var/log/syslog".into())
         );
-        assert_eq!(Link::parse(b"socket:[5848718]"), Link::Socket(5_848_718));
+        assert_eq!(
+            Link::parse(b"socket:[5848718]"),
+            Link::Socket(Socket {
+                inode: 5_848_718,
+                table: None
+            })
+        );
         assert_eq!(Link::parse(b"pipe:[5848717]"), Link::Other(FdType::Pipe));
         for (link, fd_type) in [
             (&b"anon_inode:[eventfd]"[..], FdType::Eventfd),
@@ -494,6 +582,27 @@ mod tests {
             (b"net:[4026531840]", FdType::Other),
         ] {
             assert_eq!(Link::parse(link), Link::Other(fd_type), "{link:?}");
+        }
+    }
+
+    #[test]
+    fn protocol_names_lead_to_their_tables() {
+        let table = |name| table_of(name).map(|index| TABLES[index].0);
+        for (name, listed) in [
+            ("TCP", "tcp"),
+            ("TCPv6", "tcp6"),
+            ("UDPv6", "udp6"),
+            ("UNIX", "unix"),
+            ("UNIX-STREAM", "unix"),
+            ("NETLINK", "netlink"),
+            ("PINGv6", "icmp6"),
+            ("RAW", "raw"),
+            ("PACKET", "packet"),
+        ] {
+            assert_eq!(table(name), Some(listed), "{name}");
+        }
+        for unlisted in ["MPTCP", "AF_VSOCK", "UDP-Lite", "tcp"] {
+            assert_eq!(table(unlisted), None, "{unlisted}");
         }
     }
 
@@ -600,6 +709,7 @@ mod tests {
         // Both ends of a pair are unnamed; every socket shows up in one snapshot.
         let (a, b) = UnixStream::pair().unwrap();
         assert_eq!(socket(a.as_raw_fd()).path, None);
+        assert_eq!(socket(a.as_raw_fd()).proto, Proto::Unix);
         let all = fds(me()).unwrap();
         for fd in [client.as_raw_fd(), udp.as_raw_fd(), b.as_raw_fd()] {
             assert!(
@@ -608,5 +718,30 @@ mod tests {
                 "fd {fd}"
             );
         }
+    }
+
+    #[test]
+    fn sockets_are_looked_for_in_the_table_of_their_protocol() {
+        let socket_of = |fd: i32| match fd_link(Path::new(&format!("/proc/self/fd/{fd}"))) {
+            Some(Link::Socket(socket)) => socket.table.map(|index| TABLES[index].0),
+            other => panic!("{other:?}"),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let udp = UdpSocket::bind("[::1]:0").unwrap();
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(socket_of(listener.as_raw_fd()), Some("tcp"));
+        assert_eq!(socket_of(udp.as_raw_fd()), Some("udp6"));
+        assert_eq!(socket_of(a.as_raw_fd()), Some("unix"));
+
+        // A TCP socket neither bound nor connected is in no table, but its protocol is known.
+        // SAFETY: `socket` has no preconditions, and the descriptor it returns is owned here.
+        let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(raw >= 0);
+        // SAFETY: `raw` is an open descriptor that nothing else owns.
+        let unbound = unsafe { OwnedFd::from_raw_fd(raw) };
+        assert_eq!(
+            fd_target(me(), unbound.as_raw_fd()),
+            Some(Target::Socket(Endpoint::unresolved(Proto::Tcp)))
+        );
     }
 }
