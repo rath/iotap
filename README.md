@@ -65,8 +65,7 @@ can be told to log each one as it happens, with the process it came from, its ar
 result.
 
 - On macOS that log is the kernel trace facility, kdebug, the same source Apple's `fs_usage`
-  reads. It is built into the kernel, so nothing has to be installed and System Integrity
-  Protection stays on.
+  reads. It is built into the kernel, so nothing has to be installed.
 - On Linux, iotap loads a small eBPF program of its own onto the kernel's syscall tracepoints.
   The kernel verifies the program before running it and unloads it when iotap exits.
 
