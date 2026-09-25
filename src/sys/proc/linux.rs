@@ -543,14 +543,15 @@ mod tests {
             path: fs::canonicalize(&path).unwrap().to_string_lossy().into_owned(),
         };
         assert_eq!(fd_target(me(), fd), Some(expected.clone()));
-        assert!(fds(me()).unwrap().contains(&(fd, expected)));
+        assert!(fds(me()).unwrap().contains(&(fd, expected.clone())));
         fs::remove_file(&path).unwrap();
         assert!(
             matches!(fd_target(me(), fd), Some(Target::File { path: p }) if p.ends_with("/data.bin")),
             "an unlinked file keeps its name"
         );
         drop(file);
-        assert_eq!(fd_target(me(), fd), None);
+        // A test running alongside may be given the number at once, but never for this file.
+        assert_ne!(fd_target(me(), fd), Some(expected));
         fs::remove_dir_all(&dir).unwrap();
 
         let (read_end, _write_end) = io::pipe().unwrap();

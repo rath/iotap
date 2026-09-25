@@ -299,7 +299,11 @@ mod tests {
         assert!(list_fds(me()).unwrap().contains(&(fd, 1)));
         assert!(fd_socket(me(), fd).is_err());
         drop(file);
-        assert!(fd_path(me(), fd).is_err_and(|e| e != 0));
+        // A test running alongside may be given the number at once, but never for this file.
+        match fd_path(me(), fd) {
+            Ok(path) => assert_ne!(path, expected.to_string_lossy()),
+            Err(errno) => assert_ne!(errno, 0),
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
