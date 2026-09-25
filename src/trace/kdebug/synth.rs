@@ -144,6 +144,39 @@ impl Synth {
         self.record(0, codes::TRACE_LOST_EVENTS, [1, 0, 0, 0])
     }
 
+    /// Thread `creator` created thread `tid` of process `pid`; `exec` marks the thread of the
+    /// new image that exec creates.
+    pub fn new_thread(&mut self, creator: u64, tid: u64, pid: i32, exec: bool) -> KdBuf {
+        let args = [tid, i64::from(pid).cast_unsigned(), u64::from(exec), 0];
+        self.record(creator, codes::TRACE_DATA_NEWTHREAD, args)
+    }
+
+    /// Process `pid` ran exec, on thread `tid`.
+    pub fn exec(&mut self, tid: u64, pid: i32) -> KdBuf {
+        self.record(
+            tid,
+            codes::TRACE_DATA_EXEC,
+            [i64::from(pid).cast_unsigned(), 0, 0, 0],
+        )
+    }
+
+    /// Thread `tid` ended.
+    pub fn thread_terminate(&mut self, tid: u64) -> KdBuf {
+        self.record(tid, codes::TRACE_DATA_THREAD_TERMINATE, [tid, 0, 0, 0])
+    }
+
+    /// Thread `tid` of process `parent` starts process `child`, whose first thread is
+    /// `child_tid`, with `posix_spawn`, which runs exec in the child before it returns.
+    pub fn spawn(&mut self, tid: u64, parent: i32, child_tid: u64, child: i32) -> Vec<KdBuf> {
+        let number = codes::STARTS_PROCESSES[2];
+        vec![
+            self.syscall_start(tid, number, [0x1_6f00_0000, 0x1_0000_4000, 0, 0]),
+            self.new_thread(tid, child_tid, child, false),
+            self.exec(tid, child),
+            self.syscall_end(tid, number, parent, 0, [0, 0]),
+        ]
+    }
+
     /// A complete syscall returning `ret`, with `paths` looked up in between.
     pub fn call(&mut self, call: Call<'_>) -> Vec<KdBuf> {
         let mut out = vec![self.syscall_start(call.tid, call.number, call.args)];

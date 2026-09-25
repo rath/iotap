@@ -27,6 +27,15 @@ pub const VFS_LOOKUP: u32 = 0x0301_0090;
 pub const BSD_PROC_EXIT: u32 = 0x0401_0004;
 /// Inserted by the kernel where records were dropped because the buffer overflowed.
 pub const TRACE_LOST_EVENTS: u32 = 0x0702_0008;
+/// A thread was created: arg1 is its id, arg2 the pid of its process, arg3 1 for the thread of
+/// the new image that exec creates. The creating thread emits it, whatever the pid filter says.
+pub const TRACE_DATA_NEWTHREAD: u32 = 0x0700_0004;
+/// A process ran exec; arg1 is its pid. Emitted whatever the pid filter says.
+pub const TRACE_DATA_EXEC: u32 = 0x0700_0008;
+/// A thread ended; arg1 is its id.
+pub const TRACE_DATA_THREAD_TERMINATE: u32 = 0x0700_000c;
+/// The syscalls that start processes: `fork`, `vfork` and `posix_spawn`.
+pub const STARTS_PROCESSES: [u16; 3] = [2, 66, 244];
 /// Prefix shared by every BSD syscall record.
 pub const BSD_SYSCALL_PREFIX: u32 = 0x040c_0000;
 

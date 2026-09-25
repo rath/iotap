@@ -5,6 +5,7 @@
 pub mod codes;
 pub mod decode;
 pub mod pairing;
+pub mod spawns;
 pub mod synth;
 
 use std::mem::size_of;
