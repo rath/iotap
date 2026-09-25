@@ -35,8 +35,10 @@ libbpf-rs builds its bundled libbpf, which needs the libelf and zlib development
   reads or stores the data being transferred.
 - Everything downstream of the kernel reader is deterministic and driven by trace timestamps, never
   by wall-clock time, so recordings replay to identical output. The one exception is presentation:
-  the live terminal UI reads the host clock for its elapsed time and its current second, and its
-  details panel reads a file's metadata (`lstat`) as it is now.
+  the live terminal UI reads the host clock for its elapsed time and its current second, its
+  details panel reads a file's metadata (`lstat`) as it is now, and host names (`--resolve`, the
+  UI's `n` key) are what the resolver answers now. A name lookup can block for half a minute, so
+  only the threads of `hosts` make them, and only for addresses about to be shown.
 - Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams built
   with `trace::kdebug::synth` and `trace::linux::synth`, the TUI by rendering into ratatui's
   `TestBackend`. After changing anything under `src/sys/`, `src/reader.rs`, the syscall tables,
@@ -66,10 +68,11 @@ libbpf-rs builds its bundled libbpf, which needs the libelf and zlib development
 | `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks the answers of libproc or `/proc` against the trace |
 | `src/trace/procs.rs` | `ProcSource`: libproc or `/proc` when live, fixed answers in tests |
 | `src/stats.rs` | Per-target and per-second aggregation |
+| `src/hosts.rs` | Host names of remote addresses for the terminal UI and the text summary: threads that ask the resolver, and the answers so far |
 | `src/record.rs` | `--record` and `--replay` file format |
 | `src/output/` | Text and JSON Lines output, shared formatting |
 | `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), `fit` (names fitted to columns), `clipboard` (copying), the frame loop |
-| `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`) on Linux; the trace clock and user accounts on both |
+| `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`) on Linux; the trace clock, user accounts and the resolver's host names (`dns`) on both |
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |

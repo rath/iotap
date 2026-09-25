@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::state::{Drawn, Shown, Tab, View};
 use super::{details, fit};
+use crate::hosts::Hosts;
 use crate::model::{Endpoint, Target};
 use crate::output::{bytes, count, text};
 use crate::stats::{self, Key, Peer, Second, SortBy};
@@ -306,6 +307,8 @@ fn draw_targets(
     let target_width = usize::from(area.width).saturating_sub(fixed_width(&widths, spacing));
     let sort = view.sort;
     let home = view.home.as_deref();
+    let names = view.names;
+    let hosts = &mut view.hosts;
     let highlight = |label: &str, sorted: bool| {
         let cell = right(label.to_owned());
         if sorted { cell.style(SORTED) } else { cell }
@@ -321,7 +324,11 @@ fn draw_targets(
     ])
     .style(BOLD);
     let body = rows.iter().enumerate().map(|(i, (key, row))| {
-        let drawn = target_row(key, row, shown.now_ns, target_width, home);
+        let host = match key.remote() {
+            Some(addr) if names => hosts.name(addr.ip()),
+            _ => None,
+        };
+        let drawn = target_row(key, row, shown.now_ns, target_width, home, host);
         if selected == Some(offset + i) {
             drawn.style(SELECTED_ROW)
         } else {
@@ -355,7 +362,16 @@ fn draw_targets(
     }
 }
 
-fn target_row(key: &Key, row: &stats::Row, now_ns: u64, width: usize, home: Option<&str>) -> Row<'static> {
+/// One row of the Files or Network table; a socket's remote address shows as `host`, when
+/// given.
+fn target_row(
+    key: &Key,
+    row: &stats::Row,
+    now_ns: u64,
+    width: usize,
+    home: Option<&str>,
+    host: Option<&str>,
+) -> Row<'static> {
     let note = match row.connections() {
         n if n > 1 => format!("  {n} connections"),
         _ => String::new(),
@@ -363,7 +379,7 @@ fn target_row(key: &Key, row: &stats::Row, now_ns: u64, width: usize, home: Opti
     let path = key_path(key);
     let name = match path {
         Some((proto, path)) => show_path(proto, path, home, usize::MAX),
-        None => key.to_string(),
+        None => key.named(host).to_string(),
     };
     // The note goes first when space runs out; the target itself matters more.
     let target = if name.width() + note.width() <= width {
@@ -455,6 +471,8 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
     .style(BOLD);
 
     let home = view.home.as_deref();
+    let names = view.names;
+    let hosts = &mut view.hosts;
     let clock = &mut view.clock;
     let body: Vec<Row<'static>> = ring
         .range(start, end)
@@ -478,9 +496,11 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
             cells.push(right(
                 event.latency_ns.map_or_else(|| "-".to_owned(), short_latency),
             ));
-            let target = match target_path(&event.target) {
-                Some((proto, path)) => show_path(proto, path, home, target_width),
-                None => fit::start(&target, target_width).into_owned(),
+            let target = if let Some((proto, path)) = target_path(&event.target) {
+                show_path(proto, path, home, target_width)
+            } else {
+                let with_host = if names { named(&event.target, hosts) } else { None };
+                fit::start(with_host.as_deref().unwrap_or(&target), target_width).into_owned()
             };
             cells.push(Cell::from(target));
             Row::new(cells)
@@ -506,6 +526,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
     }
     hints.push(if shown.paused { "p resume" } else { "p pause" });
     hints.push("r reset");
+    if view.tab != Tab::Files && shown.filter.network {
+        hints.push(if view.names { "n addresses" } else { "n names" });
+    }
     hints.extend(match (table, view.has_selection(), view.details) {
         (false, ..) => ["↑↓ scroll"].as_slice(),
         (true, false, _) => &["↑↓ select", "enter details"],
@@ -630,6 +653,16 @@ fn target_path(target: &Target) -> Option<(&'static str, &str)> {
         }) => Some((proto.name(), path)),
         _ => None,
     }
+}
+
+/// A socket target with the host name of its remote address in place of the address, once
+/// `hosts` has found the name.
+fn named(target: &Target, hosts: &mut Hosts) -> Option<String> {
+    let Target::Socket(endpoint) = target else {
+        return None;
+    };
+    let host = hosts.name(endpoint.remote?.ip())?;
+    Some(endpoint.named(Some(host)).to_string())
 }
 
 /// A path, after its protocol if it has one, in at most `width` columns: the home directory
@@ -827,6 +860,105 @@ mod tests {
         let lines = render(&session, &mut app, 130, 20, now);
         assert!(find(&lines, "LATENCY").contains("REQUESTED"));
         assert!(find(&lines, "sendto").ends_with("  tcp 192.168.1.20:61000 -> 93.184.216.34:443"));
+    }
+
+    #[test]
+    fn n_shows_remote_addresses_as_host_names() {
+        use std::net::IpAddr;
+        use std::time::{Duration, Instant};
+
+        use ratatui::crossterm::event::KeyCode;
+
+        use crate::hosts::{HostName, Hosts};
+        let (session, mut app) = traced();
+        let server: IpAddr = "93.184.216.34".parse().unwrap();
+        app.view.hosts = Hosts::with_lookup(move |addr| {
+            if addr == server {
+                HostName::Found("www.example.com".into())
+            } else {
+                HostName::None
+            }
+        });
+        let answered = |app: &mut App| {
+            app.view
+                .hosts
+                .look_up(&[server], Instant::now() + Duration::from_secs(10));
+        };
+        press(&mut app, &session, KeyCode::Char('2'));
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        assert!(find(&lines, "tcp 93.184.216.34:443").contains("517 B"));
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .ends_with("r reset  n names  ↑↓ select  enter details")
+        );
+        assert_eq!(
+            app.view.hosts.asked(),
+            0,
+            "nothing is looked up before names are asked for"
+        );
+
+        press(&mut app, &session, KeyCode::Char('n'));
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        assert!(
+            find(&lines, "tcp 93.184.216.34:443").contains("517 B"),
+            "the address shows until the name is in"
+        );
+        let footer = lines.last().unwrap();
+        assert!(
+            footer.starts_with(" showing host names") && footer.contains("n addresses"),
+            "{footer}"
+        );
+        answered(&mut app);
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        let row: Vec<&str> = find(&lines, "tcp www.example.com:443")
+            .split_whitespace()
+            .collect();
+        assert_eq!(row[..7], ["4.0", "KiB", "2", "517", "B", "1", "1"]);
+
+        press(&mut app, &session, KeyCode::Enter);
+        let lines = render(&session, &mut app, 100, 30, START_NS);
+        assert!(
+            lines.iter().any(|line| line == " tcp 93.184.216.34:443"),
+            "the details keep the address: {}",
+            lines.join("\n")
+        );
+        assert!(find(&lines, " host ").ends_with(" www.example.com"));
+
+        press(&mut app, &session, KeyCode::Char('3'));
+        let lines = render(&session, &mut app, 130, 20, START_NS);
+        assert!(find(&lines, "sendto").ends_with("  tcp 192.168.1.20:61000 -> www.example.com:443"));
+        press(&mut app, &session, KeyCode::Char('n'));
+        let lines = render(&session, &mut app, 130, 20, START_NS);
+        assert!(find(&lines, "sendto").ends_with("  tcp 192.168.1.20:61000 -> 93.184.216.34:443"));
+        assert!(lines.last().unwrap().contains("n names"));
+        assert_eq!(app.view.hosts.asked(), 1, "only the server was looked up");
+    }
+
+    #[test]
+    fn the_details_say_while_a_host_name_is_looked_up() {
+        use ratatui::crossterm::event::KeyCode;
+
+        use crate::hosts::{HostName, Hosts};
+        let (session, mut app) = traced();
+        app.view.hosts = Hosts::with_lookup(|_| HostName::None);
+        press(&mut app, &session, KeyCode::Char('2'));
+        press(&mut app, &session, KeyCode::Enter);
+        let lines = render(&session, &mut app, 100, 30, START_NS);
+        assert!(
+            !lines.iter().any(|line| line.starts_with(" host ")),
+            "names are off"
+        );
+        press(&mut app, &session, KeyCode::Char('n'));
+        let lines = render(&session, &mut app, 100, 30, START_NS);
+        assert!(find(&lines, " host ").ends_with(" looking up…"));
+        // The files have no host line.
+        press(&mut app, &session, KeyCode::Char('1'));
+        press(&mut app, &session, KeyCode::Enter);
+        let lines = render(&session, &mut app, 100, 30, START_NS);
+        assert!(!lines.iter().any(|line| line.starts_with(" host ")));
+        assert!(!lines.last().unwrap().contains("n names"));
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //!
 //! One thread hands pending input to the session for at most one frame, draws at most 20
 //! frames a second and handles keys. Pausing freezes only the view: tracing goes on, so the
-//! kernel buffer never waits for the user.
+//! kernel buffer never waits for the user. Host names are looked up by threads of their own and
+//! taken in between frames, so no frame waits for the resolver.
 
 pub mod clipboard;
 mod details;
@@ -18,7 +19,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::{cursor, execute, terminal};
 
-use self::state::{App, Tab};
+use self::state::App;
 use crate::session::Session;
 use crate::sys::user;
 
@@ -45,8 +46,8 @@ pub trait Feed {
     }
 }
 
-/// Runs the UI, showing `tabs`, until the user quits, restoring the terminal on every path.
-pub fn run(session: &mut Session, feed: &mut dyn Feed, tabs: &'static [Tab]) -> io::Result<()> {
+/// Runs the UI of `app` until the user quits, restoring the terminal on every path.
+pub fn run(session: &mut Session, feed: &mut dyn Feed, app: &mut App) -> io::Result<()> {
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -58,7 +59,7 @@ pub fn run(session: &mut Session, feed: &mut dyn Feed, tabs: &'static [Tab]) -> 
     // Frames are drawn as differences from a blank screen. `Terminal::clear` would also work
     // but asks the terminal for the cursor position, which not every terminal answers.
     let result = execute!(io::stdout(), terminal::Clear(terminal::ClearType::All))
-        .and_then(|()| run_loop(&mut terminal, session, feed, tabs));
+        .and_then(|()| run_loop(&mut terminal, session, feed, app));
     // Dropping the terminal shows the cursor again.
     drop(terminal);
     ACTIVE.store(false, Ordering::SeqCst);
@@ -82,17 +83,19 @@ fn run_loop(
     terminal: &mut DefaultTerminal,
     session: &mut Session,
     feed: &mut dyn Feed,
-    tabs: &'static [Tab],
+    app: &mut App,
 ) -> io::Result<()> {
-    let mut app = App::new(tabs);
     app.view.home = user::invoking().map(|account| account.home.to_string_lossy().into_owned());
     let mut dirty = true;
     loop {
         if !app.has_ended() {
-            if let Some(reason) = feed.pump(session, &mut app, Instant::now() + FRAME)? {
+            if let Some(reason) = feed.pump(session, app, Instant::now() + FRAME)? {
                 app.end(reason);
             }
             // Time moves on while tracing, so every frame differs.
+            dirty = true;
+        }
+        if app.view.hosts.collect() {
             dirty = true;
         }
         if feed.interrupted() {

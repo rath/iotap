@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use serde::Serialize;
 
-use crate::model::{Category, Dir, Endpoint, FdType, IoEvent, Proto, Target};
+use crate::model::{Category, Dir, Endpoint, FdType, IoEvent, Proto, Target, named_addr};
 
 /// Seconds of throughput history kept for live views.
 const HISTORY_SECONDS: usize = 120;
@@ -107,17 +107,31 @@ impl Key {
             Self::Other(_) | Self::Unknown => Category::Other,
         }
     }
-}
 
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// The remote address of a socket keyed by it.
+    pub fn remote(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Socket {
+                peer: Peer::Remote(addr),
+                ..
+            } => Some(*addr),
+            _ => None,
+        }
+    }
+
+    /// The key as it displays, with `host`, when given, in place of its remote address's IP.
+    pub fn named(&self, host: Option<&str>) -> impl fmt::Display {
+        fmt::from_fn(move |f| self.write(f, host))
+    }
+
+    fn write(&self, f: &mut fmt::Formatter<'_>, host: Option<&str>) -> fmt::Result {
         match self {
             Self::File(path) if path.is_empty() => f.write_str("<unnamed file>"),
             Self::File(path) => f.write_str(path),
             Self::Socket { proto, peer } => {
                 let proto = proto.name();
                 match peer {
-                    Peer::Remote(addr) => write!(f, "{proto} {addr}"),
+                    Peer::Remote(addr) => write!(f, "{proto} {}", named_addr(*addr, host)),
                     Peer::Local(addr) => write!(f, "{proto} {addr} (local)"),
                     Peer::Path(path) => write!(f, "{proto} {path}"),
                     Peer::Unknown if !self.has_addresses() => f.write_str(proto),
@@ -127,6 +141,12 @@ impl fmt::Display for Key {
             Self::Other(fd_type) => write!(f, "<{}>", fd_type.name()),
             Self::Unknown => f.write_str("<unknown>"),
         }
+    }
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write(f, None)
     }
 }
 
@@ -258,6 +278,9 @@ impl SortBy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SummaryRow {
     pub target: String,
+    /// The key of the target, which `target` writes out; not part of the JSON summary.
+    #[serde(skip)]
+    pub key: Key,
     pub read_bytes: u64,
     pub read_calls: u64,
     pub write_bytes: u64,
@@ -440,6 +463,7 @@ impl Stats {
             .into_iter()
             .map(|(key, row)| SummaryRow {
                 target: key.to_string(),
+                key: key.clone(),
                 read_bytes: row.read.bytes,
                 read_calls: row.read.calls,
                 write_bytes: row.write.bytes,
@@ -747,6 +771,32 @@ mod tests {
                 assert_eq!(Key::of(a).matches(b), Key::of(a) == Key::of(b), "{a} and {b}");
             }
         }
+    }
+
+    #[test]
+    fn keys_write_a_host_name_in_place_of_the_remote_address() {
+        let key = |local: &str, remote: Option<&str>| {
+            Key::of(&Target::Socket(Endpoint {
+                proto: Proto::Tcp,
+                local: Some(local.parse().unwrap()),
+                remote: remote.map(|r| r.parse().unwrap()),
+                path: None,
+            }))
+        };
+        let connected = key("10.0.0.1:5000", Some("[2001:db8::1]:443"));
+        assert_eq!(connected.remote(), Some("[2001:db8::1]:443".parse().unwrap()));
+        assert_eq!(
+            connected.named(Some("www.example.com")).to_string(),
+            "tcp www.example.com:443"
+        );
+        assert_eq!(connected.named(None).to_string(), "tcp [2001:db8::1]:443");
+        let bound = key("10.0.0.1:5000", None);
+        assert_eq!(bound.remote(), None);
+        assert_eq!(
+            bound.named(Some("www.example.com")).to_string(),
+            "tcp 10.0.0.1:5000 (local)"
+        );
+        assert_eq!(Key::File("/a".into()).remote(), None);
     }
 
     #[test]

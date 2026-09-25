@@ -28,11 +28,12 @@ pub struct Cli {
     ///
     /// Keys: 1, 2 and 3 switch between the Files, Network and Events tabs; s changes the sort
     /// order; p pauses the view while tracing goes on; r resets the view to zero, though the
-    /// summary still covers the whole trace; the arrow keys, Page Up, Page Down, Home and End
-    /// select a row of the Files and Network tables and scroll the Events tab; Enter shows the
-    /// selected row's details; y copies its path or address; Esc closes the details, then lets
-    /// go of the selection, then quits; q quits and prints the summary. The UI stays open after
-    /// tracing stops. With --quiet it has no Events tab.
+    /// summary still covers the whole trace; n shows remote addresses as host names, or as
+    /// addresses again; the arrow keys, Page Up, Page Down, Home and End select a row of the
+    /// Files and Network tables and scroll the Events tab; Enter shows the selected row's
+    /// details; y copies its path or address; Esc closes the details, then lets go of the
+    /// selection, then quits; q quits and prints the summary. The UI stays open after tracing
+    /// stops. With --quiet it has no Events tab.
     #[arg(long, conflicts_with = "json")]
     pub tui: bool,
 
@@ -51,6 +52,12 @@ pub struct Cli {
     /// Report only network I/O.
     #[arg(long)]
     pub net_only: bool,
+
+    /// Show remote addresses as host names in the summary, and in the terminal UI from the
+    /// start. Names come from the system's resolver (reverse DNS), asked in the background for
+    /// the rows shown; event lines keep the addresses.
+    #[arg(long, conflicts_with = "json")]
+    pub resolve: bool,
 
     /// Stop after this many seconds.
     #[arg(short, long, value_name = "SECS")]
@@ -100,5 +107,7 @@ mod tests {
         assert!(Cli::try_parse_from(["iotap", "--tui", "-q", "1"]).is_ok());
         assert!(Cli::try_parse_from(["iotap", "--files-only", "--net-only", "1"]).is_err());
         assert!(Cli::try_parse_from(["iotap", "--replay", "x.iotaprec"]).is_ok());
+        assert!(Cli::try_parse_from(["iotap", "--tui", "--resolve", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["iotap", "--json", "--resolve", "1"]).is_err());
     }
 }

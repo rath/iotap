@@ -10,6 +10,7 @@ compile_error!("iotap supports macOS, and Linux on aarch64 and x86-64");
 
 pub mod app;
 pub mod cli;
+pub mod hosts;
 pub mod model;
 pub mod output;
 pub mod reader;

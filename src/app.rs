@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::Cli;
+use crate::hosts::Hosts;
 use crate::output::json::JsonSink;
 use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
@@ -60,16 +61,24 @@ impl Printer {
         }
     }
 
-    fn summary(self, summary: &Summary, cli: &Cli) -> io::Result<()> {
+    /// Writes the summary; as text, with the host names `hosts` finds for its network rows.
+    fn summary(self, summary: &Summary, cli: &Cli, mut hosts: Option<Hosts>) -> io::Result<()> {
         match self {
             Self::Text(sink) => {
                 let mut out = sink.into_inner();
-                text::write_summary(&mut out, summary, cli.top, filter(cli))?;
+                text::write_summary(&mut out, summary, cli.top, filter(cli), hosts.as_mut())?;
                 out.flush()
             }
             Self::Json(mut sink) => sink.summary(summary),
         }
     }
+}
+
+/// What shows the session's output while tracing.
+enum Output {
+    Printer(Printer),
+    /// The terminal UI, which prints its summary as text once the terminal is restored.
+    Tui(Box<App>),
 }
 
 /// Runs iotap as the command line asks.
@@ -96,9 +105,17 @@ pub fn filter(cli: &Cli) -> Filter {
     }
 }
 
-/// The terminal UI's tabs: `--quiet` leaves out individual events there too.
-fn tabs(cli: &Cli) -> &'static [Tab] {
-    if cli.quiet { &Tab::TARGETS } else { &Tab::ALL }
+/// The terminal UI for the command line: without an Events tab for `--quiet`, and showing host
+/// names from the start for `--resolve`.
+fn tui_app(cli: &Cli) -> App {
+    let mut app = App::new(if cli.quiet { &Tab::TARGETS } else { &Tab::ALL });
+    app.view.names = cli.resolve;
+    app
+}
+
+/// The host names for the summary printed after the terminal UI: those it showed as it quit.
+fn shown_hosts(app: &mut App) -> Option<Hosts> {
+    app.view.names.then(|| std::mem::take(&mut app.view.hosts))
 }
 
 fn trace_live(cli: &Cli) -> Result<ExitCode> {
@@ -150,11 +167,10 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let deadline = cli
         .duration
         .map(|secs| Instant::now() + Duration::from_secs(secs));
-    // The terminal UI prints its summary as text once the terminal is restored.
-    let mut printer = if cli.tui {
-        None
+    let mut output = if cli.tui {
+        Output::Tui(Box::new(tui_app(cli)))
     } else {
-        Some(Printer::new(cli, session.info())?)
+        Output::Printer(Printer::new(cli, session.info())?)
     };
 
     let (tx, rx) = mpsc::channel();
@@ -174,9 +190,9 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
             expired: false,
             reported: false,
         };
-        let consumed = match printer.as_mut() {
-            Some(printer) => consume(&mut input, &mut session, printer.sink()),
-            None => watch_live(&mut input, &mut session, &interrupted, tabs(cli)),
+        let consumed = match &mut output {
+            Output::Printer(printer) => consume(&mut input, &mut session, printer.sink()),
+            Output::Tui(app) => watch_live(&mut input, &mut session, &interrupted, app),
         };
         stop_ref.store(true, Ordering::SeqCst);
         let read = reader.join().map_err(|_| anyhow!("the kernel reader panicked"))?;
@@ -186,12 +202,16 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     drop(facility);
 
     let saved = src.finish();
-    let (printer, failed) = match printer {
-        Some(printer) => (printer, WRITE_FAILED),
-        None => (Printer::new(cli, session.info())?, TUI_FAILED),
+    let (printer, hosts, failed) = match output {
+        Output::Printer(printer) => (printer, cli.resolve.then(Hosts::system), WRITE_FAILED),
+        Output::Tui(mut app) => (
+            Printer::new(cli, session.info())?,
+            shown_hosts(&mut app),
+            TUI_FAILED,
+        ),
     };
     if !finish_output(consumed, failed)?
-        || !finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?
+        || !finish_output(printer.summary(&session.summary(), cli, hosts), WRITE_FAILED)?
     {
         return Ok(ExitCode::SUCCESS);
     }
@@ -277,14 +297,14 @@ fn watch_live(
     input: &mut LiveInput<'_>,
     session: &mut Session,
     interrupted: &AtomicBool,
-    tabs: &'static [Tab],
+    app: &mut App,
 ) -> io::Result<()> {
     let mut feed = LiveFeed {
         input,
         interrupted,
         ended: false,
     };
-    let shown = tui::run(session, &mut feed, tabs);
+    let shown = tui::run(session, &mut feed, app);
     let ended = feed.ended;
     input.stop.store(true, Ordering::SeqCst);
     let drained = if ended {
@@ -412,14 +432,16 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
             answers,
             interrupted: &interrupted,
         };
-        if finish_output(tui::run(&mut session, &mut feed, tabs(cli)), TUI_FAILED)? {
+        let mut app = tui_app(cli);
+        if finish_output(tui::run(&mut session, &mut feed, &mut app), TUI_FAILED)? {
             // The summary covers the whole recording, as it does without --tui.
             for input in feed.inputs.by_ref() {
                 session.handle(&input, &mut feed.answers, &mut Discard)?;
             }
             session.finish(&mut Discard)?;
             let printer = Printer::new(cli, session.info())?;
-            finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?;
+            let hosts = shown_hosts(&mut app);
+            finish_output(printer.summary(&session.summary(), cli, hosts), WRITE_FAILED)?;
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -435,7 +457,8 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
         .and_then(|()| session.finish(sink))
         .and_then(|()| sink.flush());
     if finish_output(fed, WRITE_FAILED)? {
-        finish_output(printer.summary(&session.summary(), cli), WRITE_FAILED)?;
+        let hosts = cli.resolve.then(Hosts::system);
+        finish_output(printer.summary(&session.summary(), cli, hosts), WRITE_FAILED)?;
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -75,6 +75,7 @@ sudo iotap 1234                        # one process
 sudo iotap Safari                      # every Safari process, and new ones
 sudo iotap --tui 1234                  # live terminal UI
 sudo iotap --tui -q 1234               # the same without the Events tab
+sudo iotap --tui --resolve curl        # host names in place of remote addresses
 sudo iotap --json curl | jq -c 'select(.type == "event")'
 sudo iotap -q -d 10 Finder             # summary only, after 10 seconds
 sudo iotap --net-only --record t.iotaprec 1234
@@ -87,6 +88,7 @@ iotap --replay t.iotaprec              # the same output again, without root
 | `--json` | JSON Lines instead of text |
 | `-q`, `--quiet` | No event lines; notices and the summary remain. With `--tui`, no Events tab |
 | `--files-only`, `--net-only` | Report one kind of I/O |
+| `--resolve` | Show remote addresses as host names in the summary, and in the terminal UI from the start (see [Host names](#host-names)); not with `--json` |
 | `-d`, `--duration SECS` | Stop after this many seconds |
 | `--top N` | Rows per table in the text summary; default 30 |
 | `--buffer RECORDS` | Kernel buffer size in 64-byte records; default 524288, which is 32 MiB. On Linux the ring buffer takes as many bytes, rounded up to a power of two |
@@ -167,6 +169,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | Enter | Show or hide the details of the selected row; with none selected, select the top row and show its details |
 | `y` | Copy the selected row's path, or its socket's address |
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
+| `n` | Show remote addresses as host names, or as addresses again (see [Host names](#host-names)). The summary printed on quitting does as the UI did |
 | Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, select a row and move the selection; the first key selects the top row, or the last row for End. In the Events tab, scroll; End follows new events again |
 | Esc | Back out a step: close the details, then let go of the selection, then quit |
 | `q`, Ctrl-C | Quit and print the summary |
@@ -185,6 +188,7 @@ so the file name and the directories nearest it stay whole the longest:
 The details panel opens below the Files or Network table and shows the selected target:
 
 - its full path or endpoint
+- while host names are shown, the name of its remote address, or why there is none
 - bytes and calls in each direction, and the failed calls
 - mean and longest latency
 - when it was first and last used
@@ -207,6 +211,18 @@ it draws, never the contents, so a replay shows the file on the replaying machin
 
 On macOS the status line reports what `pbcopy` did. A terminal never says whether it honoured
 OSC 52, so on Linux the status line says only that the terminal was asked.
+
+### Host names
+
+With `--resolve`, or `n` in the terminal UI, remote addresses show as host names:
+`tcp www.example.com:443` in place of `tcp 93.184.216.34:443`. iotap asks the system's resolver
+through `getnameinfo`, so the name comes from the hosts file, a reverse DNS lookup or multicast
+DNS, as the system is set up to look. An answer can take half a minute, so up to 16 threads of
+iotap's own wait for them, and an address shows as itself until its name arrives.
+
+Only the addresses shown are looked up, each once: the rows on screen in the terminal UI, and
+the rows of the summary, for which iotap waits at most two seconds. Event lines, JSON and
+recordings keep the addresses, and replaying with `--resolve` looks the names up again.
 
 ### Recordings
 
@@ -243,7 +259,8 @@ that system's numbers for errors, address families and flags.
    100 ms, and longer only while iotap lags behind the kernel.
 5. Processing after the reader depends only on the records and on the answers of libproc or
    `/proc`, never on the clock, which is why recordings replay exactly. Only the live terminal UI
-   reads the clock, for its elapsed time and its current second.
+   reads the clock, for its elapsed time and its current second, and host names, when asked for,
+   are what the resolver answers at the time.
 
 ## Limitations
 
@@ -291,6 +308,12 @@ that system's numbers for errors, address families and flags.
   so run iotap on the host, where it traces processes in containers by those IDs.
 - **Recording size.** A recording grows by about 64 bytes per kernel record on macOS, and by
   96 bytes plus the path or address it took per call on Linux.
+- **Host names.** A reverse lookup finds the name the owner of an address gave it, often one of a
+  hosting or CDN provider rather than the name the program looked up, and often none. iotap
+  cannot learn the name the program looked up, since it never reads the data programs send or
+  receive. Each lookup is a query to the configured DNS servers, and while iotap traces the
+  resolver itself, `mDNSResponder` on macOS or `systemd-resolved` on Linux, its own lookups show
+  in the trace.
 
 ## Checking against a live kernel
 
@@ -324,6 +347,10 @@ kernel interface itself. After changing `src/sys/`, `src/reader.rs`, a syscall t
    starts, such as `sh -c 'sleep 1; exec ./mycat'` for a `cat` you built that waits for its input.
    A copy of `/bin/cat` will not do: macOS kills copies of its own programs as they start. Expect
    the "now tracing" notice for it.
+10. **Host names.** Repeat check 3 with `--resolve`, then with `--tui --resolve`. Expect the
+    server's host name in place of its address in the summary and in the Network and Events tabs,
+    the address and the name in the details panel, and `n` switching between names and
+    addresses.
 
 ### Linux
 
@@ -360,7 +387,8 @@ loaded; iotap's are named `sys_enter`, `sys_exit` and, from Linux 6.16, `process
 11. **Calls under way.** Trace a process whose read began before iotap started and ends while it
     runs, and one whose read begins while iotap runs and has not ended when it stops. The summary
     must note one call that began before tracing, and with `--json` count one unfinished call.
-12. **Replay** and **terminal UI**, as on macOS.
+12. **Replay**, **terminal UI** and **host names**, as on macOS, the last with a download from a
+    public server.
 
 When scripting these checks, signal iotap itself, or send the signal from another process group.
 sudo does not pass on a signal that comes from its own process group, which is where `kill -INT $!`

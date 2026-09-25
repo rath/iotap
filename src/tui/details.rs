@@ -11,7 +11,9 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::draw::{BOLD, DIM, FAILED, idle, short_latency};
+use super::fit;
 use super::state::{Shown, Tab, View};
+use crate::hosts::HostName;
 use crate::model::{Category, IoEvent};
 use crate::output::{bytes, count, text};
 use crate::stats::{Counter, Key, Peer, Row};
@@ -35,6 +37,10 @@ pub(super) fn lines(
         .into_iter()
         .map(|piece| Line::styled(piece, BOLD))
         .collect();
+    if let Some(addr) = key.remote().filter(|_| view.names) {
+        let host = host_name(view.hosts.get(addr.ip()), value_width);
+        lines.push(field("host", vec![host]));
+    }
 
     let [read, written] = if key.category() == Category::Network {
         ["received", "sent"]
@@ -139,6 +145,16 @@ fn path_of(key: &Key) -> Option<&str> {
             ..
         } => Some(path),
         _ => None,
+    }
+}
+
+/// What is known of a host name, fitted to `width` columns when found.
+fn host_name(name: &HostName, width: usize) -> Span<'static> {
+    match name {
+        HostName::Found(name) => Span::raw(fit::start(name, width).into_owned()),
+        HostName::Pending => Span::styled("looking up…", DIM),
+        HostName::None => Span::styled("no name found", DIM),
+        HostName::Failed(why) => Span::styled(format!("lookup failed: {why}"), DIM),
     }
 }
 
@@ -342,6 +358,18 @@ mod tests {
             "the first item always shows"
         );
         assert_eq!(fit_list(&[], 10), "");
+    }
+
+    #[test]
+    fn says_what_is_known_of_a_host_name() {
+        let text = |name: HostName| host_name(&name, 12).content.into_owned();
+        assert_eq!(text(HostName::Found("www.example.com".into())), "…example.com");
+        assert_eq!(text(HostName::Pending), "looking up…");
+        assert_eq!(text(HostName::None), "no name found");
+        assert_eq!(
+            text(HostName::Failed("SERVFAIL".into())),
+            "lookup failed: SERVFAIL"
+        );
     }
 
     #[test]

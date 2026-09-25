@@ -218,11 +218,23 @@ impl Endpoint {
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write(f, None)
+    }
+}
+
+impl Endpoint {
+    /// The endpoint as it displays, with `host`, when given, in place of the remote address's
+    /// IP.
+    pub fn named(&self, host: Option<&str>) -> impl fmt::Display {
+        fmt::from_fn(move |f| self.write(f, host))
+    }
+
+    fn write(&self, f: &mut fmt::Formatter<'_>, host: Option<&str>) -> fmt::Result {
         f.write_str(self.proto.name())?;
         if let Some(path) = &self.path {
             return write!(f, " {path}");
         }
-        match (self.local, self.remote) {
+        match (self.local, self.remote.map(|remote| named_addr(remote, host))) {
             (Some(local), Some(remote)) => write!(f, " {local} -> {remote}"),
             (Some(local), None) => write!(f, " {local}"),
             (None, Some(remote)) => write!(f, " -> {remote}"),
@@ -230,6 +242,14 @@ impl fmt::Display for Endpoint {
             (None, None) => Ok(()),
         }
     }
+}
+
+/// `addr`, or with `host`, when given, `host:port`: the host name in place of the IP.
+pub fn named_addr(addr: SocketAddr, host: Option<&str>) -> impl fmt::Display {
+    fmt::from_fn(move |f| match host {
+        Some(host) => write!(f, "{host}:{}", addr.port()),
+        None => fmt::Display::fmt(&addr, f),
+    })
 }
 
 /// Kind of a descriptor that is neither a file nor a socket. Most kinds exist on one system
@@ -494,12 +514,18 @@ mod tests {
             path: None,
         };
         assert_eq!(tcp.to_string(), "tcp 192.168.1.2:60868 -> [2a00:1450::1]:443");
+        assert_eq!(
+            tcp.named(Some("www.example.com")).to_string(),
+            "tcp 192.168.1.2:60868 -> www.example.com:443"
+        );
+        assert_eq!(tcp.named(None).to_string(), tcp.to_string());
         assert!(!tcp.is_incomplete());
         let unix = Endpoint {
             path: Some("/var/run/mDNSResponder".into()),
             ..Endpoint::unresolved(Proto::Unix)
         };
         assert_eq!(unix.to_string(), "unix /var/run/mDNSResponder");
+        assert_eq!(unix.named(Some("x")).to_string(), unix.to_string());
         assert_eq!(Endpoint::unresolved(Proto::Udp).to_string(), "udp ?");
         assert_eq!(Endpoint::unresolved(Proto::System).to_string(), "system");
         assert!(Endpoint::unresolved(Proto::Udp).is_incomplete());

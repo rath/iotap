@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use unicode_width::UnicodeWidthStr;
 
 use super::clipboard::Copied;
+use crate::hosts::Hosts;
 use crate::model::{Category, IoEvent};
 use crate::output::text;
 use crate::session::{Filter, Notice, ProcessStatus, Session, Sink};
@@ -156,6 +157,10 @@ pub struct View {
     pub owners: HashMap<u32, Option<String>>,
     /// Home directory of the user who started iotap, which the tables write as `~`.
     pub home: Option<String>,
+    /// True while remote addresses show as host names, which are looked up as they are shown.
+    pub names: bool,
+    /// Host names of remote addresses; a cache, not state.
+    pub hosts: Hosts,
 }
 
 impl Default for View {
@@ -178,6 +183,8 @@ impl View {
             clock: LocalClock::default(),
             owners: HashMap::new(),
             home: None,
+            names: false,
+            hosts: Hosts::default(),
         }
     }
 
@@ -527,6 +534,14 @@ impl App {
                     }
                     None => {}
                 }
+            }
+            KeyCode::Char('n') => {
+                view.names = !view.names;
+                self.model.status = Some(if view.names {
+                    "showing host names as the resolver finds them".to_owned()
+                } else {
+                    "showing addresses".to_owned()
+                });
             }
             KeyCode::Char('r') => {
                 self.model.reset(session, now_ns);

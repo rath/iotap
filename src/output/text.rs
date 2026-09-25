@@ -1,12 +1,19 @@
 //! Human-readable event lines and the end-of-session summary.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use super::{bytes, count, duration, latency};
+use crate::hosts::Hosts;
 use crate::model::{IoEvent, errno_name};
 use crate::session::{Filter, Notice, Sink, Summary};
 use crate::stats::SummaryRow;
 use crate::sys::time::LocalClock;
+
+/// Longest wait for the host names of the summary's network rows.
+const HOST_NAMES_WAIT: Duration = Duration::from_secs(2);
 
 /// Writes one line per event; notices go to stderr so stdout stays a clean event stream.
 #[derive(Debug)]
@@ -110,8 +117,27 @@ impl<W: Write> Sink for TextSink<W> {
     }
 }
 
-/// Writes the end-of-session summary tables.
-pub fn write_summary(out: &mut dyn Write, summary: &Summary, top: usize, filter: Filter) -> io::Result<()> {
+/// Writes the end-of-session summary tables. With `hosts`, the network rows name the hosts of
+/// their remote addresses, as far as the resolver answers within [`HOST_NAMES_WAIT`].
+pub fn write_summary(
+    out: &mut dyn Write,
+    summary: &Summary,
+    top: usize,
+    filter: Filter,
+    mut hosts: Option<&mut Hosts>,
+) -> io::Result<()> {
+    if let Some(hosts) = hosts.as_deref_mut()
+        && filter.network
+    {
+        let shown: Vec<IpAddr> = summary
+            .network
+            .iter()
+            .take(top)
+            .filter_map(|row| row.key.remote())
+            .map(|addr| addr.ip())
+            .collect();
+        hosts.look_up(&shown, Instant::now() + HOST_NAMES_WAIT);
+    }
     let processes: Vec<String> = summary
         .processes
         .iter()
@@ -125,13 +151,20 @@ pub fn write_summary(out: &mut dyn Write, summary: &Summary, top: usize, filter:
         duration(summary.duration_ns)
     )?;
     if filter.files {
-        table(out, "Files", ["READ", "WRITTEN"], &summary.files, top)?;
+        table(out, "Files", ["READ", "WRITTEN"], &summary.files, top, None)?;
     }
     if filter.network {
-        table(out, "Network", ["RECEIVED", "SENT"], &summary.network, top)?;
+        table(out, "Network", ["RECEIVED", "SENT"], &summary.network, top, hosts)?;
     }
     if filter.other && !summary.other.is_empty() {
-        table(out, "Other descriptors", ["READ", "WRITTEN"], &summary.other, top)?;
+        table(
+            out,
+            "Other descriptors",
+            ["READ", "WRITTEN"],
+            &summary.other,
+            top,
+            None,
+        )?;
     }
 
     let t = &summary.totals;
@@ -190,12 +223,15 @@ pub fn write_summary(out: &mut dyn Write, summary: &Summary, top: usize, filter:
     Ok(())
 }
 
+/// Writes one table of targets; with `hosts`, sockets show the host names found for their
+/// remote addresses.
 fn table(
     out: &mut dyn Write,
     title: &str,
     words: [&str; 2],
     rows: &[SummaryRow],
     top: usize,
+    mut hosts: Option<&mut Hosts>,
 ) -> io::Result<()> {
     writeln!(out)?;
     if rows.is_empty() {
@@ -223,19 +259,117 @@ fn table(
         } else {
             format!("  ({})", notes.join(", "))
         };
+        let target = match (row.key.remote(), hosts.as_deref_mut()) {
+            (Some(addr), Some(hosts)) => Cow::Owned(row.key.named(hosts.name(addr.ip())).to_string()),
+            _ => Cow::Borrowed(row.target.as_str()),
+        };
         writeln!(
             out,
-            "  {:>10} {:>8}  {:>10} {:>8}  {:>6}  {}{notes}",
+            "  {:>10} {:>8}  {:>10} {:>8}  {:>6}  {target}{notes}",
             bytes(row.read_bytes),
             row.read_calls,
             bytes(row.write_bytes),
             row.write_calls,
             row.errors,
-            row.target
         )?;
     }
     if rows.len() > top {
         writeln!(out, "  ... and {} more", rows.len() - top)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::hosts::HostName;
+    use crate::model::{Category, Endpoint, Op, Proto, Provenance, Target};
+    use crate::session::Process;
+    use crate::stats::Stats;
+
+    /// A summary of reads from three servers: two with names, one without.
+    fn summary() -> Summary {
+        let mut stats = Stats::default();
+        for (remote, bytes) in [
+            ("192.0.2.1:443", 3_000),
+            ("[2001:db8::1]:8443", 2_000),
+            ("198.51.100.7:80", 1_000),
+        ] {
+            stats.record(&IoEvent {
+                time_ns: 1,
+                pid: 7,
+                tid: 1,
+                op: Op::Read,
+                syscall: "read",
+                fd: Some(5),
+                requested: Some(bytes),
+                bytes: Some(bytes),
+                messages: None,
+                errno: 0,
+                latency_ns: Some(1_000),
+                target: Arc::new(Target::Socket(Endpoint {
+                    proto: Proto::Tcp,
+                    local: None,
+                    remote: Some(remote.parse().unwrap()),
+                    path: None,
+                })),
+                provenance: Provenance::Traced,
+            });
+        }
+        Summary {
+            duration_ns: 1_000_000_000,
+            processes: vec![Process {
+                pid: 7,
+                name: "curl".into(),
+            }],
+            totals: *stats.totals(),
+            lost_events: 0,
+            unfinished_calls: 0,
+            calls_started_before_trace: 0,
+            files: Vec::new(),
+            network: stats.summary_rows(Category::Network),
+            other: Vec::new(),
+        }
+    }
+
+    fn written(summary: &Summary, top: usize, hosts: Option<&mut Hosts>) -> String {
+        let mut out = Vec::new();
+        write_summary(&mut out, summary, top, Filter::ALL, hosts).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn the_summary_names_remote_hosts_when_asked() {
+        let summary = summary();
+        let plain = written(&summary, 30, None);
+        assert!(
+            plain.contains(" tcp 192.0.2.1:443\n") && plain.contains(" tcp [2001:db8::1]:8443\n"),
+            "{plain}"
+        );
+        let mut hosts = Hosts::with_lookup(|addr| match addr.to_string().as_str() {
+            "192.0.2.1" => HostName::Found("www.example.com".into()),
+            "2001:db8::1" => HostName::Found("v6.example.com".into()),
+            _ => HostName::None,
+        });
+        let named = written(&summary, 30, Some(&mut hosts));
+        assert!(named.contains(" tcp www.example.com:443\n"), "{named}");
+        assert!(named.contains(" tcp v6.example.com:8443\n"), "{named}");
+        assert!(
+            named.contains(" tcp 198.51.100.7:80\n"),
+            "an address without a name stays: {named}"
+        );
+        assert_eq!(named.lines().count(), plain.lines().count());
+    }
+
+    #[test]
+    fn only_the_rows_shown_are_looked_up() {
+        let summary = summary();
+        let mut hosts = Hosts::with_lookup(|_| HostName::Found("www.example.com".into()));
+        let named = written(&summary, 1, Some(&mut hosts));
+        assert!(named.contains(" tcp www.example.com:443\n"), "{named}");
+        assert!(named.contains("  ... and 2 more\n"), "{named}");
+        assert_eq!(hosts.asked(), 1, "the rows left out are not looked up");
+    }
 }
