@@ -17,7 +17,7 @@ iotap watches the processes you name and reports every read and write they make 
 the file or the remote address, how many bytes were asked for and how many moved, how long the
 call took, and whether it failed. When the process exits or you press Ctrl-C, it sums this up per
 file and per endpoint. Point it at a name and it also picks up processes started later under that
-name.
+name; add `-f` and it follows every process the traced ones start.
 
 ```
 $ sudo iotap curl
@@ -81,7 +81,8 @@ What iotap does with that access is deliberately narrow:
   socket endpoint. It never reads or stores the data being transferred: a process reading your
   SSH key shows up as a read of that file and its size, never its contents. Recordings hold the
   same and nothing more.
-- **Only the processes you name.** The kernel is asked to record their calls and no others.
+- **Only the processes you name**, and with `-f` the processes they start. The kernel is asked to
+  record their calls and no others.
 - **Nothing left behind.** On macOS only one program can own kdebug at a time, so iotap releases
   it on every exit path, including errors, signals and panics. On Linux the kernel drops the
   eBPF program the moment iotap exits, however it exits. The terminal UI restores the terminal
@@ -121,6 +122,13 @@ executable's file name or first argument's file name equals it, ignoring case, a
 traces processes started later under that name. At least one process must match when iotap
 starts. `-n` makes numeric targets names.
 
+With `-f`, iotap also traces the processes that the traced ones start, and theirs in turn: every
+descendant, those running when it starts and those started later. The descriptors a child has
+from its parent show their files and endpoints like any others. iotap leaves out itself and the
+processes it runs under, such as its `sudo`, so tracing the shell it was started from takes in
+the shell's other children. On Linux a child is traced from its start, on macOS from a few
+milliseconds after (see [Limitations](#limitations)).
+
 The first argument, `argv[0]`, holds the command a process was started by, and it is the name
 `pgrep` and `killall` go by on macOS. The macOS kernel names a process after the file it runs,
 links followed, so a program started through a link to a file named after its version, as some
@@ -131,6 +139,7 @@ only the file names.
 ```
 sudo iotap 1234                        # one process
 sudo iotap Safari                      # every Safari process, and new ones
+sudo iotap -f make                     # make and every process it starts
 sudo iotap --tui 1234                  # live terminal UI
 sudo iotap --tui -q 1234               # the same without the Events tab
 sudo iotap --tui --resolve curl        # host names in place of remote addresses
@@ -142,6 +151,7 @@ iotap --replay t.iotaprec              # the same output again, without root
 
 | Option | Effect |
 |---|---|
+| `-f`, `--children` | Also trace every descendant of the traced processes, running or started later |
 | `--tui` | Live terminal UI instead of the event stream |
 | `--json` | JSON Lines instead of text |
 | `-q`, `--quiet` | No event lines; notices and the summary remain. With `--tui`, no Events tab |
@@ -167,7 +177,8 @@ the trace does not carry the size. REQUESTED and LATENCY show `-` when they are 
 for calls that take several buffers or calls that began before tracing did. TIME is local time.
 
 Notices go to stderr, so stdout stays a clean event stream. They report processes that start,
-exit or exec, and records the kernel dropped because its buffer was full.
+exit or exec, children that iotap could not trace, and records the kernel dropped because its
+buffer was full.
 
 ### JSON Lines
 
@@ -179,9 +190,17 @@ epoch.
 | `start` | `time_ns`, `processes` |
 | `event` | `time_ns`, `pid`, `tid`, `op`, `dir`, `syscall`, `fd`, `requested`, `bytes`, `messages`, `errno`, `error`, `latency_ns`, `target`, `resolved` |
 | `lost_events` | `time_ns` |
-| `attached`, `exited` | `pid`, `name` |
+| `attached` | `pid`, `name`, `parent` |
+| `untraced` | `pid`, `parent`, `reason` |
 | `exec` | `pid`, `path` |
-| `summary` | `duration_ns`, `processes`, `totals`, `lost_events`, `unfinished_calls`, `calls_started_before_trace`, `files`, `network`, `other` |
+| `exited` | `pid`, `name` |
+| `summary` | `duration_ns`, `processes`, `totals`, `lost_events`, `unfinished_calls`, `calls_started_before_trace`, `untraced_children`, `files`, `network`, `other` |
+
+The `parent` of an `attached` process is the traced process that started it, or null when iotap
+does not know it, as for a process attached by its name. An `untraced` object tells of a child
+that `-f` could not trace: its `reason` is `ended` when the child ended before iotap could trace
+it, and `full` when iotap was tracing as many processes as it can. The summary's
+`untraced_children` counts them by reason.
 
 A `target` is `{"kind":"file","path":…}`, `{"kind":"socket","proto":…,"local":…,"remote":…}`
 with a `path` for Unix-domain sockets, `{"kind":"other","fd_type":…}` or `{"kind":"unknown"}`.
@@ -298,9 +317,15 @@ that system's numbers for errors, address families and flags.
    The program pairs the entry and return of each call of a traced process in the kernel, and
    writes one record per call to a ring buffer, with the path, socket address or pair of new
    descriptors the call took, read from the process's memory as the call returns.
+   With `-f`, the Linux program also watches the kernel's task creation tracepoint, which fires
+   in the parent before a child can run, and traces each child of a traced process from there.
+   On macOS kdebug does not pass tracing on to a child, but it records the creation of every
+   thread, whatever process it belongs to, and each exec; from these records iotap finds the
+   processes that traced ones start, and flags each for tracing as soon as it reads the record.
 2. A reader thread drains the kernel buffer at least every 10 ms, so that descriptors can be looked
    up while they are still open. Every 250 ms it also checks the processes for exits, exec and new
-   processes with a traced name. On Linux, calls that return on different processors reach the
+   processes with a traced name; with `-f`, its first check also takes in any descendant started
+   while tracing began. On Linux, calls that return on different processors reach the
    ring buffer slightly out of order, so the reader holds each record until 5 ms after its call
    returned and passes the records on in the order the calls returned.
 3. The main thread pairs the entry and return record of each syscall on macOS, reassembles paths
@@ -337,14 +362,20 @@ that system's numbers for errors, address families and flags.
   descriptor on the same file, which only macOS lets iotap tell. A descriptor closed in a way the
   trace does not show, as by exec for a close-on-exec descriptor, can still leave a lookup naming
   a later descriptor.
-- **Children.** Forked children are not traced. A name target picks up processes that start with
-  that name, or take it by exec, within 250 ms and misses their first calls under it. On macOS, a
-  process that gives itself the name in `argv[0]` later, as Node.js programs do through
-  `process.title`, is picked up only if it does so within two seconds of starting or of its latest
-  exec. On Linux such programs rename the process too, which iotap notices whenever it happens.
+- **Children.** Without `-f`, the processes a traced one starts are not traced. With it, on macOS
+  a child is traced from when iotap reads the kernel's record of its creation, a few milliseconds
+  after it starts: its first calls are missed, and so is a child that ends sooner, which iotap
+  reports. On Linux a child is traced from its start. There `-f` needs the kernel's
+  `task_newtask` tracepoint laid out as iotap's program reads it; iotap checks, and refuses `-f`
+  where it is not.
+- **New processes by name.** A name target picks up processes that start with that name, or take
+  it by exec, within 250 ms and misses their first calls under it. On macOS, a process that gives
+  itself the name in `argv[0]` later, as Node.js programs do through `process.title`, is picked
+  up only if it does so within two seconds of starting or of its latest exec. On Linux such
+  programs rename the process too, which iotap notices whenever it happens.
 - **exec, on macOS.** exec gives a process a new kernel identity without the trace flag. iotap
-  flags the process again within 250 ms and misses the calls in between. On Linux tracing goes on
-  through exec.
+  flags the process again once it reads the kernel's record of the exec, usually within 10 ms and
+  at most 250 ms later, and misses the calls in between. On Linux tracing goes on through exec.
 - **Short-lived sockets.** A socket closed before iotap could look it up shows only what the trace
   reveals: its protocol, such as `tcp ?`, the path of a Unix-domain connect, the protocol and
   bound address of the socket it was accepted on, or just `socket`. On Linux the trace also

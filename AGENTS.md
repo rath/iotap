@@ -113,8 +113,8 @@ without it they are skipped. When changing the scripts:
 | `src/main.rs` | Entry point; prints errors as `iotap: …` and sets the exit status |
 | `src/cli.rs` | Command line (clap derive) |
 | `src/app.rs` | Wiring: root check, trace facility setup, reader thread, output modes, signals, replay |
-| `src/target.rs` | Targets to processes: pids, and names, each matched against a process's name and the file names of its executable and of its first argument (`argv[0]`) |
-| `src/reader.rs` | Reader thread: drains the kernel through the `Tracer` trait (kdebug and the eBPF program implement it), watches processes for exit, exec and new names |
+| `src/target.rs` | Targets to processes: pids, and names, each matched against a process's name and the file names of its executable and of its first argument (`argv[0]`); the running descendants of processes, for `--children` |
+| `src/reader.rs` | Reader thread: drains the kernel through the `Tracer` trait (kdebug and the eBPF program implement it), watches processes for exit, exec and new names, and takes up the processes traced ones start |
 | `src/session.rs` | Deterministic core: decoded records to I/O events, notices, statistics and the summary |
 | `src/trace/mod.rs` | Record batches of each format, what records tell once put together, and the `Decode` trait each format implements |
 | `src/trace/call.rs` | A syscall that returned, whatever format its records came in: its role, arguments, result and looked-up path |
@@ -122,8 +122,9 @@ without it they are skipped. When changing the scripts:
 | `src/trace/kdebug/codes.rs` | kdebug event IDs and the syscall table |
 | `src/trace/kdebug/decode.rs` | Raw `kd_buf` records to typed events |
 | `src/trace/kdebug/pairing.rs` | Pairs syscall entry and return per thread; reassembles lookup paths |
+| `src/trace/kdebug/spawns.rs` | Finds in the records of thread creation and exec, which kdebug makes for every process, the processes that traced ones start and those that run exec |
 | `src/trace/kdebug/synth.rs` | Builds record streams exactly as XNU emits them, for tests |
-| `src/trace/linux/mod.rs` | The record format of iotap's Linux eBPF program, one record per call that returned, and its decoder |
+| `src/trace/linux/mod.rs` | The record format of iotap's Linux eBPF program, one record per call that returned and per process that exited or was started, and its decoder |
 | `src/trace/linux/codes.rs` | The Linux syscall tables for aarch64 and x86-64, and what the eBPF program reads for each call |
 | `src/trace/linux/order.rs` | Puts records from the ring buffer in time order and marks where the program dropped some |
 | `src/trace/linux/synth.rs` | Builds records exactly as the eBPF program writes them, for tests |
@@ -136,7 +137,7 @@ without it they are skipped. When changing the scripts:
 | `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), `fit` (names fitted to columns), `clipboard` (copying), the frame loop |
 | `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc and the `kern.procargs2` sysctl (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`) on Linux; the trace clock, user accounts and the resolver's host names (`dns`) on both |
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
-| `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads |
+| `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads; for `--children` it traces the processes traced ones start, from their start, with a record of each |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
 | `scripts/live/` | The live checks: `run.py` runs README.md's checks for this system with the user's sudo and judges each expectation; `macos.py`, `linux.py` and `shared.py` hold the checks, `harness.py` what they share, `tui.py` drives the terminal UI in a pseudo-terminal, `programs.py` holds programs for them to trace, and `macos.command` starts a run in Terminal.app |
 
