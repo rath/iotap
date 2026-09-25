@@ -1,10 +1,11 @@
-//! Process facts from libproc and the C shim: process listing, descriptor tables and what a
-//! descriptor refers to.
+//! Process facts from libproc, the C shim and the `kern.procargs2` sysctl: process listing,
+//! first arguments, descriptor tables and what a descriptor refers to.
 
 use std::ffi::{c_char, c_int};
 use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ptr;
+use std::sync::OnceLock;
 
 use super::ProcInfo;
 use crate::model::{Endpoint, FdType, Proto, Target};
@@ -111,6 +112,71 @@ pub fn exe_path(pid: i32) -> Option<String> {
     let n = usize::try_from(n).ok().filter(|&n| n > 0)?;
     buf.truncate(n.min(buf.len()));
     Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// `argv[0]` of a process as its memory holds it now, which the process may have rewritten;
+/// `None` if the process is gone, was started without arguments, or belongs to another user
+/// while iotap is not root.
+pub fn arg0(pid: i32) -> Option<String> {
+    // Into a buffer too small for all of it the kernel copies the end of the area, so the buffer
+    // takes the most a process can be started with, after the count of arguments.
+    let mut area = vec![0u8; size_of::<c_int>() + args_max()?];
+    let mut len = area.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    // SAFETY: `mib` holds the 3 integers passed, and `area` provides `len` writable bytes.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            area.as_mut_ptr().cast(),
+            &raw mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    // A full buffer may hold only the end of the area.
+    if rc != 0 || len >= area.len() {
+        return None;
+    }
+    first_argument(&area[..len])
+}
+
+/// The most bytes of arguments and environment a process can be started with, `kern.argmax`.
+fn args_max() -> Option<usize> {
+    static MAX: OnceLock<Option<usize>> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        let mut max: c_int = 0;
+        let mut len = size_of::<c_int>();
+        let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        // SAFETY: `mib` holds the 2 integers passed, and `max` provides the `len` bytes of the
+        // integer the sysctl gives.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                (&raw mut max).cast(),
+                &raw mut len,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        usize::try_from(max).ok().filter(|&max| rc == 0 && max > 0)
+    })
+}
+
+/// `argv[0]` in an area as `kern.procargs2` gives it: the count of arguments, the executable's
+/// path, the NULs that pad it, then the arguments, each ending in a NUL. An empty `argv[0]`
+/// cannot be told from the padding, so the argument after it is taken for it.
+fn first_argument(area: &[u8]) -> Option<String> {
+    let (argc, strings) = area.split_first_chunk::<{ size_of::<c_int>() }>()?;
+    // Without arguments, what follows the path is the environment.
+    if c_int::from_ne_bytes(*argc) < 1 {
+        return None;
+    }
+    let path_end = strings.iter().position(|&b| b == 0)?;
+    let padded = &strings[path_end..];
+    let start = padded.iter().position(|&b| b != 0)?;
+    Some(nul_terminated(&padded[start..]))
 }
 
 /// Open descriptors of a process and what each refers to; `None` if the process is gone.
@@ -267,6 +333,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     use super::*;
+    use crate::sys::proc::Sleeper;
 
     fn me() -> i32 {
         i32::try_from(std::process::id()).unwrap()
@@ -284,7 +351,33 @@ mod tests {
         assert!(list_pids().contains(&me()));
         assert!(exe_path(me()).is_some_and(|p| p.starts_with('/')));
         assert!(cwd(me()).is_some_and(|p| p.starts_with('/')));
+        assert_eq!(arg0(me()), std::env::args().next());
         assert_eq!(info(-5), None);
+        assert_eq!(arg0(-5), None);
+    }
+
+    #[test]
+    fn reads_the_first_argument_another_process_was_started_with() {
+        let sleeper = Sleeper::start("iotap-named-by-arg0");
+        assert_eq!(arg0(sleeper.pid()).as_deref(), Some("iotap-named-by-arg0"));
+        // The kernel names it after the file it runs.
+        let name = info(sleeper.pid()).map(|info| info.name);
+        assert_eq!(name.as_deref(), Some("sleep"));
+        assert_eq!(exe_path(sleeper.pid()).as_deref(), Some("/bin/sleep"));
+    }
+
+    #[test]
+    fn finds_the_first_argument_after_the_padded_path() {
+        let area = |argc: c_int, strings: &[u8]| [&argc.to_ne_bytes()[..], strings].concat();
+        let args = area(2, b"/bin/sleep\0\0\0\0\0\0zz\0x\0HOME=/var/root\0");
+        assert_eq!(first_argument(&args).as_deref(), Some("zz"));
+        // What follows the path of a process started without arguments is its environment.
+        assert_eq!(first_argument(&area(0, b"/bin/sleep\0\0HOME=/var/root\0")), None);
+        assert_eq!(first_argument(&area(1, b"/bin/sleep\0\0\0")), None);
+        assert_eq!(first_argument(&area(1, b"/bin/sleep")), None);
+        assert_eq!(first_argument(&args[..3]), None);
+        // An argument that runs to the end of the area ends there.
+        assert_eq!(first_argument(&area(1, b"/bin/sleep\0zz")).as_deref(), Some("zz"));
     }
 
     #[test]

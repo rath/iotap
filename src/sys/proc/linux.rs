@@ -1,9 +1,10 @@
-//! Process facts from `/proc`: process listing, descriptor tables and what a descriptor refers
-//! to.
+//! Process facts from `/proc`: process listing, first arguments, descriptor tables and what a
+//! descriptor refers to.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -15,6 +16,9 @@ use crate::model::{Endpoint, FdType, Proto, Target};
 const PF_EXITING: u64 = 0x4;
 /// What a link in `/proc` adds to the path of a file that was unlinked.
 const DELETED: &str = " (deleted)";
+/// The most of `/proc/<pid>/cmdline` read for `argv[0]`, `PATH_MAX`: one longer than any path
+/// names no program to trace by.
+const ARG0_BYTES: usize = 4096;
 
 /// The socket tables of a network namespace, in `/proc/<pid>/net`, most used first.
 const TABLES: [(&str, Layout); 11] = [
@@ -69,6 +73,24 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
 /// Path of the executable a process runs.
 pub fn exe_path(pid: i32) -> Option<String> {
     link(&format!("/proc/{pid}/exe"))
+}
+
+/// `argv[0]` of a process as its memory holds it now, which the process may have rewritten;
+/// `None` if the process is gone or has no arguments, as kernel threads have none.
+pub fn arg0(pid: i32) -> Option<String> {
+    let mut head = Vec::new();
+    fs::File::open(format!("/proc/{pid}/cmdline"))
+        .ok()?
+        .take(ARG0_BYTES as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    let end = match head.iter().position(|&b| b == 0) {
+        Some(end) => end,
+        // Without its NUL, it may go on past what was read.
+        None if head.len() == ARG0_BYTES => return None,
+        None => head.len(),
+    };
+    (end > 0).then(|| String::from_utf8_lossy(&head[..end]).into_owned())
 }
 
 /// Current working directory of a process.
@@ -482,6 +504,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::sys::proc::Sleeper;
 
     fn me() -> i32 {
         i32::try_from(std::process::id()).unwrap()
@@ -495,8 +518,19 @@ mod tests {
         assert!(list_pids().contains(&me()));
         assert!(exe_path(me()).is_some_and(|p| p.starts_with('/')));
         assert!(cwd(me()).is_some_and(|p| p.starts_with('/')));
+        assert_eq!(arg0(me()), std::env::args().next());
         assert_eq!(info(-5), None);
         assert_eq!(info(i32::MAX), None);
+        assert_eq!(arg0(i32::MAX), None);
+    }
+
+    #[test]
+    fn reads_the_first_argument_another_process_was_started_with() {
+        let sleeper = Sleeper::start("iotap-named-by-arg0");
+        assert_eq!(arg0(sleeper.pid()).as_deref(), Some("iotap-named-by-arg0"));
+        // The kernel names it after the file it runs.
+        let name = info(sleeper.pid()).map(|info| info.name);
+        assert_eq!(name.as_deref(), Some("sleep"));
     }
 
     #[test]

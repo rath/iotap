@@ -20,13 +20,17 @@ impl Spec {
     }
 }
 
-/// A traced process and what tells it apart from a later process with the same pid.
+/// A traced process: what names it, and what tells it apart from a later process with the same
+/// pid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tracked {
     pub pid: i32,
     pub name: String,
     pub start: (u64, u64),
     pub exe: Option<String>,
+    /// Its first argument as it stands now: the command or path it was started as, unless it has
+    /// rewritten it since.
+    pub arg0: Option<String>,
 }
 
 impl Tracked {
@@ -45,8 +49,33 @@ impl Tracked {
             name: info.name,
             start: info.start,
             exe: proc::exe_path(pid),
+            arg0: proc::arg0(pid),
         })
     }
+
+    /// True when `wanted` names the process, ignoring case: its name, or the file name of its
+    /// executable or of its first argument. The macOS kernel names a process after the file it
+    /// runs, links followed, while the first argument keeps the command it was started as, which
+    /// is what `pgrep` and `killall` go by there.
+    pub fn is_named(&self, wanted: &str) -> bool {
+        self.names().any(|name| name.eq_ignore_ascii_case(wanted))
+    }
+
+    /// Its name, then the file names of its executable and of its first argument.
+    fn names(&self) -> impl Iterator<Item = &str> {
+        [
+            Some(self.name.as_str()),
+            self.exe.as_deref().map(file_name),
+            self.arg0.as_deref().map(file_name),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+/// The part of `path` after its last slash.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,14 +84,6 @@ pub enum TargetError {
     NoPid(i32),
     #[error("no process named '{name}'{hint}")]
     NoName { name: String, hint: String },
-}
-
-/// True when `wanted` names the process, ignoring case: its name or its executable's file name.
-pub fn name_matches(wanted: &str, name: &str, exe: Option<&str>) -> bool {
-    name.eq_ignore_ascii_case(wanted)
-        || exe
-            .and_then(|p| p.rsplit('/').next())
-            .is_some_and(|b| b.eq_ignore_ascii_case(wanted))
 }
 
 /// Resolves every spec, excluding `own_pid`. Each name must match at least one process.
@@ -74,11 +95,7 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
             Spec::Pid(pid) => vec![Tracked::probe(*pid).ok_or(TargetError::NoPid(*pid))?],
             Spec::Name(name) => {
                 let all = everyone.get_or_insert_with(|| all_processes(own_pid));
-                let matched: Vec<Tracked> = all
-                    .iter()
-                    .filter(|t| name_matches(name, &t.name, t.exe.as_deref()))
-                    .cloned()
-                    .collect();
+                let matched: Vec<Tracked> = all.iter().filter(|t| t.is_named(name)).cloned().collect();
                 if matched.is_empty() {
                     return Err(TargetError::NoName {
                         name: name.clone(),
@@ -98,7 +115,7 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
 }
 
 /// Every running process except `own_pid`.
-pub fn all_processes(own_pid: i32) -> Vec<Tracked> {
+fn all_processes(own_pid: i32) -> Vec<Tracked> {
     proc::list_pids()
         .into_iter()
         .filter(|&pid| pid != own_pid)
@@ -106,12 +123,15 @@ pub fn all_processes(own_pid: i32) -> Vec<Tracked> {
         .collect()
 }
 
+/// Names of processes that contain `wanted`, ignoring case, to offer in its place.
 fn similar(all: &[Tracked], wanted: &str) -> String {
     let wanted = wanted.to_lowercase();
     let mut close: Vec<String> = all
         .iter()
-        .filter(|t| t.name.to_lowercase().contains(&wanted))
-        .map(|t| format!("{} ({})", t.name, t.pid))
+        .filter_map(|t| {
+            let name = t.names().find(|name| name.to_lowercase().contains(&wanted))?;
+            Some(format!("{} ({})", printable(name), t.pid))
+        })
         .collect();
     close.sort();
     close.dedup();
@@ -128,9 +148,28 @@ fn similar(all: &[Tracked], wanted: &str) -> String {
     format!("; similar: {}{tail}", close.join(", "))
 }
 
+/// `name` with each control character written as `?`: a process can give itself any first
+/// argument, and this one is shown on a terminal.
+fn printable(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::proc::Sleeper;
+
+    fn process(name: &str, exe: Option<&str>, arg0: Option<&str>) -> Tracked {
+        Tracked {
+            pid: 1,
+            name: name.into(),
+            start: (0, 0),
+            exe: exe.map(Into::into),
+            arg0: arg0.map(Into::into),
+        }
+    }
 
     #[test]
     fn parses_specs() {
@@ -142,17 +181,54 @@ mod tests {
 
     #[test]
     fn matches_names_ignoring_case() {
-        assert!(name_matches("safari", "Safari", None));
-        assert!(name_matches(
-            "Google Chrome Helper",
+        assert!(process("Safari", None, None).is_named("safari"));
+        let helper = process(
             "Google Chrome He",
-            Some("/Applications/x/Google Chrome Helper")
-        ));
-        assert!(!name_matches(
-            "chrome",
-            "Google Chrome",
-            Some("/Applications/Google Chrome")
-        ));
+            Some("/Applications/x/Google Chrome Helper"),
+            None,
+        );
+        assert!(helper.is_named("Google Chrome Helper"));
+        let chrome = process("Google Chrome", Some("/Applications/Google Chrome"), None);
+        assert!(!chrome.is_named("chrome"));
+    }
+
+    #[test]
+    fn matches_the_command_a_process_was_started_as() {
+        // Started through a link to a file named after its version, as Claude Code's is.
+        let linked = process(
+            "2.1.282",
+            Some("/Users/u/.local/share/claude/versions/2.1.282"),
+            Some("claude"),
+        );
+        assert!(linked.is_named("Claude"));
+        assert!(linked.is_named("2.1.282"));
+        let by_path = process("sleep", Some("/bin/sleep"), Some("/tmp/links/nap"));
+        assert!(by_path.is_named("nap"));
+        assert!(!by_path.is_named("links"));
+        // A title the process gave itself.
+        let titled = process("postgres", None, Some("postgres: checkpointer"));
+        assert!(titled.is_named("postgres: checkpointer"));
+        assert!(!titled.is_named("checkpointer"));
+    }
+
+    #[test]
+    fn resolves_a_process_by_the_command_it_was_started_as() {
+        let me = i32::try_from(std::process::id()).unwrap();
+        let command = format!("iotap-test-{me}-nap");
+        let sleeper = Sleeper::start(&command);
+        let found = resolve(&[Spec::Name(command.clone())], me).unwrap();
+        assert_eq!(found.iter().map(|t| t.pid).collect::<Vec<_>>(), [sleeper.pid()]);
+        // Part of the command names no process, but the process is offered.
+        let missed = resolve(&[Spec::Name(format!("iotap-test-{me}"))], me).unwrap_err();
+        let offer = format!("; similar: {command} ({})", sleeper.pid());
+        assert!(missed.to_string().ends_with(&offer), "{missed}");
+    }
+
+    #[test]
+    fn offers_names_with_control_characters_written_as_question_marks() {
+        let mut titled = process("sleep", None, Some("nap\x1b[31m"));
+        titled.pid = 7;
+        assert_eq!(similar(&[titled], "NAP"), "; similar: nap?[31m (7)");
     }
 
     #[test]

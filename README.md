@@ -64,11 +64,17 @@ iotap [OPTIONS] <TARGET>...
 iotap --replay <FILE> [OPTIONS]
 ```
 
-A TARGET is a process ID or a process name. A name matches every running process whose name or
-executable file name equals it, ignoring case, and iotap also traces processes started later under
-that name. At least one process must match when iotap starts. `-n` makes numeric targets names.
-On Linux a process's name is the one the kernel keeps, at most 15 characters, so a longer name
-matches only the executable's file name.
+A TARGET is a process ID or a process name. A name matches every running process whose name,
+executable's file name or first argument's file name equals it, ignoring case, and iotap also
+traces processes started later under that name. At least one process must match when iotap
+starts. `-n` makes numeric targets names.
+
+The first argument, `argv[0]`, holds the command a process was started by, and it is the name
+`pgrep` and `killall` go by on macOS. The macOS kernel names a process after the file it runs,
+links followed, so a program started through a link to a file named after its version, as some
+installers set up, has the version for its name and still matches the name of the link. On Linux
+a process's name is the one the kernel keeps, at most 15 characters, so a longer name matches
+only the file names.
 
 ```
 sudo iotap 1234                        # one process
@@ -280,7 +286,9 @@ that system's numbers for errors, address families and flags.
   trace does not show, as by exec for a close-on-exec descriptor, can still leave a lookup naming
   a later descriptor.
 - **Children.** Forked children are not traced. A name target picks up processes that start with
-  that name, or take it by exec, within 250 ms and misses their first calls under it.
+  that name, or take it by exec, within 250 ms and misses their first calls under it. A process
+  that gives itself the name in `argv[0]` later, as Node.js programs do through `process.title`,
+  is picked up only if it does so within two seconds of starting or of its latest exec.
 - **exec, on macOS.** exec gives a process a new kernel identity without the trace flag. iotap
   flags the process again within 250 ms and misses the calls in between. On Linux tracing goes on
   through exec.
@@ -346,7 +354,10 @@ kernel interface itself. After changing `src/sys/`, `src/reader.rs`, a syscall t
 9. **Names.** While iotap traces a name, start a process that takes it by exec a second after it
    starts, such as `sh -c 'sleep 1; exec ./mycat'` for a `cat` you built that waits for its input.
    A copy of `/bin/cat` will not do: macOS kills copies of its own programs as they start. Expect
-   the "now tracing" notice for it.
+   the "now tracing" notice for it. Then run `yes` through a link to `/usr/bin/yes` and trace the
+   link's name; while that runs, start a second `yes` through the link, and a process that takes
+   the name in `argv[0]` a second after it starts, as `perl -e 'sleep 1; $0 = "<name>"; …'` does.
+   Expect `yes` as the first process's name, and the "now tracing" notice for the other two.
 10. **Host names.** Repeat check 3 with `--resolve`, then with `--tui --resolve`. Expect the
     server's host name in place of its address in the summary and in the Network and Events tabs,
     the address and the name in the details panel, and `n` switching between names and
@@ -382,6 +393,9 @@ loaded; iotap's are named `sys_enter`, `sys_exit` and, from Linux 6.16, `process
    count none that were dropped.
 9. **Names.** Trace a name, then start a new process with that name and one that takes it by exec,
    each blocked in a read for a second. Expect the "now tracing" notice for both, and their calls.
+   Repeat with a name that only `argv[0]` holds, as `bash -c 'exec -a <name> cat'` gives, and
+   with a process that takes the name in `argv[0]` a second after it starts, as
+   `perl -e 'sleep 1; $0 = "<name>"; …'` does.
 10. **Short-lived connections.** Trace a program that connects UDP sockets to a local server and
     closes each at once. Expect `udp -> 127.0.0.1:…` rows, not `udp ?`.
 11. **Calls under way.** Trace a process whose read began before iotap started and ends while it

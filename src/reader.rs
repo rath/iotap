@@ -11,12 +11,18 @@ use std::time::{Duration, Instant};
 use crate::session::Input;
 use crate::sys::proc::{self, ProcInfo};
 use crate::sys::time;
-use crate::target::{self, Tracked};
+use crate::target::Tracked;
 use crate::trace::Records;
 
 /// How often an idle reader still says how far the trace has been read, so that the consumer
 /// can settle what it asked the system about.
 const IDLE_WATERMARK: Duration = Duration::from_millis(100);
+
+/// How many polls after its first check a process that matched no followed name is checked
+/// again: a program may name itself through argv[0] a moment after it starts, as Node.js
+/// programs do by setting `process.title`, and on Linux exec renames a process a moment before
+/// the new program's arguments are in place. Two seconds at the interval iotap polls at.
+const RECHECKS: u8 = 8;
 
 /// What one read of the kernel buffer found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -162,9 +168,17 @@ struct Watch {
     tracked: Vec<Tracked>,
     follow: Vec<String>,
     own_pid: i32,
-    /// Start times and names of processes already checked against `follow`. exec renames a
-    /// process without starting it anew, and the new name may be one to follow.
-    seen: HashMap<i32, ((u64, u64), String)>,
+    /// Processes already checked against `follow`, by pid.
+    seen: HashMap<i32, Seen>,
+}
+
+/// A process checked against the followed names. exec renames a process without starting it
+/// anew, and the new name may be one to follow.
+struct Seen {
+    start: (u64, u64),
+    name: String,
+    /// Polls left in which it is checked again.
+    rechecks: u8,
 }
 
 impl Watch {
@@ -177,8 +191,13 @@ impl Watch {
         };
         if !watch.follow.is_empty() {
             // Processes running now were matched at startup; only later ones are new.
-            for process in target::all_processes(watch.own_pid) {
-                watch.seen.insert(process.pid, (process.start, process.name));
+            for info in proc::list_pids().into_iter().filter_map(proc::info) {
+                let seen = Seen {
+                    start: info.start,
+                    name: info.name,
+                    rechecks: 0,
+                };
+                watch.seen.insert(info.pid, seen);
             }
         }
         watch
@@ -232,40 +251,44 @@ impl Watch {
                 continue;
             }
             let Some(info) = proc::info(pid) else { continue };
-            if !self.first_sight(&info) {
+            if !self.due(&info) {
                 continue;
             }
-            let exe = proc::exe_path(pid);
-            if !self
-                .follow
-                .iter()
-                .any(|name| target::name_matches(name, &info.name, exe.as_deref()))
-            {
+            let process = Tracked {
+                pid,
+                name: info.name,
+                start: info.start,
+                exe: proc::exe_path(pid),
+                arg0: proc::arg0(pid),
+            };
+            if !self.follow.iter().any(|name| process.is_named(name)) {
                 continue;
             }
             if tracer.add_pid(pid).is_ok() {
-                let process = Tracked {
-                    pid,
-                    name: info.name,
-                    start: info.start,
-                    exe,
-                };
                 inputs.push(Input::Attached(process.process()));
                 self.tracked.push(process);
             }
         }
     }
 
-    /// Notes the process `info` describes. False when it was checked before under the same
-    /// name; true when it is new, or exec has renamed it since.
-    fn first_sight(&mut self, info: &ProcInfo) -> bool {
-        match self.seen.get(&info.pid) {
-            Some((start, name)) if *start == info.start && *name == info.name => false,
-            _ => {
-                self.seen.insert(info.pid, (info.start, info.name.clone()));
-                true
-            }
+    /// Notes the process `info` describes. True when it is to be checked against `follow`: when
+    /// it is new or exec has renamed it, and on the [`RECHECKS`] polls after.
+    fn due(&mut self, info: &ProcInfo) -> bool {
+        if let Some(seen) = self.seen.get_mut(&info.pid)
+            && seen.start == info.start
+            && seen.name == info.name
+        {
+            let due = seen.rechecks > 0;
+            seen.rechecks = seen.rechecks.saturating_sub(1);
+            return due;
         }
+        let seen = Seen {
+            start: info.start,
+            name: info.name.clone(),
+            rechecks: RECHECKS,
+        };
+        self.seen.insert(info.pid, seen);
+        true
     }
 }
 
@@ -276,6 +299,7 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
 
     use super::*;
+    use crate::sys::proc::Sleeper;
     use crate::trace::kdebug::synth::Synth;
 
     /// Hands out scripted reads. Once they run out, reads find nothing and, when given `stop`,
@@ -366,6 +390,7 @@ mod tests {
             name: "gone".into(),
             start: (1, 0),
             exe: None,
+            arg0: None,
         }
     }
 
@@ -457,20 +482,40 @@ mod tests {
     }
 
     #[test]
-    fn a_process_renamed_by_exec_is_checked_again() {
+    fn a_process_is_checked_for_a_while_and_again_once_exec_renames_it() {
         let mut watch = Watch::new(Vec::new(), &config(Duration::ZERO));
         let process = |name: &str, start: u64| ProcInfo {
             pid: 70,
             name: name.into(),
             start: (start, 0),
         };
-        assert!(watch.first_sight(&process("sh", 5)));
-        assert!(!watch.first_sight(&process("sh", 5)), "checked already");
+        let mut checks = |info: &ProcInfo| (0..20).filter(|_| watch.due(info)).count();
+        // When first seen, and on the polls after, in which it may still name itself.
+        assert_eq!(checks(&process("sh", 5)), 1 + usize::from(RECHECKS));
         // exec keeps the process and its start time, and names it after the new program.
-        assert!(watch.first_sight(&process("python3", 5)));
-        assert!(!watch.first_sight(&process("python3", 5)));
+        assert_eq!(checks(&process("python3", 5)), 1 + usize::from(RECHECKS));
         // A later process given the same pid.
-        assert!(watch.first_sight(&process("python3", 6)));
+        assert_eq!(checks(&process("python3", 6)), 1 + usize::from(RECHECKS));
+    }
+
+    #[test]
+    fn follows_a_new_process_by_the_command_it_was_started_as() {
+        let me = i32::try_from(std::process::id()).unwrap();
+        let command = format!("iotap-follow-{me}");
+        let config = ReaderConfig {
+            follow: vec![command.clone()],
+            own_pid: me,
+            ..config(Duration::ZERO)
+        };
+        let mut watch = Watch::new(Vec::new(), &config);
+        let sleeper = Sleeper::start(&command);
+        let mut tracer = Scripted::new([], None);
+        let inputs = watch.poll(&mut tracer).unwrap();
+        assert!(
+            matches!(&inputs[..], [Input::Attached(process)] if process.pid == sleeper.pid()),
+            "{inputs:?}"
+        );
+        assert_eq!(tracer.added, [sleeper.pid()]);
     }
 
     #[test]

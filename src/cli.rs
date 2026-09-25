@@ -14,9 +14,9 @@ use clap::Parser;
 #[command(name = "iotap", version, about, long_about)]
 #[expect(clippy::struct_excessive_bools, reason = "independent command-line flags")]
 pub struct Cli {
-    /// Process IDs or names to trace. A name matches every process whose name or executable
-    /// file name equals it, ignoring case; processes started later under that name are traced
-    /// too.
+    /// Process IDs or names to trace. A name matches every process whose name, or the file name
+    /// of its executable or of its first argument (the command it was started by), equals it,
+    /// ignoring case; processes started later under that name are traced too.
     #[arg(value_name = "TARGET", required_unless_present_any = ["replay", "dump_fds"])]
     pub targets: Vec<String>,
 

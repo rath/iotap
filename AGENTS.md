@@ -52,6 +52,7 @@ libbpf-rs builds its bundled libbpf, which needs the libelf and zlib development
 | `src/main.rs` | Entry point; prints errors as `iotap: …` and sets the exit status |
 | `src/cli.rs` | Command line (clap derive) |
 | `src/app.rs` | Wiring: root check, trace facility setup, reader thread, output modes, signals, replay |
+| `src/target.rs` | Targets to processes: pids, and names, each matched against a process's name and the file names of its executable and of its first argument (`argv[0]`) |
 | `src/reader.rs` | Reader thread: drains the kernel through the `Tracer` trait (kdebug and the eBPF program implement it), watches processes for exit, exec and new names |
 | `src/session.rs` | Deterministic core: decoded records to I/O events, notices, statistics and the summary |
 | `src/trace/mod.rs` | Record batches of each format, what records tell once put together, and the `Decode` trait each format implements |
@@ -72,7 +73,7 @@ libbpf-rs builds its bundled libbpf, which needs the libelf and zlib development
 | `src/record.rs` | `--record` and `--replay` file format |
 | `src/output/` | Text and JSON Lines output, shared formatting |
 | `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), `fit` (names fitted to columns), `clipboard` (copying), the frame loop |
-| `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`) on Linux; the trace clock, user accounts and the resolver's host names (`dns`) on both |
+| `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc and the `kern.procargs2` sysctl (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`) on Linux; the trace clock, user accounts and the resolver's host names (`dns`) on both |
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
