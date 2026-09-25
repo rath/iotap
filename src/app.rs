@@ -159,6 +159,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let interrupted = watch_signals(&stop)?;
     let config = ReaderConfig {
         follow,
+        children: false,
         // Short, so that the system is asked about new descriptors before most are closed again.
         wait: Duration::from_millis(10),
         poll: Duration::from_millis(250),

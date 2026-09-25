@@ -268,6 +268,7 @@ impl Tracer for Ebpf {
         Ok(Read {
             records: (!records.is_empty()).then_some(Records::Linux(records)),
             complete_to: complete.then_some(mark),
+            ..Read::default()
         })
     }
 

@@ -179,12 +179,12 @@ impl Tracer for Kdebug {
         Ok(if count > 0 {
             Read {
                 records: Some(Records::Kdebug(self.buf[..count].to_vec())),
-                complete_to: None,
+                ..Read::default()
             }
         } else {
             Read {
-                records: None,
                 complete_to: Some(read_at),
+                ..Read::default()
             }
         })
     }

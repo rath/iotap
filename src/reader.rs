@@ -8,10 +8,10 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::session::Input;
+use crate::session::{Input, UntracedReason};
 use crate::sys::proc::{self, ProcInfo};
 use crate::sys::time;
-use crate::target::Tracked;
+use crate::target::{self, Tracked};
 use crate::trace::Records;
 
 /// How often an idle reader still says how far the trace has been read, so that the consumer
@@ -32,6 +32,21 @@ pub struct Read {
     /// Every record stamped before this trace time has now been read; `None` when the read
     /// cannot vouch for that.
     pub complete_to: Option<u64>,
+    /// Processes that traced ones started, as the records show them, when iotap follows child
+    /// processes.
+    pub spawned: Vec<Spawn>,
+}
+
+/// A process that a traced one started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spawn {
+    /// The traced process that started it, when the facility knows.
+    pub parent: Option<i32>,
+    pub child: i32,
+    /// The facility traces it now; when not, it could not.
+    pub traced: bool,
+    /// The records tell the session of it, as they do on Linux. Otherwise the reader does.
+    pub in_trace: bool,
 }
 
 /// A kernel trace facility while iotap owns it: kdebug, or iotap's eBPF program.
@@ -65,6 +80,8 @@ pub trait Tracer {
 pub struct ReaderConfig {
     /// Names whose newly started processes should be traced too.
     pub follow: Vec<String>,
+    /// Trace the processes that traced ones start, and their running descendants.
+    pub children: bool,
     /// Longest wait for the kernel buffer to fill before reading anyway.
     pub wait: Duration,
     /// How often to check the traced processes.
@@ -90,7 +107,7 @@ pub fn run<T: Tracer>(
         if !stopping {
             tracer.wait(config.wait)?;
         }
-        if !marks.forward(tracer.read()?, tx) {
+        if !read_once(tracer, &mut watch, &mut marks, tx)? {
             return Ok(());
         }
         if stopping {
@@ -104,14 +121,17 @@ pub fn run<T: Tracer>(
                 }
             }
             if watch.is_empty() {
-                // Records of the last moments may still be in per-CPU buffers.
+                // Records of the last moments may still be in per-CPU buffers, among them those
+                // of a child that the last traced process started as it ended.
                 for _ in 0..2 {
                     thread::sleep(Duration::from_millis(20));
-                    if !marks.forward(tracer.read()?, tx) {
+                    if !read_once(tracer, &mut watch, &mut marks, tx)? {
                         return Ok(());
                     }
                 }
-                break;
+                if watch.is_empty() {
+                    break;
+                }
             }
         }
     }
@@ -124,6 +144,23 @@ pub fn run<T: Tracer>(
         ticks: time::now_ticks(),
     });
     Ok(())
+}
+
+/// Reads once, passes the records on, and takes up the processes they show traced ones started.
+/// Returns false if the consumer is gone.
+fn read_once<T: Tracer>(
+    tracer: &mut T,
+    watch: &mut Watch,
+    marks: &mut Marks,
+    tx: &Sender<Input>,
+) -> Result<bool, T::Error> {
+    let mut read = tracer.read()?;
+    let spawned = std::mem::take(&mut read.spawned);
+    if !marks.forward(read, tx) {
+        return Ok(false);
+    }
+    let inputs = watch.spawned(tracer, spawned)?;
+    Ok(inputs.into_iter().all(|input| tx.send(input).is_ok()))
 }
 
 /// Hands what reads find to the consumer and tells it how far the trace has been read: after
@@ -163,10 +200,13 @@ impl Marks {
     }
 }
 
-/// Liveness, exec and name-follow bookkeeping for the traced processes.
+/// Liveness, exec, name-follow and child bookkeeping for the traced processes.
 struct Watch {
     tracked: Vec<Tracked>,
     follow: Vec<String>,
+    children: bool,
+    /// The descendants that traced processes had when tracing began have been looked for.
+    swept: bool,
     own_pid: i32,
     /// Processes already checked against `follow`, by pid.
     seen: HashMap<i32, Seen>,
@@ -186,6 +226,8 @@ impl Watch {
         let mut watch = Self {
             tracked,
             follow: config.follow.clone(),
+            children: config.children,
+            swept: false,
             own_pid: config.own_pid,
             seen: HashMap::new(),
         };
@@ -237,10 +279,87 @@ impl Watch {
         for pid in gone {
             tracer.remove_pid(pid)?;
         }
+        if self.children && !self.swept {
+            // Processes started after the traced ones were listed but before the facility
+            // followed children.
+            self.swept = true;
+            let roots: Vec<i32> = self.tracked.iter().map(|t| t.pid).collect();
+            self.adopt(tracer, &roots, &mut inputs);
+        }
         if !self.follow.is_empty() {
             self.follow_new(tracer, &mut inputs);
         }
         Ok(inputs)
+    }
+
+    /// Takes up the processes that traced ones started, as a read found them, and says what the
+    /// session must learn of them besides what the records tell it.
+    fn spawned<T: Tracer>(&mut self, tracer: &mut T, spawns: Vec<Spawn>) -> Result<Vec<Input>, T::Error> {
+        let mut inputs = Vec::new();
+        for spawn in spawns {
+            let untraced = Input::Untraced {
+                pid: spawn.child,
+                parent: spawn.parent,
+                reason: UntracedReason::Ended,
+            };
+            if !spawn.traced {
+                // The facility gave up on it; the records tell why, if they tell of it at all.
+                if !spawn.in_trace {
+                    inputs.push(untraced);
+                }
+                continue;
+            }
+            // It takes the place of any earlier process given its pid, which is gone.
+            self.tracked.retain(|t| t.pid != spawn.child);
+            let Some(mut child) = Tracked::probe(spawn.child) else {
+                if spawn.in_trace {
+                    // The records may not tell of its end, and the facility must let its pid go.
+                    inputs.push(Input::Exited {
+                        pid: spawn.child,
+                        ticks: time::now_ticks(),
+                    });
+                    tracer.remove_pid(spawn.child)?;
+                } else {
+                    inputs.push(untraced);
+                }
+                continue;
+            };
+            if spawn.in_trace {
+                // To the session the child runs its parent's program until it calls exec, so
+                // the next poll reports an exec it has made already.
+                child.exe = spawn
+                    .parent
+                    .and_then(|pid| self.tracked.iter().find(|t| t.pid == pid))
+                    .and_then(|parent| parent.exe.clone());
+            } else {
+                // A parent that the facility did not name is the child's, unless the child was
+                // handed to another process when its parent ended.
+                let parent = spawn.parent.or_else(|| {
+                    let known = self.tracked.iter().any(|t| t.pid == child.parent);
+                    known.then_some(child.parent)
+                });
+                inputs.push(Input::Attached {
+                    process: child.process(),
+                    parent,
+                });
+            }
+            self.tracked.push(child);
+        }
+        Ok(inputs)
+    }
+
+    /// Traces the running descendants of `roots` that are not traced yet.
+    fn adopt<T: Tracer>(&mut self, tracer: &mut T, roots: &[i32], inputs: &mut Vec<Input>) {
+        for child in target::descendants(roots, self.own_pid) {
+            if self.tracked.iter().any(|t| t.pid == child.pid) || tracer.add_pid(child.pid).is_err() {
+                continue;
+            }
+            inputs.push(Input::Attached {
+                process: child.process(),
+                parent: Some(child.parent),
+            });
+            self.tracked.push(child);
+        }
     }
 
     fn follow_new<T: Tracer>(&mut self, tracer: &mut T, inputs: &mut Vec<Input>) {
@@ -254,13 +373,7 @@ impl Watch {
             if !self.due(&info) {
                 continue;
             }
-            let process = Tracked {
-                pid,
-                name: info.name,
-                start: info.start,
-                exe: proc::exe_path(pid),
-                arg0: proc::arg0(pid),
-            };
+            let process = Tracked::with(info);
             if !self.follow.iter().any(|name| process.is_named(name)) {
                 continue;
             }
@@ -270,6 +383,9 @@ impl Watch {
                     parent: None,
                 });
                 self.tracked.push(process);
+                if self.children {
+                    self.adopt(tracer, &[pid], inputs);
+                }
             }
         }
     }
@@ -342,10 +458,7 @@ mod tests {
             if let Some(stop) = self.stop {
                 stop.store(true, Ordering::SeqCst);
             }
-            Ok(Read {
-                records: None,
-                complete_to: Some(time::now_ticks()),
-            })
+            Ok(complete(time::now_ticks()))
         }
 
         fn add_pid(&mut self, pid: i32) -> io::Result<()> {
@@ -366,20 +479,29 @@ mod tests {
     fn found(records: &Records) -> Read {
         Read {
             records: Some(records.clone()),
-            complete_to: None,
+            ..Read::default()
         }
     }
 
     fn complete(ticks: u64) -> Read {
         Read {
-            records: None,
             complete_to: Some(ticks),
+            ..Read::default()
+        }
+    }
+
+    /// A read that shows the processes of `spawned` started.
+    fn spawning(spawned: impl IntoIterator<Item = Spawn>) -> Read {
+        Read {
+            spawned: spawned.into_iter().collect(),
+            ..Read::default()
         }
     }
 
     fn config(poll: Duration) -> ReaderConfig {
         ReaderConfig {
             follow: Vec::new(),
+            children: false,
             wait: Duration::ZERO,
             poll,
             own_pid: 0,
@@ -394,6 +516,7 @@ mod tests {
             start: (1, 0),
             exe: None,
             arg0: None,
+            parent: 1,
         }
     }
 
@@ -544,5 +667,168 @@ mod tests {
             "a process that is gone is not traced again"
         );
         assert_eq!(tracer.removed, [i32::MAX]);
+    }
+
+    /// The test process, and a watch over it that follows children but has looked for its
+    /// descendants already, which in a test include those of other tests.
+    fn watching_me() -> (Tracked, Watch) {
+        let me = Tracked::probe(i32::try_from(std::process::id()).unwrap()).unwrap();
+        let config = ReaderConfig {
+            children: true,
+            ..config(Duration::ZERO)
+        };
+        let mut watch = Watch::new(vec![me.clone()], &config);
+        watch.swept = true;
+        (me, watch)
+    }
+
+    #[test]
+    fn takes_up_children_the_records_tell_the_session_of() {
+        let (me, mut watch) = watching_me();
+        let sleeper = Sleeper::start(&format!("iotap-spawned-{}", me.pid));
+        let mut tracer = Scripted::new([], None);
+        let spawn = Spawn {
+            parent: Some(me.pid),
+            child: sleeper.pid(),
+            traced: true,
+            in_trace: true,
+        };
+        let inputs = watch.spawned(&mut tracer, vec![spawn]).unwrap();
+        assert!(inputs.is_empty(), "{inputs:?}");
+        // To the session the child runs its parent's program, so the exec it made is reported.
+        let inputs = watch.poll(&mut tracer).unwrap();
+        assert!(
+            matches!(
+                &inputs[..],
+                [Input::Exec { pid, path }] if *pid == sleeper.pid() && path.ends_with("/sleep")
+            ),
+            "{inputs:?}"
+        );
+    }
+
+    #[test]
+    fn tells_of_children_the_records_do_not() {
+        let (me, mut watch) = watching_me();
+        let sleeper = Sleeper::start(&format!("iotap-spawned-{}", me.pid));
+        let mut tracer = Scripted::new([], None);
+        // A parent the facility does not name is the child's own.
+        let spawn = Spawn {
+            parent: None,
+            child: sleeper.pid(),
+            traced: true,
+            in_trace: false,
+        };
+        let inputs = watch.spawned(&mut tracer, vec![spawn]).unwrap();
+        assert!(
+            matches!(
+                &inputs[..],
+                [Input::Attached { process, parent: Some(parent) }]
+                    if process.pid == sleeper.pid() && *parent == me.pid
+            ),
+            "{inputs:?}"
+        );
+        assert!(watch.poll(&mut tracer).unwrap().is_empty());
+    }
+
+    #[test]
+    fn children_gone_or_refused_are_not_watched() {
+        let (_, mut watch) = watching_me();
+        let mut tracer = Scripted::new([], None);
+        let gone = |in_trace| Spawn {
+            parent: Some(7),
+            child: i32::MAX,
+            traced: true,
+            in_trace,
+        };
+        let untraced = Input::Untraced {
+            pid: i32::MAX,
+            parent: Some(7),
+            reason: UntracedReason::Ended,
+        };
+        // Where the records tell of a child, they may not tell of its end; the facility lets
+        // its pid go.
+        let inputs = watch.spawned(&mut tracer, vec![gone(true)]).unwrap();
+        assert!(
+            matches!(&inputs[..], [Input::Exited { pid: i32::MAX, .. }]),
+            "{inputs:?}"
+        );
+        assert_eq!(tracer.removed, [i32::MAX]);
+        assert_eq!(
+            watch.spawned(&mut tracer, vec![gone(false)]).unwrap(),
+            std::slice::from_ref(&untraced)
+        );
+        // One the facility could not trace: the records say so where they tell of children.
+        let refused = |in_trace| Spawn {
+            traced: false,
+            ..gone(in_trace)
+        };
+        assert!(
+            watch
+                .spawned(&mut tracer, vec![refused(true)])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            watch.spawned(&mut tracer, vec![refused(false)]).unwrap(),
+            [untraced]
+        );
+        assert_eq!(watch.tracked.len(), 1, "only the test process");
+    }
+
+    #[test]
+    fn looks_for_running_descendants_once() {
+        let (me, mut watch) = watching_me();
+        watch.swept = false;
+        let sleeper = Sleeper::start(&format!("iotap-swept-{}", me.pid));
+        let mut tracer = Scripted::new([], None);
+        let inputs = watch.poll(&mut tracer).unwrap();
+        assert!(
+            inputs.iter().any(|input| matches!(
+                input,
+                Input::Attached { process, parent: Some(parent) }
+                    if process.pid == sleeper.pid() && *parent == me.pid
+            )),
+            "{inputs:?}"
+        );
+        assert!(tracer.added.contains(&sleeper.pid()));
+        // Later children are for the facility to find.
+        let later = Sleeper::start(&format!("iotap-swept-{}", me.pid));
+        let inputs = watch.poll(&mut tracer).unwrap();
+        assert!(
+            !inputs.iter().any(|input| matches!(
+                input,
+                Input::Attached { process, .. } if process.pid == later.pid()
+            )),
+            "{inputs:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_reading_for_a_child_started_as_the_last_process_ended() {
+        let stop = AtomicBool::new(false);
+        let sleeper = Sleeper::start(&format!("iotap-orphan-{}", std::process::id()));
+        let spawn = Spawn {
+            parent: Some(i32::MAX),
+            child: sleeper.pid(),
+            traced: true,
+            in_trace: false,
+        };
+        // By the first poll the only traced process is gone; its child shows up a read later.
+        let mut tracer = Scripted::new([complete(1), spawning([spawn])], Some(&stop));
+        let config = ReaderConfig {
+            children: true,
+            ..config(Duration::ZERO)
+        };
+        let (tx, rx) = mpsc::channel();
+        run(&mut tracer, vec![gone()], &config, &tx, &stop).unwrap();
+        let got = sent(&rx);
+        assert!(
+            got.iter().any(|input| matches!(
+                input,
+                Input::Attached { process, parent: Some(i32::MAX) } if process.pid == sleeper.pid()
+            )),
+            "{got:?}"
+        );
+        assert!(matches!(got.last(), Some(Input::Stopped { .. })), "{got:?}");
     }
 }

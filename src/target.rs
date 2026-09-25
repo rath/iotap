@@ -33,6 +33,8 @@ pub struct Tracked {
     /// Its first argument as it stands now: the command or path it was started as, unless it has
     /// rewritten it since.
     pub arg0: Option<String>,
+    /// Its parent's pid when it was first looked at.
+    pub parent: i32,
 }
 
 impl Tracked {
@@ -45,14 +47,19 @@ impl Tracked {
 
     /// Reads the current facts of `pid`; `None` if it is not running.
     pub fn probe(pid: i32) -> Option<Self> {
-        let info = proc::info(pid)?;
-        Some(Self {
-            pid,
+        proc::info(pid).map(Self::with)
+    }
+
+    /// The process `info` describes, with the rest of its facts read now.
+    pub fn with(info: ProcInfo) -> Self {
+        Self {
+            exe: proc::exe_path(info.pid),
+            arg0: proc::arg0(info.pid),
+            pid: info.pid,
             name: info.name,
             start: info.start,
-            exe: proc::exe_path(pid),
-            arg0: proc::arg0(pid),
-        })
+            parent: info.parent,
+        }
     }
 
     /// True when `wanted` names the process, ignoring case: its name, or the file name of its
@@ -123,9 +130,12 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
 /// Their other children are not left out.
 pub fn descendants(roots: &[i32], own_pid: i32) -> Vec<Tracked> {
     let running: Vec<ProcInfo> = proc::list_pids().into_iter().filter_map(proc::info).collect();
-    family(&running, roots, own_pid)
+    let found = family(&running, roots, own_pid);
+    let mut by_pid: HashMap<i32, ProcInfo> = running.into_iter().map(|info| (info.pid, info)).collect();
+    found
         .into_iter()
-        .filter_map(Tracked::probe)
+        .filter_map(|pid| by_pid.remove(&pid))
+        .map(Tracked::with)
         .collect()
 }
 
@@ -218,6 +228,7 @@ mod tests {
             start: (0, 0),
             exe: exe.map(Into::into),
             arg0: arg0.map(Into::into),
+            parent: 0,
         }
     }
 
