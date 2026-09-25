@@ -18,16 +18,15 @@ use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
 use crate::record::{self, Answers, Recorder, Recording};
 use crate::session::{Discard, Filter, Input, Session, SessionInfo, Sink, Summary};
-use crate::sys;
-use crate::sys::kdebug::{self, Kdebug, KdebugError};
 use crate::sys::time::{self, ClockAnchor, Timebase};
+use crate::sys::{self, Facility, FacilityError};
 use crate::target::{self, Spec, Tracked};
 use crate::trace::System;
 use crate::trace::procs::{Live, ProcSource};
 use crate::tui::state::{App, Tab};
 use crate::tui::{self, Feed};
 
-/// Process source of a live trace: libproc, optionally recorded to a file.
+/// Process source of a live trace: libproc or `/proc`, optionally recorded to a file.
 type LiveSource = Recording<Live, BufWriter<File>>;
 
 type Stdout = BufWriter<io::StdoutLock<'static>>;
@@ -104,7 +103,7 @@ fn tabs(cli: &Cli) -> &'static [Tab] {
 
 fn trace_live(cli: &Cli) -> Result<ExitCode> {
     if !sys::is_root() {
-        bail!(KdebugError::NotPermitted);
+        bail!(FacilityError::NotPermitted);
     }
     let own_pid = i32::try_from(std::process::id())?;
     let specs: Vec<Spec> = cli.targets.iter().map(|raw| Spec::parse(raw, cli.name)).collect();
@@ -120,12 +119,12 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let timebase = Timebase::host();
     let anchor = ClockAnchor::now();
     let pids: Vec<i32> = tracked.iter().map(|t| t.pid).collect();
-    let mut kd = Kdebug::start(cli.buffer, &pids)?;
+    let mut facility = Facility::start(cli.buffer, &pids)?;
     let info = SessionInfo {
         timebase,
         anchor,
         processes: tracked.iter().map(Tracked::process).collect(),
-        path_records: Kdebug::path_records(),
+        path_records: Facility::path_records(),
         system: System::HOST,
     };
     let recorder = match &cli.record {
@@ -143,7 +142,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let interrupted = watch_signals(&stop)?;
     let config = ReaderConfig {
         follow,
-        // Short, so that libproc is asked about new descriptors before most are closed again.
+        // Short, so that the system is asked about new descriptors before most are closed again.
         wait: Duration::from_millis(10),
         poll: Duration::from_millis(250),
         own_pid,
@@ -159,12 +158,12 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     };
 
     let (tx, rx) = mpsc::channel();
-    let (kd_ref, stop_ref, config_ref) = (&mut kd, &*stop, &config);
+    let (facility_ref, stop_ref, config_ref) = (&mut facility, &*stop, &config);
     let (consumed, read) = thread::scope(|scope| {
         let reader = thread::Builder::new()
-            .name("kdebug-reader".into())
+            .name("kernel-reader".into())
             .spawn_scoped(scope, move || {
-                reader::run(kd_ref, tracked, config_ref, &tx, stop_ref)
+                reader::run(facility_ref, tracked, config_ref, &tx, stop_ref)
             })
             .context("cannot start the kernel reader")?;
         let mut input = LiveInput {
@@ -184,7 +183,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         anyhow::Ok((consumed, read))
     })?;
     // Give the trace facility back before anything else can fail.
-    drop(kd);
+    drop(facility);
 
     let saved = src.finish();
     let (printer, failed) = match printer {
@@ -487,7 +486,7 @@ fn watch_signals(stop: &Arc<AtomicBool>) -> Result<Arc<AtomicBool>> {
                 flag.store(true, Ordering::SeqCst);
                 stop.store(true, Ordering::SeqCst);
             } else {
-                kdebug::release();
+                sys::release();
                 tui::emergency_restore();
                 std::process::exit(130);
             }
@@ -501,7 +500,7 @@ fn watch_signals(stop: &Arc<AtomicBool>) -> Result<Arc<AtomicBool>> {
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        kdebug::release();
+        sys::release();
         previous(info);
     }));
 }

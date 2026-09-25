@@ -4,8 +4,8 @@
 //! the looked-up path. Descriptors that existed before tracing come from a snapshot, and
 //! anything still unknown is looked up the first time it is used.
 //!
-//! libproc describes a descriptor as it is when asked, which is after the traced call that
-//! made the table ask. If the process closed the descriptor in between and got its number back
+//! libproc describes a descriptor as it is when asked, and so does `/proc` on Linux, which
+//! this module calls libproc too. That is after the traced call that made the table ask. If the process closed the descriptor in between and got its number back
 //! for a new one, the answer describes the new one. So an answer stays unconfirmed until the
 //! trace has been read past the moment it was given. If the descriptor was closed before that
 //! moment the answer is stale, and every entry that took its target from it falls back to what
@@ -65,7 +65,7 @@ struct ProcFds {
 /// An answer that entries rest on until the trace confirms it.
 #[derive(Debug)]
 struct Unconfirmed {
-    /// Mach time the answer was given.
+    /// Trace time the answer was given.
     at: u64,
     /// The descriptor libproc was asked about.
     asked: (i32, i32),

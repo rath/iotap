@@ -220,6 +220,14 @@ mod tests {
     }
 
     #[test]
+    fn numbers_fit_the_programs_map_of_calls() {
+        // `calls` in bpf/iotap.bpf.c has 1024 entries.
+        for table in [AARCH64, X86_64] {
+            assert!(table.iter().all(|entry| entry.syscall.number < 1024));
+        }
+    }
+
+    #[test]
     fn both_processors_trace_the_same_calls_but_the_old_ones() {
         let names = |table: &[Entry]| -> HashSet<&str> { table.iter().map(|e| e.syscall.name).collect() };
         let old: HashSet<&str> = [

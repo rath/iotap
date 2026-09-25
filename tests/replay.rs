@@ -10,7 +10,10 @@ use iotap::record::{Recorder, Recording};
 use iotap::session::{Collect, Filter, Input, Process, Session, SessionInfo};
 use iotap::sys::time::{ClockAnchor, Timebase};
 use iotap::trace::kdebug::pairing::PathRecords;
+#[cfg(target_os = "macos")]
 use iotap::trace::kdebug::synth::{Call, Synth};
+#[cfg(target_os = "linux")]
+use iotap::trace::linux::synth::{Call, Synth};
 use iotap::trace::procs::{Fixed, Snapshot};
 use iotap::trace::{Records, System};
 
@@ -32,11 +35,79 @@ impl Drop for TempDir {
     }
 }
 
-/// A curl-like session: open an output file, talk to a server, write the body, exit. The
-/// recording is produced by the same session and recording wrapper a live trace uses.
+/// The calls of a curl-like session, as this system's trace facility records them: open an
+/// output file, talk to a server, write the body, exit. A recording replays only on the system
+/// that made it. Returns the records, the timebase and trace time they use, and when they end.
+#[cfg(target_os = "macos")]
+fn traced() -> (Records, Timebase, PathRecords, u64) {
+    let mut synth = Synth::new(24_100_000, 2_400);
+    let mut records = synth.open(1, PID, "page.html", 4);
+    records.extend(synth.call(Call {
+        ret: 5,
+        ..Call::new(2, PID, 97, [2, 1, 6, 0])
+    }));
+    records.extend(synth.call(Call {
+        errno: libc::EINPROGRESS,
+        ..Call::new(2, PID, 98, [5, 0, 16, 0])
+    }));
+    records.extend(synth.io(2, PID, 133, 5, 517, 517));
+    records.extend(synth.io(2, PID, 29, 5, 16_384, 4_096));
+    records.extend(synth.call(Call {
+        errno: libc::EAGAIN,
+        ..Call::new(2, PID, 29, [5, 0, 16_384, 0])
+    }));
+    records.extend(synth.io(1, PID, 4, 4, 4_096, 4_096));
+    records.extend(synth.io(1, PID, 397, 1, 20, 20));
+    records.extend(synth.close(1, PID, 4));
+    records.push(synth.proc_exit(1, PID, 0));
+    let timebase = Timebase { numer: 125, denom: 3 };
+    (
+        Records::Kdebug(records),
+        timebase,
+        PathRecords::Whole,
+        synth.now(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn traced() -> (Records, Timebase, PathRecords, u64) {
+    let mut synth = Synth::new(System::HOST, 24_100_000, 100_000);
+    let records = vec![
+        synth.open(1, PID, "page.html", 4),
+        synth.call(Call {
+            ret: 5,
+            ..Call::new(2, PID, "socket", [2, 1, 6, 0, 0, 0])
+        }),
+        synth.call(Call {
+            ret: -i64::from(libc::EINPROGRESS),
+            ..Call::new(2, PID, "connect", [5, 0x7fff_0000, 16, 0, 0, 0])
+        }),
+        synth.io(2, PID, "sendto", 5, 517, 517),
+        synth.io(2, PID, "recvfrom", 5, 16_384, 4_096),
+        synth.call(Call {
+            ret: -i64::from(libc::EAGAIN),
+            ..Call::new(2, PID, "recvfrom", [5, 0, 16_384, 0, 0, 0])
+        }),
+        synth.io(1, PID, "write", 4, 4_096, 4_096),
+        synth.io(1, PID, "write", 1, 20, 20),
+        synth.close(1, PID, 4),
+        synth.exit(PID),
+    ];
+    let timebase = Timebase { numer: 1, denom: 1 };
+    (
+        Records::Linux(records),
+        timebase,
+        PathRecords::default(),
+        synth.now(),
+    )
+}
+
+/// Records the session the way a live trace does: through the same session and recording
+/// wrapper.
 fn write_recording(path: &Path) {
+    let (records, timebase, path_records, end) = traced();
     let info = SessionInfo {
-        timebase: Timebase { numer: 125, denom: 3 },
+        timebase,
         anchor: ClockAnchor {
             ticks: 24_000_000,
             unix_nanos: 1_790_000_000_000_000_000,
@@ -45,8 +116,8 @@ fn write_recording(path: &Path) {
             pid: PID,
             name: "curl".into(),
         }],
-        path_records: PathRecords::Whole,
-        system: System::Macos,
+        path_records,
+        system: System::HOST,
     };
     let mut procs = Fixed::default();
     procs.snapshots.insert(
@@ -71,38 +142,15 @@ fn write_recording(path: &Path) {
         }),
     );
 
-    let mut synth = Synth::new(24_100_000, 2_400);
-    let mut records = synth.open(1, PID, "page.html", 4);
-    records.extend(synth.call(Call {
-        ret: 5,
-        ..Call::new(2, PID, 97, [2, 1, 6, 0])
-    }));
-    records.extend(synth.call(Call {
-        errno: libc::EINPROGRESS,
-        ..Call::new(2, PID, 98, [5, 0, 16, 0])
-    }));
-    records.extend(synth.io(2, PID, 133, 5, 517, 517));
-    records.extend(synth.io(2, PID, 29, 5, 16_384, 4_096));
-    records.extend(synth.call(Call {
-        errno: libc::EAGAIN,
-        ..Call::new(2, PID, 29, [5, 0, 16_384, 0])
-    }));
-    records.extend(synth.io(1, PID, 4, 4, 4_096, 4_096));
-    records.extend(synth.io(1, PID, 397, 1, 20, 20));
-    records.extend(synth.close(1, PID, 4));
-    records.push(synth.proc_exit(1, PID, 0));
-    let stop = synth.now() + 24_000_000;
-
     let mut recording = Recording::new(procs, Some(Recorder::create(path, &info).unwrap()));
     let mut session = Session::new(info, Filter::ALL, &mut recording);
     let mut sink = Collect::default();
     for input in [
-        Input::Records(Records::Kdebug(records)),
-        Input::Exited {
-            pid: PID,
-            ticks: synth.now(),
+        Input::Records(records),
+        Input::Exited { pid: PID, ticks: end },
+        Input::Stopped {
+            ticks: end + timebase.nanos_to_ticks(1_000_000_000),
         },
-        Input::Stopped { ticks: stop },
     ] {
         recording.input(&input);
         session.handle(&input, &mut recording, &mut sink).unwrap();

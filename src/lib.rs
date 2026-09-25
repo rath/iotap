@@ -1,8 +1,12 @@
-//! `iotap` traces the file and network I/O of macOS processes through the kernel trace
-//! facility (kdebug), the same source `fs_usage` reads.
+//! `iotap` traces the file and network I/O of processes: on macOS through the kernel trace
+//! facility (kdebug), the same source `fs_usage` reads, and on Linux through an eBPF program of
+//! its own.
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("iotap only supports macOS");
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86_64"))
+)))]
+compile_error!("iotap supports macOS, and Linux on aarch64 and x86-64");
 
 pub mod app;
 pub mod cli;

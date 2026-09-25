@@ -1,4 +1,4 @@
-//! Where the descriptor table learns what descriptors refer to: libproc when tracing live,
+//! Where the descriptor table learns what descriptors refer to: the system when tracing live,
 //! a recording when replaying.
 
 use std::collections::HashMap;
@@ -15,12 +15,13 @@ pub struct Snapshot {
     pub cwd: Option<String>,
 }
 
-/// What a descriptor referred to when libproc was asked, and when that was.
+/// What a descriptor referred to when the system was asked, and when that was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Described {
     /// `None` when the descriptor was not open.
     pub target: Option<Target>,
-    /// Mach time just after libproc answered; 0 when unknown, which trusts the answer at once.
+    /// Trace time just after the system answered; 0 when unknown, which trusts the answer at
+    /// once.
     pub at: u64,
 }
 
@@ -39,7 +40,7 @@ pub trait ProcSource {
     fn describe(&mut self, pid: i32, fd: i32) -> Described;
 }
 
-/// Queries the running system through libproc.
+/// Queries the running system: libproc on macOS, `/proc` on Linux.
 #[derive(Debug, Default)]
 pub struct Live;
 
@@ -65,7 +66,7 @@ impl ProcSource for Live {
 pub struct Fixed {
     pub snapshots: HashMap<i32, Snapshot>,
     pub targets: HashMap<(i32, i32), Target>,
-    /// Trace time every answer is given at, to stand for libproc lagging behind the trace.
+    /// Trace time every answer is given at, to stand for the system lagging behind the trace.
     pub answered_at: u64,
 }
 
@@ -95,6 +96,8 @@ mod tests {
     fn live_snapshot_and_describe_agree() {
         let pid = i32::try_from(std::process::id()).unwrap();
         let file = File::open("/etc/hosts").unwrap();
+        // What the descriptor refers to, links resolved: `/private/etc/hosts` on macOS.
+        let hosts = std::fs::canonicalize("/etc/hosts").unwrap();
         let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
         let (read_end, write_end) = std::io::pipe().unwrap();
         let mut live = Live;
@@ -103,7 +106,7 @@ mod tests {
         assert_eq!(
             find(file.as_raw_fd()),
             Some(Target::File {
-                path: "/private/etc/hosts".into()
+                path: hosts.to_string_lossy().into_owned()
             })
         );
         assert!(matches!(find(udp.as_raw_fd()), Some(Target::Socket(ep)) if ep.proto == Proto::Udp));

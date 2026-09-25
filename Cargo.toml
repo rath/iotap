@@ -3,7 +3,7 @@ name = "iotap"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-description = "Trace the file and network I/O of macOS processes through the kernel trace facility"
+description = "Trace the file and network I/O of processes, through kdebug on macOS and eBPF on Linux"
 license = "MIT"
 publish = false
 
@@ -19,6 +19,9 @@ serde_json = "1"
 signal-hook = "0.3"
 thiserror = "2"
 unicode-width = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libbpf-rs = "0.27.1"
 
 [lints.rust]
 unsafe_code = "deny"

@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Trace the file and network I/O of macOS processes.
+/// Trace the file and network I/O of processes.
 ///
-/// iotap reads the kernel trace facility (the source `fs_usage` uses) and reports every read
-/// and write syscall of the chosen processes: descriptor, bytes, latency and the file path or
-/// socket endpoint. Tracing requires root; run it with sudo.
+/// iotap reports every read and write syscall of the chosen processes: descriptor, bytes,
+/// latency and the file path or socket endpoint. On macOS it reads the kernel trace facility
+/// (the source `fs_usage` uses); on Linux it runs an eBPF program of its own. Tracing requires
+/// root; run it with sudo.
 #[derive(Debug, Parser)]
 #[command(name = "iotap", version, about, long_about)]
 #[expect(clippy::struct_excessive_bools, reason = "independent command-line flags")]
@@ -59,8 +60,9 @@ pub struct Cli {
     #[arg(long, value_name = "N", default_value_t = 30)]
     pub top: usize,
 
-    /// Kernel trace buffer size in records of 64 bytes. Raise it if iotap reports dropped
-    /// records.
+    /// Kernel trace buffer size in records of 64 bytes, as macOS records are. On Linux the ring
+    /// buffer takes as many bytes, rounded up to a power of two, and holds about half as many of
+    /// its larger records. Raise it if iotap reports dropped records.
     #[arg(long, value_name = "RECORDS", default_value_t = 524_288)]
     pub buffer: u32,
 

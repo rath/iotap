@@ -15,7 +15,7 @@ use crate::target::{self, Tracked};
 use crate::trace::Records;
 
 /// How often an idle reader still says how far the trace has been read, so that the consumer
-/// can settle what it asked libproc about.
+/// can settle what it asked the system about.
 const IDLE_WATERMARK: Duration = Duration::from_millis(100);
 
 /// What one read of the kernel buffer found.
@@ -28,7 +28,7 @@ pub struct Read {
     pub complete_to: Option<u64>,
 }
 
-/// A kernel trace facility while iotap owns it, such as kdebug.
+/// A kernel trace facility while iotap owns it: kdebug, or iotap's eBPF program.
 pub trait Tracer {
     type Error: Error + Send + Sync + 'static;
 

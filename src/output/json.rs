@@ -192,7 +192,7 @@ mod tests {
             json!({
                 "type": "event", "time_ns": 5, "pid": 7, "tid": 9, "op": "recvfrom", "dir": "read",
                 "syscall": "recvfrom_nocancel", "fd": 4, "requested": 1024, "bytes": null,
-                "messages": null, "errno": 35, "error": "EAGAIN", "latency_ns": 1500,
+                "messages": null, "errno": libc::EAGAIN, "error": "EAGAIN", "latency_ns": 1500,
                 "target": {"kind": "socket", "proto": "udp", "remote": "1.2.3.4:53"},
                 "resolved": "lazy"
             })

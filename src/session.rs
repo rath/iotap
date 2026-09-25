@@ -66,11 +66,11 @@ pub enum Input {
         pid: i32,
         ticks: u64,
     },
-    /// Tracing stopped at this mach time.
+    /// Tracing stopped at this trace time.
     Stopped {
         ticks: u64,
     },
-    /// Every record up to this mach time has been delivered.
+    /// Every record up to this trace time has been delivered.
     Watermark {
         ticks: u64,
     },
@@ -153,7 +153,7 @@ struct ProcessState {
 enum Held {
     Event {
         event: IoEvent,
-        /// The unconfirmed libproc answer the target came from.
+        /// The unconfirmed answer of the system the target came from.
         answer: Option<u64>,
     },
     Notice(Notice),

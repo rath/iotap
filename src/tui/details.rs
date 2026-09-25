@@ -348,7 +348,9 @@ mod tests {
     fn shows_permissions_as_ls_does() {
         let dir = fs::symlink_metadata("/").unwrap().file_type();
         assert_eq!(permissions(0o755, dir), "drwxr-xr-x");
-        let file = fs::symlink_metadata("/private/etc/hosts").unwrap().file_type();
+        let file = fs::metadata(std::env::current_exe().unwrap())
+            .unwrap()
+            .file_type();
         assert_eq!(permissions(0o644, file), "-rw-r--r--");
         assert_eq!(permissions(0o4755, file), "-rwsr-xr-x");
         assert_eq!(permissions(0o2744, file), "-rwxr-Sr--");

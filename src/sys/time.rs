@@ -1,23 +1,13 @@
-//! Mach time conversion and local wall-clock formatting.
+//! Trace time conversion and local wall-clock formatting.
+//!
+//! Trace time is the clock the kernel stamps records with: `mach_absolute_time` ticks on
+//! macOS, `CLOCK_MONOTONIC` nanoseconds on Linux.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct MachTimebaseInfo {
-    numer: u32,
-    denom: u32,
-}
-
-// Declared here because the `libc` crate deprecates its mach bindings.
-unsafe extern "C" {
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
-    safe fn mach_absolute_time() -> u64;
-}
-
-/// Ratio that converts `mach_absolute_time` ticks to nanoseconds.
+/// Ratio that converts trace time ticks to nanoseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timebase {
     pub numer: u32,
@@ -27,14 +17,11 @@ pub struct Timebase {
 impl Timebase {
     /// The timebase of this machine.
     pub fn host() -> Self {
-        let info = host_timebase();
-        if info.numer == 0 || info.denom == 0 {
+        let (numer, denom) = clock::timebase();
+        if numer == 0 || denom == 0 {
             return Self { numer: 1, denom: 1 };
         }
-        Self {
-            numer: info.numer,
-            denom: info.denom,
-        }
+        Self { numer, denom }
     }
 
     pub fn ticks_to_nanos(self, ticks: u64) -> u64 {
@@ -48,18 +35,57 @@ impl Timebase {
     }
 }
 
-fn host_timebase() -> MachTimebaseInfo {
-    let mut info = MachTimebaseInfo::default();
-    // SAFETY: `info` is a valid, writable `mach_timebase_info` structure.
-    let rc = unsafe { mach_timebase_info(&raw mut info) };
-    if rc == 0 {
-        info
-    } else {
-        MachTimebaseInfo::default()
+#[cfg(target_os = "macos")]
+mod clock {
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+
+    // Declared here because the `libc` crate deprecates its mach bindings.
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+        safe fn mach_absolute_time() -> u64;
+    }
+
+    /// The mach timebase; zeros if it cannot be read.
+    pub(super) fn timebase() -> (u32, u32) {
+        let mut info = MachTimebaseInfo::default();
+        // SAFETY: `info` is a valid, writable `mach_timebase_info` structure.
+        let rc = unsafe { mach_timebase_info(&raw mut info) };
+        if rc == 0 { (info.numer, info.denom) } else { (0, 0) }
+    }
+
+    pub(super) fn now() -> u64 {
+        mach_absolute_time()
     }
 }
 
-/// A mach tick count and the wall-clock time read at the same moment, used to place trace
+#[cfg(target_os = "linux")]
+mod clock {
+    /// Ticks are nanoseconds.
+    pub(super) fn timebase() -> (u32, u32) {
+        (1, 1)
+    }
+
+    /// `CLOCK_MONOTONIC`, the clock `bpf_ktime_get_ns` reads.
+    pub(super) fn now() -> u64 {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is a valid, writable `timespec`. The monotonic clock always exists, so
+        // the call cannot fail.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut now) };
+        let secs = u64::try_from(now.tv_sec).unwrap_or(0);
+        let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+        secs.saturating_mul(1_000_000_000).saturating_add(nanos)
+    }
+}
+
+/// A trace time and the wall-clock time read at the same moment, used to place trace
 /// timestamps on the wall clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockAnchor {
@@ -69,7 +95,7 @@ pub struct ClockAnchor {
 
 impl ClockAnchor {
     pub fn now() -> Self {
-        let ticks = mach_absolute_time();
+        let ticks = clock::now();
         let unix_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
@@ -88,9 +114,9 @@ impl ClockAnchor {
     }
 }
 
-/// Current `mach_absolute_time`.
+/// The trace time now.
 pub fn now_ticks() -> u64 {
-    mach_absolute_time()
+    clock::now()
 }
 
 /// Formats Unix timestamps as local `HH:MM:SS.uuuuuu`, caching the conversion per second.

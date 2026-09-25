@@ -482,7 +482,8 @@ impl App {
         let text = brief(text);
         self.model.status = Some(match copied {
             Copied::Pasteboard => format!("copied {text}"),
-            Copied::Terminal(why) => {
+            Copied::Terminal(None) => format!("asked the terminal to copy {text}"),
+            Copied::Terminal(Some(why)) => {
                 format!("asked the terminal to copy {text}; pbcopy failed: {why}")
             }
         });
@@ -946,10 +947,15 @@ mod tests {
         app.copied("/b/long", &Copied::Pasteboard);
         assert_eq!(status(&app).as_deref(), Some("copied /b/long"));
         let long = format!("/{}/leaf.txt", "d".repeat(40));
-        app.copied(&long, &Copied::Terminal("pbcopy exit status: 1".into()));
+        app.copied(&long, &Copied::Terminal(Some("pbcopy exit status: 1".into())));
         assert_eq!(
             status(&app).as_deref(),
             Some("asked the terminal to copy …/leaf.txt; pbcopy failed: pbcopy exit status: 1")
+        );
+        app.copied("/b/long", &Copied::Terminal(None));
+        assert_eq!(
+            status(&app).as_deref(),
+            Some("asked the terminal to copy /b/long")
         );
     }
 

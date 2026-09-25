@@ -1,14 +1,12 @@
-//! Safe wrappers over libproc: process listing, descriptor tables and what a descriptor
-//! refers to.
-//!
-//! The rest of iotap asks only [`list_pids`], [`info`], [`exe_path`], [`cwd`], [`fds`] and
-//! [`fd_target`]; they are what another system has to provide.
+//! Process facts from libproc and the C shim: process listing, descriptor tables and what a
+//! descriptor refers to.
 
 use std::ffi::{c_char, c_int};
 use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ptr;
 
+use super::ProcInfo;
 use crate::model::{Endpoint, FdType, Proto, Target};
 
 const PROC_ALL_PIDS: u32 = 1;
@@ -62,16 +60,6 @@ unsafe extern "C" {
     fn iotap_fd_path(pid: c_int, fd: c_int, buf: *mut c_char, len: usize) -> c_int;
     fn iotap_fd_socket(pid: c_int, fd: c_int, out: *mut IotapSock) -> c_int;
     fn iotap_proc_cwd(pid: c_int, buf: *mut c_char, len: usize) -> c_int;
-}
-
-/// Facts that identify a running process.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProcInfo {
-    pub pid: i32,
-    pub name: String,
-    /// Start time as (seconds, microseconds); tells a process apart from a later one that
-    /// reuses its pid.
-    pub start: (u64, u64),
 }
 
 /// Pids of every process on the system.
