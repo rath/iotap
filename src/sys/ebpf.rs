@@ -9,10 +9,11 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 use libbpf_rs::{ErrorKind, Link, MapCore, MapFlags, MapHandle, Object, ObjectBuilder, PrintLevel};
@@ -37,6 +38,9 @@ static PROGRAM: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(env!("OUT_DIR"
 const ORDER_MARGIN_NS: u64 = 5_000_000;
 /// Most records held back while reads keep stopping at a record still being written.
 const HELD_MAX: usize = 1 << 16;
+/// How long the reader pauses after a read stopped at a record still being written: the program
+/// finishes a record within microseconds, and forces no wakeup when it does.
+const UNFINISHED_PAUSE: Duration = Duration::from_micros(50);
 /// Where the kernel describes the process exit tracepoint, wherever tracefs is mounted.
 const EXIT_FORMATS: [&str; 2] = [
     "/sys/kernel/tracing/events/sched/sched_process_exit/format",
@@ -108,8 +112,12 @@ pub struct Ebpf {
     /// When the program was wholly attached: calls under way that entered before then may have
     /// returned unseen.
     attached_at: u64,
-    /// The ring buffer's map, whose descriptor `wait` polls.
-    records: MapHandle,
+    /// The ring buffer's map, whose descriptor `wakeups` watches: kept open while it does.
+    _records: MapHandle,
+    /// Reports the wakeups the program forces; see `watch_wakeups`.
+    wakeups: OwnedFd,
+    /// The last read stopped at a record still being written.
+    unfinished: bool,
     /// Owns the programs and maps as libbpf loaded them; kept until the links are gone.
     _object: Object,
 }
@@ -178,6 +186,7 @@ impl Ebpf {
         }
         let records = map("records")?;
         let ring = Ring::new(records.as_fd(), ring_bytes as usize).map_err(EbpfError::Ring)?;
+        let wakeups = watch_wakeups(records.as_fd()).map_err(EbpfError::Ring)?;
         let (inflight, dropped, stopping) = (map("inflight")?, map("dropped")?, map("stopping")?);
 
         // New processes first: a process a traced one starts from then on is traced from its
@@ -208,7 +217,9 @@ impl Ebpf {
             dropped,
             stopping,
             attached_at: time::now_ticks(),
-            records,
+            _records: records,
+            wakeups,
+            unfinished: false,
             _object: object,
         })
     }
@@ -264,10 +275,16 @@ impl Tracer for Ebpf {
     type Error = EbpfError;
 
     /// Blocks until a quarter of the ring buffer waits, when the program wakes the reader, or
-    /// `timeout` elapses.
+    /// `timeout` elapses, even while fewer records wait: a busy traced process is read in
+    /// batches, not a record or two at a time. After a read that stopped at a record still
+    /// being written, it only pauses.
     fn wait(&mut self, timeout: Duration) -> Result<(), EbpfError> {
+        if self.unfinished {
+            thread::sleep(UNFINISHED_PAUSE);
+            return Ok(());
+        }
         let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
-        poll(self.records.as_fd(), millis).map_err(EbpfError::Ring)
+        wait_for_wakeup(self.wakeups.as_fd(), millis).map_err(EbpfError::Ring)
     }
 
     /// Takes what the ring buffer holds and passes on the records stamped before a mark a
@@ -276,6 +293,7 @@ impl Tracer for Ebpf {
         let mark = time::now_ticks().saturating_sub(ORDER_MARGIN_NS);
         let written = self.ring.written();
         let complete = self.take()? >= written;
+        self.unfinished = !complete;
         let records = if complete {
             self.order.release(mark)
         } else {
@@ -441,15 +459,41 @@ fn take_log() -> String {
     said
 }
 
-/// Waits until `fd` is readable or `millis` pass. A signal ends the wait early.
-fn poll(fd: BorrowedFd<'_>, millis: libc::c_int) -> io::Result<()> {
-    let mut entry = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
+/// An epoll instance that watches `fd`, the ring buffer, edge-triggered: a wait on it ends at
+/// the next wakeup the program forces, not whenever records wait, as `poll` would.
+fn watch_wakeups(fd: BorrowedFd<'_>) -> io::Result<OwnedFd> {
+    // SAFETY: `epoll_create1` has no preconditions.
+    let raw = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a new descriptor that nothing else owns.
+    let epoll = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut event = libc::epoll_event {
+        events: (libc::EPOLLIN | libc::EPOLLET).cast_unsigned(),
+        u64: 0,
     };
-    // SAFETY: `entry` is one valid, writable `pollfd` for the duration of the call.
-    let rc = unsafe { libc::poll(&raw mut entry, 1, millis) };
+    // SAFETY: both descriptors are open, and `event` is valid for the duration of the call.
+    let rc = unsafe {
+        libc::epoll_ctl(
+            epoll.as_raw_fd(),
+            libc::EPOLL_CTL_ADD,
+            fd.as_raw_fd(),
+            &raw mut event,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(epoll)
+}
+
+/// Waits for the next wakeup that `epoll` reports, or until `millis` pass. A signal ends the
+/// wait early.
+fn wait_for_wakeup(epoll: BorrowedFd<'_>, millis: libc::c_int) -> io::Result<()> {
+    let mut event = libc::epoll_event { events: 0, u64: 0 };
+    // SAFETY: `event` is one valid, writable `epoll_event` for the duration of the call.
+    let rc = unsafe { libc::epoll_wait(epoll.as_raw_fd(), &raw mut event, 1, millis) };
     if rc < 0 {
         let err = io::Error::last_os_error();
         if err.kind() != io::ErrorKind::Interrupted {

@@ -324,7 +324,8 @@ that system's numbers for errors, address families and flags.
    thread, whatever process it belongs to, and each exec; from these records iotap finds the
    processes that traced ones start, and flags each for tracing as soon as it reads the record.
 2. A reader thread drains the kernel buffer at least every 10 ms, so that descriptors can be looked
-   up while they are still open. Every 250 ms it also checks the processes for exits, exec and new
+   up while they are still open. On Linux the program wakes it sooner once a quarter of the ring
+   buffer is full; until then records wait, so that a busy process is read in batches. Every 250 ms it also checks the processes for exits, exec and new
    processes with a traced name; with `-f`, its first check also takes in any descendant started
    while tracing began. On Linux, calls that return on different processors reach the
    ring buffer slightly out of order, so the reader holds each record until 5 ms after its call
