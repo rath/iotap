@@ -203,10 +203,12 @@ struct {
 /* The flags of call `nr` if the current process is traced and iotap traces the call. */
 static __always_inline __u32 traced_call(__u32 tgid, __u32 nr)
 {
-	if (!bpf_map_lookup_elem(&traced, &tgid))
-		return 0;
+	/* The call first: most calls are of kinds iotap does not trace, and looking one up in the
+	 * array costs less than looking the process up in the hash map. */
 	__u32 *flags = bpf_map_lookup_elem(&calls, &nr);
-	return flags && (*flags & TRACE) ? *flags : 0;
+	if (!flags || !(*flags & TRACE))
+		return 0;
+	return bpf_map_lookup_elem(&traced, &tgid) ? *flags : 0;
 }
 
 static __always_inline int is_stopping(void)
