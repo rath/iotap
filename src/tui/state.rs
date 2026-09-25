@@ -538,7 +538,7 @@ impl App {
             KeyCode::Char('n') => {
                 view.names = !view.names;
                 self.model.status = Some(if view.names {
-                    "showing host names as the resolver finds them".to_owned()
+                    "showing host names".to_owned()
                 } else {
                     "showing addresses".to_owned()
                 });
