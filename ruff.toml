@@ -1,0 +1,4 @@
+# Lint and format settings for the scripts under scripts/, which run on macOS's Python 3.9 and on
+# anything newer.
+line-length = 100
+target-version = "py39"
