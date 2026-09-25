@@ -321,8 +321,9 @@ kernel interface itself. After changing `src/sys/`, `src/reader.rs`, a syscall t
 8. **Terminal UI.** Run `sudo ./target/release/iotap --tui $!` against the `yes` process. Try every
    key, then quit; the terminal must be restored and the summary printed.
 9. **Names.** While iotap traces a name, start a process that takes it by exec a second after it
-   starts, such as `sh -c 'sleep 1; exec ./mycat'` for a copy of `cat` named `mycat` that waits
-   for its input. Expect the "now tracing" notice for it.
+   starts, such as `sh -c 'sleep 1; exec ./mycat'` for a `cat` you built that waits for its input.
+   A copy of `/bin/cat` will not do: macOS kills copies of its own programs as they start. Expect
+   the "now tracing" notice for it.
 
 ### Linux
 
