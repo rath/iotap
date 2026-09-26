@@ -1,8 +1,8 @@
 //! Safe wrappers over the kernel and system interfaces iotap needs: on macOS the `kern.kdebug`
 //! and `kern.procargs2` sysctls, mach time, libproc and a small C shim; on Linux iotap's eBPF
-//! program, the ring buffer it writes, and `/proc`; on both the system's resolver for host names.
-//! This is the only module where `unsafe` is allowed; every block states the invariant it relies
-//! on.
+//! program, the ring buffer it writes, and `/proc`; on both the system's resolver for host names
+//! and the list of network interfaces. This is the only module where `unsafe` is allowed; every
+//! block states the invariant it relies on.
 #![allow(unsafe_code)]
 
 pub mod dns;
@@ -10,6 +10,7 @@ pub mod dns;
 pub mod ebpf;
 #[cfg(target_os = "macos")]
 pub mod kdebug;
+pub mod net;
 pub mod proc;
 pub mod time;
 pub mod user;
