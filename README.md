@@ -44,13 +44,15 @@ Network (1 target)
 Totals
   files    read 0 B (0 calls), written 4.0 KiB (2 calls)
   network  received 4.0 KiB (2 calls), sent 517 B (1 call)
+    en0    received 4.0 KiB (2 calls), sent 517 B (1 call)
   5 calls, 1 failed
 ```
 
 Read top to bottom, this is the whole life of one `curl`: it sent a 517-byte request to
 93.184.216.34 on port 443, asked for 16 KiB back and got 4 KiB, asked again and found nothing
 waiting yet (`EAGAIN`), wrote the 4 KiB to `page.html` and 20 bytes of progress to the terminal,
-then exited. The summary at the end is the same story per file and per endpoint.
+then exited. The summary at the end is the same story per file and per endpoint, and the
+network traffic went over en0, the interface that holds 192.168.1.20.
 
 For a process that runs longer, `--tui` shows the same tables live and lets you drill into any
 file or connection, `--json` streams every event as one line for `jq` or a log, and `--record`
@@ -143,6 +145,7 @@ sudo iotap -f make                     # make and every process it starts
 sudo iotap --tui 1234                  # live terminal UI
 sudo iotap --tui -q 1234               # the same without the Events tab
 sudo iotap --tui --resolve curl        # host names in place of remote addresses
+sudo iotap -i wlan0 firefox            # only network I/O over wlan0
 sudo iotap --json curl | jq -c 'select(.type == "event")'
 sudo iotap -q -d 10 Finder             # summary only, after 10 seconds
 sudo iotap --net-only --record t.iotaprec 1234
@@ -156,6 +159,7 @@ iotap --replay t.iotaprec              # the same output again, without root
 | `--json` | JSON Lines instead of text |
 | `-q`, `--quiet` | No event lines; notices and the summary remain. With `--tui`, no Events tab |
 | `--files-only`, `--net-only` | Report one kind of I/O |
+| `-i`, `--interface NAME` | Report only network I/O over this network interface; repeat for several (see [Network interfaces](#network-interfaces)) |
 | `--resolve` | Show remote addresses as host names in the summary, and in the terminal UI from the start (see [Host names](#host-names)); not with `--json` |
 | `-d`, `--duration SECS` | Stop after this many seconds |
 | `--top N` | Rows per table in the text summary; default 30 |
@@ -188,13 +192,13 @@ epoch.
 | `type` | Fields |
 |---|---|
 | `start` | `time_ns`, `processes` |
-| `event` | `time_ns`, `pid`, `tid`, `op`, `dir`, `syscall`, `fd`, `requested`, `bytes`, `messages`, `errno`, `error`, `latency_ns`, `target`, `resolved` |
+| `event` | `time_ns`, `pid`, `tid`, `op`, `dir`, `syscall`, `fd`, `requested`, `bytes`, `messages`, `errno`, `error`, `latency_ns`, `target`, `interface`, `resolved` |
 | `lost_events` | `time_ns` |
 | `attached` | `pid`, `name`, `parent` |
 | `untraced` | `pid`, `parent`, `reason` |
 | `exec` | `pid`, `path` |
 | `exited` | `pid`, `name` |
-| `summary` | `duration_ns`, `processes`, `totals`, `lost_events`, `unfinished_calls`, `calls_started_before_trace`, `untraced_children`, `files`, `network`, `other` |
+| `summary` | `duration_ns`, `processes`, `totals`, `interfaces`, `lost_events`, `unfinished_calls`, `calls_started_before_trace`, `untraced_children`, `unknown_interface_calls`, `files`, `network`, `other` |
 
 The `parent` of an `attached` process is the traced process that started it, or null when iotap
 does not know it, as for a process attached by its name. An `untraced` object tells of a child
@@ -204,6 +208,11 @@ it, and `full` when iotap was tracing as many processes as it can. The summary's
 
 A `target` is `{"kind":"file","path":…}`, `{"kind":"socket","proto":…,"local":…,"remote":…}`
 with a `path` for Unix-domain sockets, `{"kind":"other","fd_type":…}` or `{"kind":"unknown"}`.
+An event's `interface` is the name of the network interface its I/O went over, `"?"` when iotap
+cannot tell it, or null for I/O that goes over none, such as a file's or a Unix-domain
+socket's (see [Network interfaces](#network-interfaces)). The summary's `interfaces` sums the
+network I/O over each, in the same terms, and `unknown_interface_calls` counts the calls that
+`--interface` left out for going over an interface iotap cannot tell.
 A file `path` that starts with `…` is only the end of a longer path (see
 [Limitations](#limitations)). An `errno` is the traced system's own number, which `error` names.
 `resolved` says how iotap learned the target:
@@ -215,13 +224,14 @@ A file `path` that starts with `…` is only the end of a longer path (see
   the call works only on sockets.
 
 ```
-{"type":"event","time_ns":1790259200104708333,"pid":4242,"tid":2,"op":"recvfrom","dir":"read","syscall":"recvfrom","fd":5,"requested":16384,"bytes":null,"messages":null,"errno":35,"error":"EAGAIN","latency_ns":41666,"target":{"kind":"socket","proto":"tcp","local":"192.168.1.20:61000","remote":"93.184.216.34:443"},"resolved":"traced"}
+{"type":"event","time_ns":1790259200104708333,"pid":4242,"tid":2,"op":"recvfrom","dir":"read","syscall":"recvfrom","fd":5,"requested":16384,"bytes":null,"messages":null,"errno":35,"error":"EAGAIN","latency_ns":41666,"target":{"kind":"socket","proto":"tcp","local":"192.168.1.20:61000","remote":"93.184.216.34:443"},"interface":"en0","resolved":"traced"}
 ```
 
 ### Terminal UI
 
 `--tui` shows throughput for the last complete second and in total, then three tabs: files,
-network endpoints, and the latest 10,000 events. With `-q` the Events tab is left out, and
+network endpoints, and the latest 10,000 events. `i` adds the network throughput of each
+interface below the totals. With `-q` the Events tab is left out, and
 events are not kept for it. This is the Files tab after replaying a recorded download:
 
 ```
@@ -235,7 +245,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
         0 B       0   14.1 MiB    3601      0  <1s /Users/me/big.iso
         0 B       0       20 B       1      0  <1s /dev/ttys004
 
- 4242 (curl) exited                  q quit  s sort  p pause  r reset  ↑↓ select  enter details
+ 4242 (curl) exited    q quit  s sort  p pause  i interfaces  r reset  ↑↓ select  enter details
 ```
 
 | Key | Action |
@@ -247,6 +257,7 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | `y` | Copy the selected row's path, or its socket's address |
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
 | `n` | Show remote addresses as host names, or as addresses again (see [Host names](#host-names)). The summary printed on quitting does as the UI did |
+| `i` | Show the network throughput of each interface below the totals, or hide it again (see [Network interfaces](#network-interfaces)) |
 | Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, select a row and move the selection; the first key selects the top row, or the last row for End. In the Events tab, scroll; End follows new events again |
 | Esc | Back out a step: close the details, then let go of the selection, then quit |
 | `q`, Ctrl-C | Quit and print the summary |
@@ -270,6 +281,7 @@ The details panel opens below the Files or Network table and shows the selected 
 - mean and longest latency
 - when it was first and last used
 - the processes that used it
+- for a socket, the network interfaces its I/O went over
 - for a connection, its local addresses
 - its latest events, unless `-q` left out the Events tab
 
@@ -301,10 +313,55 @@ Only the addresses shown are looked up, each once: the rows on screen in the ter
 the rows of the summary, for which iotap waits at most two seconds. Event lines, JSON and
 recordings keep the addresses, and replaying with `--resolve` looks the names up again.
 
+### Network interfaces
+
+The kernel's records do not say which network interface a call's data went over, so iotap tells
+it from the socket's addresses and the host's interfaces, which it lists with `getifaddrs` as
+tracing starts and again when a socket's local address is new to it:
+
+- Traffic to a loopback address or to one of the host's own addresses goes over the loopback
+  interface, `lo` on Linux and `lo0` on macOS, whichever address it comes from: the kernel
+  routes it there.
+- Other traffic goes over the interface that holds the socket's local address. A link-local
+  IPv6 address goes by the interface it is scoped to.
+- A socket without a local address of its own, such as an unconnected UDP socket bound to every
+  address, sends each datagram wherever the route to its destination leads, which iotap does
+  not see. Its I/O, and that of a socket whose ends iotap never learned, goes over an interface
+  iotap cannot tell, shown as `?`.
+- Unix-domain, netlink and routing sockets, files and other descriptors go over no interface,
+  shown as `none` where interfaces are listed.
+
+`-i NAME` reports only the network I/O over the interface named `NAME`, exactly as
+`ip link` or `ifconfig` names it, case included; repeat it for several. File and other I/O is
+left out, and so is I/O over an interface iotap cannot tell, which the summary counts. iotap
+warns when no interface has the name, but goes on, since the interface may come up later, as a
+VPN's does. The text summary lists the network totals of each interface under the network line:
+
+```
+  network  received 14.1 MiB (3642 calls), sent 1.8 KiB (12 calls)
+    wlan0  received 14.1 MiB (3601 calls), sent 517 B (1 call)
+    lo     received 2.0 KiB (21 calls), sent 1.1 KiB (9 calls)
+    none   received 1.2 KiB (20 calls), sent 120 B (1 call)
+```
+
+In the terminal UI, `i` shows the same below the throughput, with the last complete second
+beside the totals. The table's rows are the busiest interfaces first, then `?` and `none`; when
+the screen is short, the last row sums the interfaces that did not fit.
+
+```
+                FILE READ  FILE WRITTEN  NET RECEIVED      NET SENT
+ per second           0 B       1.2 MiB       1.2 MiB           0 B
+ total                0 B      14.1 MiB      14.1 MiB       1.8 KiB
+ INTERFACE     RECEIVED/S        SENT/S      RECEIVED          SENT
+ wlan0            1.2 MiB           0 B      14.1 MiB         517 B
+ lo                   0 B           0 B       2.0 KiB       1.1 KiB
+ none                 0 B           0 B       1.2 KiB         120 B
+```
+
 ### Recordings
 
 `--record FILE` saves the raw kernel records together with every answer libproc or `/proc` gave
-and when it gave it, and `--replay FILE` feeds them through the same processing, so a replay
+and when it gave it, and each list of the host's network interfaces, and `--replay FILE` feeds them through the same processing, so a replay
 reproduces the output of the live run in any output mode. A recording holds paths and addresses
 but no transferred data. It replays on the operating system it was made on, since its calls use
 that system's numbers for errors, address families and flags.
@@ -342,8 +399,9 @@ that system's numbers for errors, address families and flags.
    was the same file, which on macOS the kernel's lookups tell by the file's vnode; otherwise the
    event gets what the trace alone knows. An event waits about 10 ms for this, at most about
    100 ms, and longer only while iotap lags behind the kernel.
-5. Processing after the reader depends only on the records and on the answers of libproc or
-   `/proc`, never on the clock, which is why recordings replay exactly. Only the live terminal UI
+5. Processing after the reader depends only on the records, on the answers of libproc or
+   `/proc` and on the lists of the host's network interfaces, never on the clock, which is why
+   recordings replay exactly. Only the live terminal UI
    reads the clock, for its elapsed time and its current second, and host names, when asked for,
    are what the resolver answers at the time.
 
@@ -402,6 +460,13 @@ that system's numbers for errors, address families and flags.
   so run iotap on the host, where it traces processes in containers by those IDs.
 - **Recording size.** A recording grows by about 64 bytes per kernel record on macOS, and by
   96 bytes plus the path or address it took per call on Linux.
+- **Interfaces.** iotap names the interface that holds a socket's local address and does not
+  look up routes, so for a bridge or a bond it names the bridge or the bond, never a member
+  port, and it misses where policy routing sends traffic out another interface. Sockets that
+  send from every address, and sockets whose ends iotap never learned, count as `?`. On Linux, a
+  process in another network namespace than iotap's, as in a container, has other interfaces
+  than the ones iotap lists, so its traffic counts as `?` too; run iotap in that namespace to
+  tell them apart. A recording made before iotap listed interfaces knows none.
 - **Host names.** A reverse lookup finds the name the owner of an address gave it, often one of a
   hosting or CDN provider rather than the name the program looked up, and often none. iotap
   cannot learn the name the program looked up, since it never reads the data programs send or

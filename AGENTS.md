@@ -115,7 +115,7 @@ without it they are skipped. When changing the scripts:
 | `src/app.rs` | Wiring: root check, trace facility setup, reader thread, output modes, signals, replay |
 | `src/target.rs` | Targets to processes: pids, and names, each matched against a process's name and the file names of its executable and of its first argument (`argv[0]`); the running descendants of processes, for `--children` |
 | `src/reader.rs` | Reader thread: drains the kernel through the `Tracer` trait (kdebug and the eBPF program implement it), watches processes for exit, exec and new names, and takes up the processes traced ones start |
-| `src/session.rs` | Deterministic core: decoded records to I/O events, notices, statistics and the summary |
+| `src/session.rs` | Deterministic core: decoded records to I/O events, the interface each went over, notices, statistics and the summary |
 | `src/trace/mod.rs` | Record batches of each format, what records tell once put together, and the `Decode` trait each format implements |
 | `src/trace/call.rs` | A syscall that returned, whatever format its records came in: its role, arguments, result and looked-up path |
 | `src/trace/kdebug/mod.rs` | The kdebug record format: the `kd_buf` record and its decoder |
@@ -129,13 +129,14 @@ without it they are skipped. When changing the scripts:
 | `src/trace/linux/order.rs` | Puts records from the ring buffer in time order and marks where the program dropped some |
 | `src/trace/linux/synth.rs` | Builds records exactly as the eBPF program writes them, for tests |
 | `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks the answers of libproc or `/proc` against the trace |
-| `src/trace/procs.rs` | `ProcSource`: libproc or `/proc` when live, fixed answers in tests |
-| `src/stats.rs` | Per-target and per-second aggregation |
+| `src/trace/procs.rs` | `ProcSource`: libproc or `/proc`, and the host's network interfaces, when live; fixed answers in tests |
+| `src/stats.rs` | Per-target, per-interface and per-second aggregation |
+| `src/interfaces.rs` | Which network interface a socket's traffic goes over: the host's interfaces as last listed, and the rules that name one from a socket's addresses |
 | `src/hosts.rs` | Host names of remote addresses for the terminal UI and the text summary: threads that ask the resolver, and the answers so far |
 | `src/record.rs` | `--record` and `--replay` file format |
 | `src/output/` | Text and JSON Lines output, shared formatting |
 | `src/tui/` | Terminal UI: `state` (keys, selection, pause, event ring), `draw` (rendering), `details` (the details panel), `fit` (names fitted to columns), `clipboard` (copying), the frame loop |
-| `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc and the `kern.procargs2` sysctl (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`) on Linux; the trace clock, user accounts and the resolver's host names (`dns`) on both |
+| `src/sys/` | The only unsafe code, behind safe functions: `kdebug` sysctls, libproc and the `kern.procargs2` sysctl (`proc/macos`) and mach time on macOS; the eBPF loader and ring buffer (`ebpf`) and `/proc` (`proc/linux`), network namespaces included, on Linux; the trace clock, user accounts, the resolver's host names (`dns`) and the network interfaces (`net`) on both |
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads; for `--children` it traces the processes traced ones start, from their start, with a record of each |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
