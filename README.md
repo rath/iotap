@@ -317,7 +317,8 @@ recordings keep the addresses, and replaying with `--resolve` looks the names up
 
 The kernel's records do not say which network interface a call's data went over, so iotap tells
 it from the socket's addresses and the host's interfaces, which it lists with `getifaddrs` as
-tracing starts and again when a socket's local address is new to it:
+tracing starts and again when a socket's local address is new to it, at most once a second of
+the trace:
 
 - Traffic to a loopback address or to one of the host's own addresses goes over the loopback
   interface, `lo` on Linux and `lo0` on macOS, whichever address it comes from: the kernel
@@ -341,6 +342,7 @@ VPN's does. The text summary lists the network totals of each interface under th
   network  received 14.1 MiB (3642 calls), sent 1.8 KiB (12 calls)
     wlan0  received 14.1 MiB (3601 calls), sent 517 B (1 call)
     lo     received 2.0 KiB (21 calls), sent 1.1 KiB (9 calls)
+    ?      received 0 B (0 calls), sent 40 B (1 call)
     none   received 1.2 KiB (20 calls), sent 120 B (1 call)
 ```
 
@@ -355,6 +357,7 @@ the screen is short, the last row sums the interfaces that did not fit.
  INTERFACE     RECEIVED/S        SENT/S      RECEIVED          SENT
  wlan0            1.2 MiB           0 B      14.1 MiB         517 B
  lo                   0 B           0 B       2.0 KiB       1.1 KiB
+ ?                    0 B           0 B           0 B          40 B
  none                 0 B           0 B       1.2 KiB         120 B
 ```
 
@@ -486,7 +489,8 @@ numbers, it runs only those. Build with `cargo build --release`, then start it i
 where `sudo -v` has been answered: each root step uses `sudo -n`, and the run ends with
 `sudo -k`. On macOS, `open -a Terminal scripts/live/macos.command` asks sudo and runs it in a
 window of its own, where sudo can use Touch ID. Its outputs go to `target/live/`. The terminal UI
-checks need Python's pyte package, and the host-name checks a connection to the Internet.
+checks need Python's pyte package, the host-name checks a connection to the Internet, and the
+interface checks a route to 192.0.2.1, such as a default route.
 
 ### macOS
 
