@@ -1,4 +1,4 @@
-//! Aggregates I/O events per target and per second of trace time.
+//! Aggregates I/O events per target, per network interface and per second of trace time.
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use serde::Serialize;
 
-use crate::model::{Category, Dir, Endpoint, FdType, IoEvent, Proto, Target, named_addr};
+use crate::model::{Category, Dir, Endpoint, FdType, IoEvent, Proto, Target, Via, named_addr};
 
 /// Seconds of throughput history kept for live views.
 const HISTORY_SECONDS: usize = 120;
@@ -184,6 +184,8 @@ pub struct Row {
     pub unsized_calls: u64,
     pub latency: Latency,
     locals: BTreeSet<SocketAddr>,
+    /// Interfaces the target's I/O went over, for sockets.
+    interfaces: BTreeSet<Via>,
     /// Processes that used the target, in pid order.
     pids: Vec<i32>,
     /// Wall-clock time of the first and of the latest event, in Unix nanoseconds.
@@ -210,6 +212,12 @@ impl Row {
         &self.locals
     }
 
+    /// The interfaces a socket's I/O went over: those named, in order, then unknown if some
+    /// went over an interface iotap cannot tell.
+    pub fn interfaces(&self) -> &BTreeSet<Via> {
+        &self.interfaces
+    }
+
     /// Processes that used the target, in pid order.
     pub fn pids(&self) -> &[i32] {
         &self.pids
@@ -227,6 +235,82 @@ pub struct Totals {
     pub other_write: Counter,
     pub events: u64,
     pub errors: u64,
+}
+
+/// Network I/O over one interface: in total, and in its latest seconds of trace time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Traffic {
+    pub read: Counter,
+    pub write: Counter,
+    /// Bytes moved in the latest second that moved any, and in the one before it, oldest first.
+    recent: [Moved; 2],
+}
+
+/// Bytes read and written during one second of trace time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Moved {
+    unix_sec: u64,
+    read: u64,
+    write: u64,
+}
+
+impl Traffic {
+    pub fn bytes(&self) -> u64 {
+        self.read.bytes + self.write.bytes
+    }
+
+    pub fn calls(&self) -> u64 {
+        self.read.calls + self.write.calls
+    }
+
+    /// Bytes read and written during `unix_sec`, known for the latest two seconds that moved
+    /// any; none for other seconds.
+    pub fn during(&self, unix_sec: u64) -> (u64, u64) {
+        self.recent
+            .iter()
+            .find(|moved| moved.unix_sec == unix_sec)
+            .map_or((0, 0), |moved| (moved.read, moved.write))
+    }
+
+    fn add(&mut self, dir: Dir, bytes: Option<u64>, unix_sec: u64) {
+        match dir {
+            Dir::Read => self.read.add(bytes),
+            Dir::Write => self.write.add(bytes),
+        }
+        let Some(bytes) = bytes else {
+            return;
+        };
+        let [older, latest] = &mut self.recent;
+        let moved = if unix_sec > latest.unix_sec {
+            *older = *latest;
+            *latest = Moved {
+                unix_sec,
+                ..Moved::default()
+            };
+            latest
+        } else if unix_sec == latest.unix_sec {
+            latest
+        } else if unix_sec == older.unix_sec {
+            // Events arrive in trace order, but tolerate a small step back.
+            older
+        } else {
+            return;
+        };
+        match dir {
+            Dir::Read => moved.read += bytes,
+            Dir::Write => moved.write += bytes,
+        }
+    }
+}
+
+/// Network I/O over one interface, for the end-of-session report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InterfaceTotals {
+    pub interface: Via,
+    pub read_bytes: u64,
+    pub read_calls: u64,
+    pub write_bytes: u64,
+    pub write_calls: u64,
 }
 
 /// Bytes moved during one second of trace time.
@@ -299,6 +383,8 @@ pub struct Stats {
     /// Rows per category, indexed by [`category_index`].
     targets: [usize; 3],
     totals: Totals,
+    /// Network I/O by the interface it went over.
+    interfaces: HashMap<Via, Traffic>,
     history: VecDeque<Second>,
 }
 
@@ -362,6 +448,17 @@ impl Stats {
             && let Some(local) = endpoint.local
         {
             row.locals.insert(local);
+        }
+        if category == Category::Network {
+            let via = &event.interface;
+            if *via != Via::NoInterface && !row.interfaces.contains(via) {
+                row.interfaces.insert(via.clone());
+            }
+            self.interfaces.entry(via.clone()).or_default().add(
+                dir,
+                event.bytes,
+                event.time_ns / 1_000_000_000,
+            );
         }
 
         self.totals.events += 1;
@@ -476,6 +573,39 @@ impl Stats {
             .collect()
     }
 
+    /// Network I/O by interface: named interfaces by bytes and then calls, most first, then I/O
+    /// over an interface iotap cannot tell, then I/O over none.
+    pub fn interfaces(&self) -> Vec<(&Via, &Traffic)> {
+        let mut interfaces: Vec<_> = self.interfaces.iter().collect();
+        let rank = |via: &Via| match via {
+            Via::Interface(_) => 0,
+            Via::Unknown => 1,
+            Via::NoInterface => 2,
+        };
+        interfaces.sort_by(|(via_a, a), (via_b, b)| {
+            rank(via_a)
+                .cmp(&rank(via_b))
+                .then_with(|| b.bytes().cmp(&a.bytes()))
+                .then_with(|| b.calls().cmp(&a.calls()))
+                .then_with(|| via_a.cmp(via_b))
+        });
+        interfaces
+    }
+
+    /// Network I/O by interface as summary rows, in the order of [`Stats::interfaces`].
+    pub fn interface_totals(&self) -> Vec<InterfaceTotals> {
+        self.interfaces()
+            .into_iter()
+            .map(|(via, traffic)| InterfaceTotals {
+                interface: via.clone(),
+                read_bytes: traffic.read.bytes,
+                read_calls: traffic.read.calls,
+                write_bytes: traffic.write.bytes,
+                write_calls: traffic.write.calls,
+            })
+            .collect()
+    }
+
     /// Per-second byte counts, oldest first, for the last seconds of activity.
     pub fn history(&self) -> &VecDeque<Second> {
         &self.history
@@ -523,6 +653,10 @@ mod tests {
     use crate::model::{Endpoint, Op, Provenance};
 
     fn event(op: Op, target: Target, bytes: Option<u64>, errno: i32, time_ns: u64) -> IoEvent {
+        let interface = match target.category() {
+            Category::Network => Via::Unknown,
+            Category::File | Category::Other => Via::NoInterface,
+        };
         IoEvent {
             time_ns,
             pid: 1,
@@ -537,6 +671,7 @@ mod tests {
             latency_ns: None,
             target: Arc::new(target),
             provenance: Provenance::Traced,
+            interface,
         }
     }
 
@@ -612,6 +747,100 @@ mod tests {
             .map(|s| (s.unix_sec, s.file_read, s.net_read))
             .collect();
         assert_eq!(history, vec![(1, 100, 0), (2, 0, 30)]);
+    }
+
+    /// Network I/O over en0, utun4, awdl0 (without a byte count) and an unknown interface to
+    /// one peer, and over none to a Unix-domain socket, and a file write.
+    fn traffic() -> Stats {
+        let mut stats = Stats::default();
+        let peer = Target::Socket(Endpoint {
+            remote: Some("1.1.1.1:443".parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Tcp)
+        });
+        let unix = Target::Socket(Endpoint {
+            path: Some("/tmp/s".into()),
+            ..Endpoint::unresolved(Proto::Unix)
+        });
+        let second = |n: u64| n * 1_000_000_000;
+        let over = |name: &str, op: Op, bytes: Option<u64>, sec: u64| IoEvent {
+            interface: Via::Interface(name.into()),
+            ..event(op, peer.clone(), bytes, 0, second(sec))
+        };
+        stats.record(&over("en0", Op::Recvfrom, Some(100), 10));
+        stats.record(&over("en0", Op::Sendto, Some(7), 11));
+        stats.record(&over("en0", Op::Recvfrom, Some(50), 12));
+        // A step back into the second before still counts in it.
+        stats.record(&over("en0", Op::Sendto, Some(3), 11));
+        stats.record(&over("utun4", Op::Sendto, Some(900), 12));
+        stats.record(&over("awdl0", Op::Sendto, None, 12));
+        stats.record(&event(Op::Sendto, peer.clone(), Some(1), 0, second(12)));
+        stats.record(&IoEvent {
+            interface: Via::NoInterface,
+            ..event(Op::Write, unix, Some(2_000), 0, second(12))
+        });
+        let file = Target::File { path: "/a".into() };
+        stats.record(&event(Op::Write, file, Some(5), 0, second(12)));
+        stats
+    }
+
+    #[test]
+    fn counts_network_traffic_per_interface() {
+        let stats = traffic();
+        let interfaces: Vec<(String, u64, u64)> = stats
+            .interfaces()
+            .iter()
+            .map(|(via, traffic)| (via.to_string(), traffic.bytes(), traffic.calls()))
+            .collect();
+        let expected = [
+            ("utun4", 900, 1),
+            ("en0", 160, 4),
+            ("awdl0", 0, 1),
+            ("?", 1, 1),
+            ("none", 2_000, 1),
+        ];
+        let expected: Vec<(String, u64, u64)> = expected
+            .iter()
+            .map(|&(name, bytes, calls)| (name.to_owned(), bytes, calls))
+            .collect();
+        assert_eq!(interfaces, expected);
+        let en0 = stats.interfaces()[1].1;
+        assert_eq!(
+            (en0.during(12), en0.during(11), en0.during(10)),
+            ((50, 0), (0, 10), (0, 0))
+        );
+        assert_eq!(
+            stats.interface_totals()[1].interface,
+            Via::Interface("en0".into())
+        );
+        assert_eq!(
+            serde_json::to_value(&stats.interface_totals()[4]).unwrap(),
+            serde_json::json!({
+                "interface": null,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 2000,
+                "write_calls": 1
+            })
+        );
+    }
+
+    #[test]
+    fn rows_keep_the_interfaces_their_io_went_over() {
+        let stats = traffic();
+        let net = stats.rows(Category::Network, SortBy::Bytes);
+        let row = |name: &str| {
+            net.iter()
+                .find(|(key, _)| key.to_string() == name)
+                .map(|(_, row)| *row)
+                .unwrap()
+        };
+        let names: Vec<String> = row("tcp 1.1.1.1:443")
+            .interfaces()
+            .iter()
+            .map(Via::to_string)
+            .collect();
+        assert_eq!(names, ["awdl0", "en0", "utun4", "?"]);
+        assert!(row("unix /tmp/s").interfaces().is_empty());
     }
 
     #[test]

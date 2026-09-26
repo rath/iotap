@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Category, Endpoint, IoEvent, Op, Proto, Provenance, ResultUnit, Target};
-use crate::stats::{Stats, SummaryRow, Totals};
+use crate::interfaces::Table;
+use crate::model::{Category, Endpoint, IoEvent, Op, Proto, Provenance, ResultUnit, Target, Via};
+use crate::stats::{InterfaceTotals, Stats, SummaryRow, Totals};
 use crate::sys::time::{ClockAnchor, Timebase};
 use crate::trace::call::{Completed, Role};
 use crate::trace::fdtable::{FdTable, Found, Verdict};
@@ -141,11 +142,14 @@ pub trait Sink {
 }
 
 /// Which kinds of targets to report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filter {
     pub files: bool,
     pub network: bool,
     pub other: bool,
+    /// The network interfaces whose I/O to report, by name; empty for I/O over any interface or
+    /// none.
+    pub interfaces: Vec<String>,
 }
 
 impl Filter {
@@ -153,14 +157,23 @@ impl Filter {
         files: true,
         network: true,
         other: true,
+        interfaces: Vec::new(),
     };
 
-    pub fn accepts(self, category: Category) -> bool {
+    pub fn accepts(&self, category: Category) -> bool {
         match category {
             Category::File => self.files,
             Category::Network => self.network,
             Category::Other => self.other,
         }
+    }
+
+    /// True when I/O over `via` is reported.
+    pub fn accepts_interface(&self, via: &Via) -> bool {
+        self.interfaces.is_empty()
+            || via
+                .name()
+                .is_some_and(|name| self.interfaces.iter().any(|wanted| wanted == name))
     }
 }
 
@@ -170,6 +183,8 @@ pub struct Summary {
     pub duration_ns: u64,
     pub processes: Vec<Process>,
     pub totals: Totals,
+    /// Network I/O by the interface it went over.
+    pub interfaces: Vec<InterfaceTotals>,
     /// Times the kernel reported dropped records.
     pub lost_events: u64,
     /// Calls whose END was not seen.
@@ -177,6 +192,9 @@ pub struct Summary {
     /// Calls whose START was not seen, mostly calls already blocked when tracing began.
     pub calls_started_before_trace: u64,
     pub untraced_children: UntracedChildren,
+    /// Calls left out for going over an interface that iotap cannot tell, while only some
+    /// interfaces are reported.
+    pub unknown_interface_calls: u64,
     pub files: Vec<SummaryRow>,
     pub network: Vec<SummaryRow>,
     pub other: Vec<SummaryRow>,
@@ -241,10 +259,12 @@ pub struct Session {
     filter: Filter,
     decoder: Decoder,
     fds: FdTable,
+    interfaces: Table,
     stats: Stats,
     processes: BTreeMap<i32, ProcessState>,
     lost_events: u64,
     untraced: UntracedChildren,
+    unknown_interface_calls: u64,
     last_ticks: u64,
     stopped_ticks: Option<u64>,
     unknown: Arc<Target>,
@@ -258,17 +278,20 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts a session and loads the descriptor tables of the initial processes.
+    /// Starts a session, lists the host's interfaces and loads the descriptor tables of the
+    /// initial processes.
     pub fn new(info: SessionInfo, filter: Filter, src: &mut dyn ProcSource) -> Self {
         let retry_ticks = info.timebase.nanos_to_ticks(1_000_000_000);
         let mut session = Self {
             filter,
             decoder: Decoder::new(&info),
             fds: FdTable::new(retry_ticks),
+            interfaces: Table::new(src.interfaces(), info.anchor.ticks, retry_ticks),
             stats: Stats::default(),
             processes: BTreeMap::new(),
             lost_events: 0,
             untraced: UntracedChildren::default(),
+            unknown_interface_calls: 0,
             last_ticks: info.anchor.ticks,
             stopped_ticks: None,
             unknown: Arc::new(Target::Unknown),
@@ -299,8 +322,13 @@ impl Session {
     }
 
     /// Which kinds of targets the session reports.
-    pub fn filter(&self) -> Filter {
-        self.filter
+    pub fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
+    /// The host's network interfaces as last listed.
+    pub fn interfaces(&self) -> &Table {
+        &self.interfaces
     }
 
     /// Name of a traced process.
@@ -433,10 +461,12 @@ impl Session {
             duration_ns,
             processes,
             totals: *self.stats.totals(),
+            interfaces: self.stats.interface_totals(),
             lost_events: self.lost_events,
             unfinished_calls: self.decoder.unfinished_calls(),
             calls_started_before_trace: self.decoder.calls_started_before_trace(),
             untraced_children: self.untraced,
+            unknown_interface_calls: self.unknown_interface_calls,
             files: self.stats.summary_rows(Category::File),
             network: self.stats.summary_rows(Category::Network),
             other: self.stats.summary_rows(Category::Other),
@@ -585,6 +615,13 @@ impl Session {
         if !self.filter.accepts(event.target.category()) {
             return Ok(());
         }
+        event.interface = self.interfaces.via(&event.target, self.fds.netns(event.pid));
+        if !self.filter.accepts_interface(&event.interface) {
+            if event.interface == Via::Unknown {
+                self.unknown_interface_calls += 1;
+            }
+            return Ok(());
+        }
         self.stats.record(&event);
         sink.event(&event)
     }
@@ -624,6 +661,15 @@ impl Session {
                 answer: None,
             },
         };
+        // The interface is told as the event is emitted, from its settled target; here the
+        // interfaces are listed again if the target's local address is new to them.
+        if let Target::Socket(endpoint) = &*target
+            && self
+                .interfaces
+                .wants_listing(endpoint, self.fds.netns(done.pid), done.end_ts)
+        {
+            self.interfaces.update(src.interfaces(), done.end_ts);
+        }
         let unit = op.result_unit();
         let ret = done.is_ok().then(|| done.ret_u64());
         let event = IoEvent {
@@ -642,6 +688,7 @@ impl Session {
                 .map(|ticks| self.info.timebase.ticks_to_nanos(ticks)),
             target,
             provenance,
+            interface: Via::NoInterface,
         };
         (event, answer)
     }
@@ -714,7 +761,9 @@ impl Sink for Collect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interfaces::{Interface, Listing};
     use crate::model::{Endpoint, Proto};
+    use crate::trace::kdebug::KdBuf;
     use crate::trace::kdebug::synth::{Call, Synth};
     use crate::trace::linux::synth::{self as linux_synth, Synth as LinuxSynth};
     use crate::trace::linux::{Event, Memory, Record};
@@ -816,6 +865,7 @@ mod tests {
     #[test]
     fn events_wait_for_libproc_and_drop_stale_answers() {
         let mut src = procs();
+        src.interfaces = vec![listing(&[])];
         let mut session = Session::new(info(), Filter::ALL, &mut src);
         let mut synth = Synth::new(2_000, 10);
         // Two connections one after the other on fd 4. libproc is asked late about both, and
@@ -876,6 +926,9 @@ mod tests {
         );
         assert_eq!(sink.notices.len(), 1);
         assert_eq!(session.stats().totals().net_write.bytes, 30);
+        // Each takes the interface of the target it was settled with.
+        let interfaces: Vec<String> = sink.events.iter().map(|e| e.interface.to_string()).collect();
+        assert_eq!(interfaces, ["?", "en0"]);
     }
 
     #[test]
@@ -1295,13 +1348,191 @@ mod tests {
         );
     }
 
+    /// The loopback interface, and en0 with 10.0.0.2 and `more` besides.
+    fn listing(more: &[&str]) -> Listing {
+        let mut addrs = vec!["10.0.0.2".parse().unwrap()];
+        addrs.extend(more.iter().map(|addr| addr.parse::<std::net::IpAddr>().unwrap()));
+        Listing {
+            interfaces: vec![
+                Interface {
+                    name: "lo0".into(),
+                    index: 1,
+                    loopback: true,
+                    addrs: vec!["127.0.0.1".parse().unwrap()],
+                },
+                Interface {
+                    name: "en0".into(),
+                    index: 4,
+                    loopback: false,
+                    addrs,
+                },
+            ],
+            netns: Some(7),
+        }
+    }
+
+    /// A TCP connection from `local` to 93.184.216.34:443 on `fd`, which libproc describes.
+    fn connect(synth: &mut Synth, src: &mut Fixed, fd: i32, local: &str) -> Vec<KdBuf> {
+        let peer = Endpoint {
+            local: Some(local.parse().unwrap()),
+            remote: Some("93.184.216.34:443".parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Tcp)
+        };
+        src.targets.insert((PID, fd), Target::Socket(peer));
+        let fd = u64::from(fd.cast_unsigned());
+        let mut records = synth.call(Call {
+            ret: fd,
+            ..Call::new(8, PID, 97, [2, 1, 0, 0])
+        });
+        records.extend(synth.call(Call::new(8, PID, 98, [fd, 0, 16, 0])));
+        records
+    }
+
+    fn interfaces_of(sink: &Collect) -> Vec<String> {
+        sink.events
+            .iter()
+            .map(|e| format!("{} {}", e.interface, e.target))
+            .collect()
+    }
+
+    #[test]
+    fn events_name_the_interface_their_socket_uses() {
+        let mut src = procs();
+        src.interfaces = vec![listing(&[])];
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        let mut records = synth.io(7, PID, 4, 1, 12, 12);
+        records.extend(connect(&mut synth, &mut src, 4, "10.0.0.2:5000"));
+        records.extend(synth.io(8, PID, 133, 4, 517, 517));
+        records.extend(connect(&mut synth, &mut src, 5, "127.0.0.1:5001"));
+        records.extend(synth.io(8, PID, 29, 5, 100, 40));
+        // A send on a descriptor iotap cannot identify, which is at least a socket.
+        records.extend(synth.io(8, PID, 133, 9, 20, 20));
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(
+            interfaces_of(&sink),
+            [
+                "none /dev/ttys001",
+                "en0 tcp 10.0.0.2:5000 -> 93.184.216.34:443",
+                "lo0 tcp 127.0.0.1:5001 -> 93.184.216.34:443",
+                "? socket",
+            ]
+        );
+        assert_eq!(src.interfaces_asked, 1);
+        let summary = session.summary();
+        let totals: Vec<(String, u64, u64)> = summary
+            .interfaces
+            .iter()
+            .map(|t| (t.interface.to_string(), t.read_bytes, t.write_bytes))
+            .collect();
+        assert_eq!(
+            totals,
+            [
+                ("en0".to_owned(), 0, 517),
+                ("lo0".to_owned(), 40, 0),
+                ("?".to_owned(), 0, 20)
+            ]
+        );
+        assert_eq!(summary.unknown_interface_calls, 0);
+    }
+
+    #[test]
+    fn a_new_local_address_lists_the_interfaces_again() {
+        let mut src = procs();
+        // A VPN comes up after tracing starts.
+        src.interfaces = vec![listing(&[]), listing(&["10.8.0.2"])];
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        // More than a second after the first listing.
+        let mut synth = Synth::new(2_000_000_000, 10);
+        let mut records = connect(&mut synth, &mut src, 4, "10.8.0.2:5000");
+        records.extend(synth.io(8, PID, 133, 4, 10, 10));
+        records.extend(synth.io(8, PID, 133, 4, 10, 10));
+        // Another new address within the second waits for the next listing.
+        records.extend(connect(&mut synth, &mut src, 5, "10.9.0.2:5000"));
+        records.extend(synth.io(8, PID, 133, 5, 10, 10));
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
+            .unwrap();
+        let shown: Vec<String> = sink.events.iter().map(|e| e.interface.to_string()).collect();
+        assert_eq!(shown, ["en0", "en0", "?"]);
+        assert_eq!(src.interfaces_asked, 2);
+        let names: Vec<&str> = session.interfaces().names().collect();
+        assert_eq!(names, ["lo0", "en0"]);
+    }
+
+    #[test]
+    fn processes_in_another_network_namespace_list_nothing() {
+        let mut src = procs();
+        src.interfaces = vec![listing(&[])];
+        if let Some(snapshot) = src.snapshots.get_mut(&PID) {
+            snapshot.netns = Some(8);
+        }
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000_000_000, 10);
+        // 10.0.0.2 is the host's address, and the container's own only by chance.
+        let mut records = connect(&mut synth, &mut src, 4, "10.0.0.2:5000");
+        records.extend(synth.io(8, PID, 133, 4, 10, 10));
+        records.extend(connect(&mut synth, &mut src, 5, "172.17.0.2:5000"));
+        records.extend(synth.io(8, PID, 133, 5, 10, 10));
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
+            .unwrap();
+        let shown: Vec<String> = sink.events.iter().map(|e| e.interface.to_string()).collect();
+        assert_eq!(shown, ["?", "?"]);
+        assert_eq!(src.interfaces_asked, 1);
+    }
+
+    #[test]
+    fn the_interface_filter_keeps_named_interfaces_and_counts_unknown_ones() {
+        let mut src = procs();
+        src.interfaces = vec![listing(&[])];
+        let filter = Filter {
+            files: false,
+            other: false,
+            interfaces: vec!["en0".into()],
+            ..Filter::ALL
+        };
+        let mut session = Session::new(info(), filter, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        let mut records = synth.io(7, PID, 4, 1, 12, 12);
+        records.extend(connect(&mut synth, &mut src, 4, "10.0.0.2:5000"));
+        records.extend(synth.io(8, PID, 133, 4, 517, 517));
+        records.extend(connect(&mut synth, &mut src, 5, "127.0.0.1:5001"));
+        records.extend(synth.io(8, PID, 133, 5, 1, 1));
+        let unix = Endpoint {
+            path: Some("/var/run/mDNSResponder".into()),
+            ..Endpoint::unresolved(Proto::Unix)
+        };
+        src.targets.insert((PID, 6), Target::Socket(unix));
+        records.extend(synth.io(8, PID, 133, 6, 2, 2));
+        records.extend(synth.io(8, PID, 133, 9, 20, 20));
+        records.extend(synth.io(8, PID, 133, 9, 20, 20));
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(
+            interfaces_of(&sink),
+            ["en0 tcp 10.0.0.2:5000 -> 93.184.216.34:443"]
+        );
+        let summary = session.summary();
+        assert_eq!(summary.unknown_interface_calls, 2);
+        assert_eq!(summary.totals.events, 1);
+        assert_eq!(summary.interfaces.len(), 1);
+    }
+
     #[test]
     fn filter_drops_other_categories() {
         let mut src = procs();
         let filter = Filter {
             files: false,
-            network: true,
             other: false,
+            ..Filter::ALL
         };
         let mut session = Session::new(info(), filter, &mut src);
         let mut synth = Synth::new(2_000, 10);

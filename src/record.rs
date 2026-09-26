@@ -576,6 +576,15 @@ mod tests {
             path: None,
         };
         procs.targets.insert((300, 5), Target::Socket(peer));
+        procs.interfaces = vec![Listing {
+            interfaces: vec![Interface {
+                name: "en0".into(),
+                index: 4,
+                loopback: false,
+                addrs: vec!["10.0.0.5".parse().unwrap()],
+            }],
+            netns: None,
+        }];
         let mut synth = Synth::new(20_000, 240);
         let mut records = synth.open(1, 300, "out.html", 4);
         records.extend(synth.io(2, 300, 133, 5, 517, 517));
@@ -630,6 +639,7 @@ mod tests {
             live.events[0].target.to_string(),
             "tcp 10.0.0.5:61000 -> 93.184.216.34:443"
         );
+        assert_eq!(live.events[0].interface.to_string(), "en0");
         assert_eq!(live.events[2].target.to_string(), "/tmp/out.html");
     }
 

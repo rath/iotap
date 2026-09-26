@@ -435,6 +435,8 @@ pub struct IoEvent {
     pub latency_ns: Option<u64>,
     pub target: Arc<Target>,
     pub provenance: Provenance,
+    /// The network interface the I/O went over, which the session tells as it emits the event.
+    pub interface: Via,
 }
 
 impl IoEvent {

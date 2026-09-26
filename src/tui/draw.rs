@@ -683,7 +683,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
-    use crate::model::{Endpoint, Proto, Target};
+    use crate::model::{Endpoint, Proto, Target, Via};
     use crate::session::{Filter, Input, Process, Session, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
     use crate::trace::kdebug::pairing::PathRecords;
@@ -1164,6 +1164,7 @@ mod tests {
             latency_ns: Some(1_000),
             target: Arc::new(Target::File { path: long.into() }),
             provenance: Provenance::Traced,
+            interface: Via::NoInterface,
         })
         .unwrap();
         let lines = render(&session, &mut app, 100, 20, START_NS);

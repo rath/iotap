@@ -147,7 +147,7 @@ pub fn write_summary(
     out: &mut dyn Write,
     summary: &Summary,
     top: usize,
-    filter: Filter,
+    filter: &Filter,
     mut hosts: Option<&mut Hosts>,
 ) -> io::Result<()> {
     if let Some(hosts) = hosts.as_deref_mut()
@@ -340,7 +340,7 @@ mod tests {
 
     use super::*;
     use crate::hosts::HostName;
-    use crate::model::{Category, Endpoint, Op, Proto, Provenance, Target};
+    use crate::model::{Category, Endpoint, Op, Proto, Provenance, Target, Via};
     use crate::session::{Process, UntracedChildren};
     use crate::stats::Stats;
 
@@ -371,6 +371,7 @@ mod tests {
                     path: None,
                 })),
                 provenance: Provenance::Traced,
+                interface: Via::Unknown,
             });
         }
         Summary {
@@ -380,10 +381,12 @@ mod tests {
                 name: "curl".into(),
             }],
             totals: *stats.totals(),
+            interfaces: stats.interface_totals(),
             lost_events: 0,
             unfinished_calls: 0,
             calls_started_before_trace: 0,
             untraced_children: UntracedChildren::default(),
+            unknown_interface_calls: 0,
             files: Vec::new(),
             network: stats.summary_rows(Category::Network),
             other: Vec::new(),
@@ -392,7 +395,7 @@ mod tests {
 
     fn written(summary: &Summary, top: usize, hosts: Option<&mut Hosts>) -> String {
         let mut out = Vec::new();
-        write_summary(&mut out, summary, top, Filter::ALL, hosts).unwrap();
+        write_summary(&mut out, summary, top, &Filter::ALL, hosts).unwrap();
         String::from_utf8(out).unwrap()
     }
 

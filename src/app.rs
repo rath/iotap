@@ -66,7 +66,7 @@ impl Printer {
         match self {
             Self::Text(sink) => {
                 let mut out = sink.into_inner();
-                text::write_summary(&mut out, summary, cli.top, filter(cli), hosts.as_mut())?;
+                text::write_summary(&mut out, summary, cli.top, &filter(cli), hosts.as_mut())?;
                 out.flush()
             }
             Self::Json(mut sink) => sink.summary(summary),
@@ -102,6 +102,7 @@ pub fn filter(cli: &Cli) -> Filter {
         files: !cli.net_only,
         network: !cli.files_only,
         other: !cli.files_only && !cli.net_only,
+        interfaces: Vec::new(),
     }
 }
 

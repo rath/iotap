@@ -333,7 +333,7 @@ pub struct Shown<'a> {
     pub start_ns: u64,
     /// True once the view has been reset.
     pub reset: bool,
-    pub filter: Filter,
+    pub filter: &'a Filter,
     pub paused: bool,
     /// The latest notice.
     pub status: Option<&'a str>,
@@ -609,7 +609,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::model::{Op, Provenance, Target};
+    use crate::model::{Op, Provenance, Target, Via};
     use crate::session::{Input, Process, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
     use crate::trace::kdebug::pairing::PathRecords;
@@ -632,6 +632,7 @@ mod tests {
             latency_ns: Some(1_000),
             target: Arc::new(Target::File { path: "/a".into() }),
             provenance: Provenance::Traced,
+            interface: Via::NoInterface,
         }
     }
 

@@ -172,7 +172,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::model::{Endpoint, Proto};
+    use crate::model::{Endpoint, Proto, Via};
 
     fn lines(bytes: &[u8]) -> Vec<Value> {
         std::str::from_utf8(bytes)
@@ -202,6 +202,7 @@ mod tests {
                 ..Endpoint::unresolved(Proto::Udp)
             })),
             provenance: Provenance::Lazy,
+            interface: Via::Unknown,
         };
         sink.event(&event).unwrap();
         sink.notice(&Notice::Exited(Process {
