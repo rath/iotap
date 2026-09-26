@@ -14,7 +14,7 @@ use super::draw::{BOLD, DIM, FAILED, idle, short_latency};
 use super::fit;
 use super::state::{Shown, Tab, View};
 use crate::hosts::HostName;
-use crate::model::{Category, IoEvent};
+use crate::model::{Category, IoEvent, Via};
 use crate::output::{bytes, count, text};
 use crate::stats::{Counter, Key, Peer, Row};
 use crate::sys::user;
@@ -103,6 +103,9 @@ pub(super) fn lines(
         let now = describe_file(Path::new(path), SystemTime::now(), &mut view.owners);
         lines.push(field("file", vec![Span::raw(now)]));
     }
+    if !row.interfaces().is_empty() {
+        lines.push(field("interface", interface_spans(row, value_width)));
+    }
     if let Key::Socket {
         peer: Peer::Remote(_),
         ..
@@ -134,6 +137,27 @@ pub(super) fn lines(
         }
     }
     lines
+}
+
+/// The interfaces a socket's I/O went over, in `width` columns, and whether iotap could not
+/// tell the interface of some of it.
+fn interface_spans(row: &Row, width: usize) -> Vec<Span<'static>> {
+    const UNKNOWN: &str = "   and some unknown";
+    let named: Vec<String> = row
+        .interfaces()
+        .iter()
+        .filter_map(|via| via.name().map(str::to_owned))
+        .collect();
+    if named.is_empty() {
+        return vec![Span::styled("not known", DIM)];
+    }
+    if !row.interfaces().contains(&Via::Unknown) {
+        return vec![Span::raw(fit_list(&named, width))];
+    }
+    vec![
+        Span::raw(fit_list(&named, width.saturating_sub(UNKNOWN.width()))),
+        Span::styled(UNKNOWN, DIM),
+    ]
 }
 
 /// The path a key names, for files and Unix-domain sockets.

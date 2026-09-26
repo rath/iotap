@@ -161,6 +161,8 @@ pub struct View {
     pub names: bool,
     /// Host names of remote addresses; a cache, not state.
     pub hosts: Hosts,
+    /// True while network I/O shows by interface above the tabs.
+    pub interfaces: bool,
 }
 
 impl Default for View {
@@ -185,6 +187,7 @@ impl View {
             home: None,
             names: false,
             hosts: Hosts::default(),
+            interfaces: false,
         }
     }
 
@@ -543,6 +546,15 @@ impl App {
                     "showing addresses".to_owned()
                 });
             }
+            KeyCode::Char('i') if session.filter().network => {
+                view.interfaces = !view.interfaces;
+                self.model.status = Some(if view.interfaces {
+                    "showing network I/O by interface".to_owned()
+                } else {
+                    "hiding network I/O by interface".to_owned()
+                });
+            }
+            KeyCode::Char('i') => self.model.status = Some("network I/O is not traced".to_owned()),
             KeyCode::Char('r') => {
                 self.model.reset(session, now_ns);
                 view.offsets = [0; 2];
@@ -811,6 +823,36 @@ mod tests {
             0,
         );
         assert!(app.wants_quit());
+    }
+
+    #[test]
+    fn i_shows_network_io_by_interface_when_it_is_traced() {
+        let (session, _) = session();
+        let mut app = App::default();
+        app.key(press(KeyCode::Char('i')), &session, 0);
+        assert!(app.view.interfaces);
+        assert_eq!(
+            app.model.shown(&session, 0).status,
+            Some("showing network I/O by interface")
+        );
+        // A reset leaves the view's layout alone.
+        app.key(press(KeyCode::Char('r')), &session, 0);
+        assert!(app.view.interfaces);
+        app.key(press(KeyCode::Char('i')), &session, 0);
+        assert!(!app.view.interfaces);
+
+        let mut src = Fixed::default();
+        let files_only = Filter {
+            network: false,
+            ..Filter::ALL
+        };
+        let session = Session::new(session.info().clone(), files_only, &mut src);
+        app.key(press(KeyCode::Char('i')), &session, 0);
+        assert!(!app.view.interfaces);
+        assert_eq!(
+            app.model.shown(&session, 0).status,
+            Some("network I/O is not traced")
+        );
     }
 
     #[test]

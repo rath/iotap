@@ -12,7 +12,7 @@ use super::{details, fit};
 use crate::hosts::Hosts;
 use crate::model::{Endpoint, Target};
 use crate::output::{bytes, count, text};
-use crate::stats::{self, Key, Peer, Second, SortBy};
+use crate::stats::{self, Key, Peer, Second, SortBy, Traffic};
 
 pub(super) const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 pub(super) const DIM: Style = Style::new().fg(Color::DarkGray);
@@ -45,20 +45,50 @@ const NARROW: u16 = 99;
 const WIDE: u16 = 119;
 /// Processes named in the title line; the rest are only counted.
 const TITLE_PROCESSES: usize = 32;
+/// Width of the first column of the rates and interface tables, which a long interface name
+/// widens.
+const RATE_LABEL: u16 = 11;
+/// Most rows of the interface table below its header; beyond them, the last row sums the rest.
+const INTERFACE_ROWS: usize = 8;
+/// Fewest lines the interface table leaves the tabs and what they show.
+const BODY_LINES: u16 = 5;
 
 pub fn draw(frame: &mut Frame<'_>, view: &mut View, shown: &Shown<'_>) {
     let alerts = alerts(shown);
-    let [title, rates, alert_area, tabs, body, footer] = Layout::vertical([
+    let alert_lines = u16::try_from(alerts.len()).unwrap_or(u16::MAX);
+    // What the title, the rates, the alerts and the footer leave for the interface table.
+    let room = frame
+        .area()
+        .height
+        .saturating_sub(1 + 3 + alert_lines + 1 + BODY_LINES);
+    let interfaces = if view.interfaces && shown.filter.network {
+        interface_rows(shown, usize::from(room))
+    } else {
+        None
+    };
+    let interface_lines = interfaces
+        .as_ref()
+        .map_or(0, |rows| 1 + u16::try_from(rows.len().max(1)).unwrap_or(u16::MAX));
+    let label = interfaces
+        .iter()
+        .flatten()
+        .map(|row| width(&row.label))
+        .fold(RATE_LABEL, u16::max);
+    let [title, rates, interface_area, alert_area, tabs, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(3),
-        Constraint::Length(u16::try_from(alerts.len()).unwrap_or(u16::MAX)),
+        Constraint::Length(interface_lines),
+        Constraint::Length(alert_lines),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
     .areas(frame.area());
     draw_title(frame, title, shown);
-    draw_rates(frame, rates, shown);
+    draw_rates(frame, rates, shown, label);
+    if let Some(rows) = &interfaces {
+        draw_interfaces(frame, interface_area, rows, label);
+    }
     frame.render_widget(Paragraph::new(alerts), alert_area);
     // Tables start one column in, like the lines above them; that gutter marks the selected
     // row.
@@ -109,8 +139,9 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
     frame.render_widget(Paragraph::new(Line::from(elapsed).right_aligned()), right);
 }
 
-/// Bytes per second over the last complete second, and totals so far.
-fn draw_rates(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
+/// Bytes per second over the last complete second, and totals so far, after a first column
+/// `label` wide.
+fn draw_rates(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>, label: u16) {
     let second = last_second(shown);
     let totals = shown.stats.totals();
     let filter = shown.filter;
@@ -145,15 +176,115 @@ fn draw_rates(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>) {
             value(filter.network, totals.net_write.bytes),
         ]),
     ];
-    let widths = [
-        Constraint::Length(11),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(12),
-    ];
     frame.render_widget(
-        Table::new(rows, widths).header(header).column_spacing(SPACING),
+        Table::new(rows, rate_widths(label))
+            .header(header)
+            .column_spacing(SPACING),
+        area,
+    );
+}
+
+/// Widths of the columns of the rates and interface tables, which line up.
+fn rate_widths(label: u16) -> [Constraint; 5] {
+    [
+        Constraint::Length(label),
+        Constraint::Length(12),
+        Constraint::Length(12),
+        Constraint::Length(12),
+        Constraint::Length(12),
+    ]
+}
+
+/// One row of the interface table: bytes received and sent over the last complete second and
+/// in total.
+struct InterfaceRow {
+    label: String,
+    per_second: (u64, u64),
+    total: (u64, u64),
+    /// True for the row that sums the interfaces left out.
+    rest: bool,
+}
+
+/// The rows of the interface table that fit with its header in `room` lines, in the order of
+/// [`stats::Stats::interfaces`]: `None` when not even one fits, and none before any network I/O.
+/// When not all fit, the last row sums those left out.
+fn interface_rows(shown: &Shown<'_>, room: usize) -> Option<Vec<InterfaceRow>> {
+    let fit = room.saturating_sub(1).min(INTERFACE_ROWS);
+    if fit == 0 {
+        return None;
+    }
+    let second = (shown.now_ns / 1_000_000_000).saturating_sub(1);
+    let traffic = shown.stats.interfaces();
+    let shown_rows = if traffic.len() > fit { fit - 1 } else { fit };
+    let row = |label: String, traffic: &Traffic| InterfaceRow {
+        label,
+        per_second: traffic.during(second),
+        total: (traffic.read.bytes, traffic.write.bytes),
+        rest: false,
+    };
+    let mut rows: Vec<InterfaceRow> = traffic
+        .iter()
+        .take(shown_rows)
+        .map(|(via, traffic)| row(format!(" {via}"), traffic))
+        .collect();
+    let rest = &traffic[shown_rows.min(traffic.len())..];
+    if !rest.is_empty() {
+        let mut sum = InterfaceRow {
+            rest: true,
+            ..row(format!(" {} more", rest.len()), &Traffic::default())
+        };
+        for (_, traffic) in rest {
+            let (read, write) = traffic.during(second);
+            sum.per_second = (sum.per_second.0 + read, sum.per_second.1 + write);
+            sum.total = (
+                sum.total.0 + traffic.read.bytes,
+                sum.total.1 + traffic.write.bytes,
+            );
+        }
+        rows.push(sum);
+    }
+    Some(rows)
+}
+
+/// Network I/O by interface, with a first column `label` wide as the rates table has.
+fn draw_interfaces(frame: &mut Frame<'_>, area: Rect, rows: &[InterfaceRow], label: u16) {
+    let header = Row::new([
+        Cell::from(" INTERFACE"),
+        right("RECEIVED/S".to_owned()),
+        right("SENT/S".to_owned()),
+        right("RECEIVED".to_owned()),
+        right("SENT".to_owned()),
+    ])
+    .style(BOLD);
+    if rows.is_empty() {
+        let [header_area, rest] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+        frame.render_widget(
+            Table::new(Vec::<Row<'_>>::new(), rate_widths(label))
+                .header(header)
+                .column_spacing(SPACING),
+            header_area,
+        );
+        frame.render_widget(Paragraph::new(" No network I/O yet.").style(DIM), rest);
+        return;
+    }
+    let body = rows.iter().map(|row| {
+        let cells = [
+            Cell::from(row.label.clone()),
+            right(bytes(row.per_second.0)),
+            right(bytes(row.per_second.1)),
+            right(bytes(row.total.0)),
+            right(bytes(row.total.1)),
+        ];
+        if row.rest {
+            Row::new(cells).style(DIM)
+        } else {
+            Row::new(cells)
+        }
+    });
+    frame.render_widget(
+        Table::new(body, rate_widths(label))
+            .header(header)
+            .column_spacing(SPACING),
         area,
     );
 }
@@ -525,6 +656,10 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
         hints.push("s sort");
     }
     hints.push(if shown.paused { "p resume" } else { "p pause" });
+    let interfaces = shown.filter.network.then_some(hints.len());
+    if interfaces.is_some() {
+        hints.push("i interfaces");
+    }
     hints.push("r reset");
     if view.tab != Tab::Files && shown.filter.network {
         hints.push(if view.names { "n addresses" } else { "n names" });
@@ -535,6 +670,13 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
         (true, true, false) => &["enter details", "y copy", "esc deselect"],
         (true, true, true) => &["y copy", "esc close"],
     });
+    // The hint for the interface table gives way to the status and the other hints.
+    let status = shown.status.map_or(0, |status| usize::from(width(status)) + 1);
+    if let Some(at) = interfaces
+        && status + usize::from(width(&hints.join("  "))) + 1 > usize::from(area.width)
+    {
+        hints.remove(at);
+    }
     let hints = Line::styled(format!("{} ", hints.join("  ")), DIM).right_aligned();
     let [left, right] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(width_of_line(&hints))]).areas(area);
@@ -683,6 +825,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::interfaces::{Interface, Listing};
     use crate::model::{Endpoint, Proto, Target, Via};
     use crate::session::{Filter, Input, Process, Session, SessionInfo};
     use crate::sys::time::{ClockAnchor, Timebase};
@@ -696,8 +839,13 @@ mod tests {
     /// 2026-09-24 00:00:00 UTC.
     const START_NS: u64 = 1_790_208_000_000_000_000;
 
-    /// A curl-like process: writes a file, talks to a server, fails one receive.
+    /// A curl-like process: writes a file, talks to a server over en0, fails one receive.
     fn traced() -> (Session, App) {
+        traced_over("en0")
+    }
+
+    /// The same, with the interface that holds its local address named `interface`.
+    fn traced_over(interface: &str) -> (Session, App) {
         let info = SessionInfo {
             timebase: Timebase { numer: 1, denom: 1 },
             anchor: ClockAnchor {
@@ -711,7 +859,22 @@ mod tests {
             path_records: PathRecords::Whole,
             system: System::Macos,
         };
-        let mut src = Fixed::default();
+        let listed = |name: &str, loopback, addr: &str| Interface {
+            name: name.into(),
+            index: 0,
+            loopback,
+            addrs: vec![addr.parse().unwrap()],
+        };
+        let mut src = Fixed {
+            interfaces: vec![Listing {
+                interfaces: vec![
+                    listed("lo0", true, "127.0.0.1"),
+                    listed(interface, false, "192.168.1.20"),
+                ],
+                netns: None,
+            }],
+            ..Fixed::default()
+        };
         src.snapshots.insert(
             PID,
             Snapshot {
@@ -1071,6 +1234,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == " tcp 93.184.216.34:443"));
         assert!(find(&lines, " received ").contains(" sent 517 B in 1 call   failed 1"));
         assert!(find(&lines, " local ").ends_with(" 192.168.1.20:61000"));
+        assert!(find(&lines, " interface ").ends_with(" en0"));
         assert!(
             !lines.iter().any(|line| line.starts_with(" file ")),
             "sockets have no file line"
@@ -1259,12 +1423,147 @@ mod tests {
     #[test]
     fn tiny_screens_do_not_panic() {
         let (session, mut app) = traced();
-        for tab in ['1', '2', '3'] {
-            press(&mut app, &session, ratatui::crossterm::event::KeyCode::Char(tab));
-            for (width, height) in [(1, 1), (20, 5), (40, 8), (80, 3)] {
-                render(&session, &mut app, width, height, START_NS);
+        for interfaces in [false, true] {
+            app.view.interfaces = interfaces;
+            for tab in ['1', '2', '3'] {
+                press(&mut app, &session, ratatui::crossterm::event::KeyCode::Char(tab));
+                for (width, height) in [(1, 1), (20, 5), (40, 8), (80, 3), (80, 12)] {
+                    render(&session, &mut app, width, height, START_NS);
+                }
             }
         }
+    }
+
+    /// Sends `bytes` from `peer` over `via` into the terminal UI.
+    fn sent_over(app: &mut App, via: Via, peer: Target, bytes: u64) {
+        use std::sync::Arc;
+
+        use crate::model::{IoEvent, Op, Provenance};
+        use crate::session::Sink;
+        app.event(&IoEvent {
+            time_ns: START_NS + 1_500_000_000,
+            pid: PID,
+            tid: 1,
+            op: Op::Sendto,
+            syscall: "sendto",
+            fd: Some(9),
+            requested: Some(bytes),
+            bytes: Some(bytes),
+            messages: None,
+            errno: 0,
+            latency_ns: Some(1_000),
+            target: Arc::new(peer),
+            provenance: Provenance::Traced,
+            interface: via,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn i_shows_the_traffic_of_each_interface() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        let now = START_NS + 2_500_000_000;
+        let lines = render(&session, &mut app, 100, 20, now);
+        assert!(!lines.iter().any(|line| line.contains("INTERFACE")));
+        assert!(lines.last().unwrap().contains("p pause  i interfaces  r reset"));
+        press(&mut app, &session, KeyCode::Char('i'));
+        let lines = render(&session, &mut app, 100, 20, now);
+        let header: Vec<&str> = find(&lines, "INTERFACE").split_whitespace().collect();
+        assert_eq!(header, ["INTERFACE", "RECEIVED/S", "SENT/S", "RECEIVED", "SENT"]);
+        let en0: Vec<&str> = find(&lines, " en0 ").split_whitespace().collect();
+        assert_eq!(en0, ["en0", "4.0", "KiB", "517", "B", "4.0", "KiB", "517", "B"]);
+        // The columns line up with the rates above.
+        assert_eq!(find(&lines, "INTERFACE").len(), find(&lines, "FILE READ").len());
+        assert_eq!(find(&lines, " en0 ").len(), find(&lines, " total ").len());
+        assert!(find(&lines, "1 Files (2)").starts_with(' '));
+
+        // Before any network I/O, the table says so.
+        press(&mut app, &session, KeyCode::Char('r'));
+        let lines = render(&session, &mut app, 100, 20, now);
+        assert!(find(&lines, "INTERFACE").contains("SENT"));
+        assert!(find(&lines, "No network I/O yet.").starts_with(' '));
+    }
+
+    #[test]
+    fn long_interface_names_widen_both_tables() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced_over("br-4f2a8c9d1e3b");
+        press(&mut app, &session, KeyCode::Char('i'));
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        let bridge = find(&lines, " br-4f2a8c9d1e3b ");
+        assert!(bridge.starts_with(" br-4f2a8c9d1e3b "), "{bridge}");
+        // 16 columns for the name, then four of 12 with 2 between each.
+        assert_eq!(bridge.len(), 16 + 4 * (2 + 12));
+        assert_eq!(find(&lines, "FILE READ").len(), bridge.len());
+        assert_eq!(find(&lines, " per second ").len(), bridge.len());
+    }
+
+    #[test]
+    fn the_interface_table_folds_what_does_not_fit() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        let peer = || {
+            Target::Socket(Endpoint {
+                remote: Some("10.8.0.1:22".parse().unwrap()),
+                ..Endpoint::unresolved(Proto::Tcp)
+            })
+        };
+        sent_over(&mut app, Via::Interface("utun4".into()), peer(), 100);
+        sent_over(&mut app, Via::Unknown, peer(), 40);
+        let unix = Target::Socket(Endpoint {
+            path: Some("/tmp/s".into()),
+            ..Endpoint::unresolved(Proto::Unix)
+        });
+        sent_over(&mut app, Via::NoInterface, unix, 120);
+        press(&mut app, &session, KeyCode::Char('i'));
+        let now = START_NS + 2_500_000_000;
+        let lines = render(&session, &mut app, 100, 20, now);
+        let labels: Vec<&str> = lines
+            .iter()
+            .skip_while(|line| !line.contains("INTERFACE"))
+            .skip(1)
+            .take(4)
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        assert_eq!(labels, ["en0", "utun4", "?", "none"]);
+        // 13 lines leave room for the header and two rows above the tabs and their body.
+        let lines = render(&session, &mut app, 100, 13, now);
+        assert!(find(&lines, " en0 ").contains("4.0 KiB"));
+        let more: Vec<&str> = find(&lines, " 3 more ").split_whitespace().collect();
+        assert_eq!(more, ["3", "more", "0", "B", "260", "B", "0", "B", "260", "B"]);
+        assert!(find(&lines, "1 Files (2)").starts_with(' '));
+        // Without room for a row, no table.
+        let lines = render(&session, &mut app, 100, 11, now);
+        assert!(!lines.iter().any(|line| line.contains("INTERFACE")));
+    }
+
+    #[test]
+    fn the_interface_hint_gives_way_on_narrow_screens() {
+        use ratatui::crossterm::event::KeyCode;
+        let (session, mut app) = traced();
+        press(&mut app, &session, KeyCode::Char('2'));
+        let wide = render(&session, &mut app, 100, 20, START_NS);
+        let footer = wide.last().unwrap();
+        assert!(
+            footer.ends_with("p pause  i interfaces  r reset  n names  ↑↓ select  enter details"),
+            "{footer}"
+        );
+        let narrow = render(&session, &mut app, 80, 20, START_NS);
+        let footer = narrow.last().unwrap();
+        assert!(
+            footer.ends_with("q quit  s sort  p pause  r reset  n names  ↑↓ select  enter details"),
+            "{footer}"
+        );
+        // Files only: nothing to show by interface.
+        let mut src = Fixed::default();
+        let files_only = Filter {
+            network: false,
+            ..Filter::ALL
+        };
+        let session = Session::new(session.info().clone(), files_only, &mut src);
+        let lines = render(&session, &mut app, 100, 20, START_NS);
+        assert!(!lines.last().unwrap().contains("i interfaces"));
     }
 
     #[test]
