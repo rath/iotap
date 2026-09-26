@@ -15,6 +15,7 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::interfaces::Listing;
 use crate::model::Target;
 use crate::session::{Input, Process, SessionInfo, UntracedReason};
 use crate::trace::kdebug::KdBuf;
@@ -38,6 +39,7 @@ const TAG_DESCRIBE: u8 = 8;
 const TAG_WATERMARK: u8 = 9;
 const TAG_LINUX_RECORDS: u8 = 10;
 const TAG_UNTRACED: u8 = 11;
+const TAG_INTERFACES: u8 = 12;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -196,6 +198,10 @@ impl<W: Write> Recorder<W> {
         )
     }
 
+    fn interfaces(&mut self, listing: &Listing) -> io::Result<()> {
+        self.json(TAG_INTERFACES, listing)
+    }
+
     /// Flushes and returns the writer.
     pub fn finish(mut self) -> io::Result<W> {
         self.out.flush()?;
@@ -276,6 +282,12 @@ impl<P: ProcSource, W: Write> ProcSource for Recording<P, W> {
         self.write(|recorder| recorder.describe(pid, fd, &described));
         described
     }
+
+    fn interfaces(&mut self) -> Listing {
+        let listing = self.source.interfaces();
+        self.write(|recorder| recorder.interfaces(&listing));
+        listing
+    }
 }
 
 /// Recorded process-source answers, replayed in the order they were given.
@@ -283,6 +295,7 @@ impl<P: ProcSource, W: Write> ProcSource for Recording<P, W> {
 pub struct Answers {
     snapshots: HashMap<i32, VecDeque<Option<Snapshot>>>,
     describes: HashMap<(i32, i32), VecDeque<Described>>,
+    interfaces: VecDeque<Listing>,
 }
 
 impl ProcSource for Answers {
@@ -298,6 +311,16 @@ impl ProcSource for Answers {
             .get_mut(&(pid, fd))
             .and_then(VecDeque::pop_front)
             .unwrap_or_else(|| Described::settled(None))
+    }
+
+    /// The listings in turn, the last one again once they run out: a replay that asks more
+    /// often than the live run did, as a later iotap may, gets the latest the recording holds.
+    fn interfaces(&mut self) -> Listing {
+        if self.interfaces.len() > 1 {
+            self.interfaces.pop_front().unwrap_or_default()
+        } else {
+            self.interfaces.front().cloned().unwrap_or_default()
+        }
     }
 }
 
@@ -397,6 +420,7 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
                         at: frame.at,
                     });
             }
+            TAG_INTERFACES => answers.interfaces.push_back(json(&payload).map_err(corrupt)?),
             _ => inputs.extend(input_frame(tag, &payload).map_err(corrupt)?),
         }
         index += 1;
@@ -514,6 +538,7 @@ fn json<T: DeserializeOwned>(payload: &[u8]) -> Result<T, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interfaces::Interface;
     use crate::model::{Endpoint, Proto};
     use crate::session::{Collect, Filter, Session};
     use crate::sys::time::{ClockAnchor, Timebase};
@@ -627,6 +652,53 @@ mod tests {
         assert_eq!(replay.answers.describe(300, 5), answer);
         assert_eq!(answer.at, 77_000);
         assert_eq!(replay.answers.describe(300, 5), Described::settled(None));
+    }
+
+    #[test]
+    fn interface_listings_replay_in_turn_and_the_last_repeats() {
+        let (info, mut procs, _) = fixture();
+        let listing = |name: &str, netns: Option<u64>| Listing {
+            interfaces: vec![Interface {
+                name: name.into(),
+                index: 4,
+                loopback: false,
+                addrs: vec!["10.0.0.5".parse().unwrap()],
+            }],
+            netns,
+        };
+        procs.interfaces = vec![listing("en0", Some(7)), listing("en1", None)];
+        let mut recording = Recording::new(procs, Some(Recorder::new(Vec::new(), &info).unwrap()));
+        let live = [recording.interfaces(), recording.interfaces()];
+        let bytes = recording.recorder.take().unwrap().finish().unwrap();
+
+        let mut replay = parse(bytes.as_slice()).unwrap();
+        assert!(replay.inputs.is_empty());
+        assert_eq!(replay.answers.interfaces(), live[0]);
+        assert_eq!(replay.answers.interfaces(), live[1]);
+        assert_eq!(replay.answers.interfaces(), live[1]);
+        // A recording made before iotap listed interfaces knows none.
+        let mut older = parse(
+            Recorder::new(Vec::new(), &info)
+                .unwrap()
+                .finish()
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(older.answers.interfaces(), Listing::default());
+    }
+
+    #[test]
+    fn snapshots_from_before_network_namespaces_have_none() {
+        let (info, _, _) = fixture();
+        let mut bytes = Recorder::new(Vec::new(), &info).unwrap().finish().unwrap();
+        let old = br#"{"pid":300,"answer":{"fds":[],"cwd":"/tmp"}}"#;
+        bytes.push(TAG_SNAPSHOT);
+        bytes.extend_from_slice(&u32::try_from(old.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(old);
+        let mut replay = parse(bytes.as_slice()).unwrap();
+        let snapshot = replay.answers.snapshot(300).unwrap();
+        assert_eq!((snapshot.cwd.as_deref(), snapshot.netns), (Some("/tmp"), None));
     }
 
     #[test]

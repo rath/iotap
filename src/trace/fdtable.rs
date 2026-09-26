@@ -1022,6 +1022,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::interfaces::Listing;
     use crate::trace::call::Syscall;
     use crate::trace::kdebug::codes::syscall;
     use crate::trace::procs::Snapshot;
@@ -1046,6 +1047,10 @@ mod tests {
                 target: self.live.get(&(pid, fd)).cloned(),
                 at: self.answered_at,
             }
+        }
+
+        fn interfaces(&mut self) -> Listing {
+            Listing::default()
         }
     }
 

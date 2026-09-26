@@ -1,12 +1,13 @@
-//! Where the descriptor table learns what descriptors refer to: the system when tracing live,
-//! a recording when replaying.
+//! Where the descriptor table learns what descriptors refer to, and the session which network
+//! interfaces the host has: the system when tracing live, a recording when replaying.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::interfaces::Listing;
 use crate::model::Target;
-use crate::sys::{proc, time};
+use crate::sys::{net, proc, time};
 
 /// Descriptor table, working directory and network namespace of a process at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,12 +36,14 @@ impl Described {
     }
 }
 
-/// Answers questions about the traced processes.
+/// Answers questions about the traced processes and the host they run on.
 pub trait ProcSource {
     /// Descriptor table of `pid`, or `None` if the process is gone.
     fn snapshot(&mut self, pid: i32) -> Option<Snapshot>;
     /// What `fd` of `pid` refers to now.
     fn describe(&mut self, pid: i32, fd: i32) -> Described;
+    /// The host's network interfaces now; none when the system does not say.
+    fn interfaces(&mut self) -> Listing;
 }
 
 /// Queries the running system: libproc on macOS, `/proc` on Linux.
@@ -63,6 +66,13 @@ impl ProcSource for Live {
             at: time::now_ticks(),
         }
     }
+
+    fn interfaces(&mut self) -> Listing {
+        Listing {
+            interfaces: net::interfaces().unwrap_or_default(),
+            netns: i32::try_from(std::process::id()).ok().and_then(proc::netns),
+        }
+    }
 }
 
 /// Answers from fixed tables; for tests and synthetic fixtures.
@@ -72,6 +82,10 @@ pub struct Fixed {
     pub targets: HashMap<(i32, i32), Target>,
     /// Trace time every answer is given at, to stand for the system lagging behind the trace.
     pub answered_at: u64,
+    /// Listings of the host's interfaces, given in turn; the last is given again after that.
+    pub interfaces: Vec<Listing>,
+    /// Times the interfaces were asked for.
+    pub interfaces_asked: usize,
 }
 
 impl ProcSource for Fixed {
@@ -84,6 +98,12 @@ impl ProcSource for Fixed {
             target: self.targets.get(&(pid, fd)).cloned(),
             at: self.answered_at,
         }
+    }
+
+    fn interfaces(&mut self) -> Listing {
+        let turn = self.interfaces_asked.min(self.interfaces.len().saturating_sub(1));
+        self.interfaces_asked += 1;
+        self.interfaces.get(turn).cloned().unwrap_or_default()
     }
 }
 
@@ -132,5 +152,30 @@ mod tests {
         assert_eq!(described.target, find(file.as_raw_fd()));
         assert!(described.at >= before);
         assert_eq!(live.describe(pid, 9_999).target, None);
+        let listing = live.interfaces();
+        assert!(listing.interfaces.iter().any(|interface| interface.loopback));
+        assert_eq!(listing.netns.is_some(), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn fixed_listings_come_in_turn_and_the_last_repeats() {
+        let listing = |name: &str| Listing {
+            interfaces: vec![crate::interfaces::Interface {
+                name: name.into(),
+                index: 1,
+                loopback: false,
+                addrs: Vec::new(),
+            }],
+            netns: None,
+        };
+        let mut fixed = Fixed::default();
+        assert_eq!(fixed.interfaces(), Listing::default());
+        fixed.interfaces = vec![listing("en0"), listing("en1")];
+        fixed.interfaces_asked = 0;
+        let names: Vec<String> = (0..3)
+            .map(|_| fixed.interfaces().interfaces[0].name.clone())
+            .collect();
+        assert_eq!(names, ["en0", "en1", "en1"]);
+        assert_eq!(fixed.interfaces_asked, 3);
     }
 }
