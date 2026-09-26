@@ -8,11 +8,14 @@ use serde::{Deserialize, Serialize};
 use crate::model::Target;
 use crate::sys::{proc, time};
 
-/// Descriptor table and working directory of a process at one moment.
+/// Descriptor table, working directory and network namespace of a process at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub fds: Vec<(i32, Target)>,
     pub cwd: Option<String>,
+    /// Linux only; absent from recordings made before iotap told interfaces apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub netns: Option<u64>,
 }
 
 /// What a descriptor referred to when the system was asked, and when that was.
@@ -49,6 +52,7 @@ impl ProcSource for Live {
         Some(Snapshot {
             fds: proc::fds(pid)?,
             cwd: proc::cwd(pid),
+            netns: proc::netns(pid),
         })
     }
 

@@ -132,6 +132,9 @@ pub struct FdTable {
     orphans: HashMap<(i32, i32), Vec<u64>>,
     next_answer: u64,
     verdicts: Vec<Verdict>,
+    /// The network namespace of each process whose snapshot named one, kept after the process
+    /// is detached for events that wait to be emitted.
+    netns: HashMap<i32, u64>,
 }
 
 impl FdTable {
@@ -145,6 +148,7 @@ impl FdTable {
             orphans: HashMap::new(),
             next_answer: 1,
             verdicts: Vec::new(),
+            netns: HashMap::new(),
         }
     }
 
@@ -178,6 +182,10 @@ impl FdTable {
         for (fd, entry) in &old.fds {
             self.retire(pid, *fd, entry, None);
         }
+        match snapshot.netns {
+            Some(netns) => self.netns.insert(pid, netns),
+            None => self.netns.remove(&pid),
+        };
         self.procs.insert(
             pid,
             ProcFds {
@@ -202,6 +210,11 @@ impl FdTable {
         self.procs.contains_key(&pid)
     }
 
+    /// The network namespace of `pid`, when its latest snapshot named one.
+    pub fn netns(&self, pid: i32) -> Option<u64> {
+        self.netns.get(&pid).copied()
+    }
+
     /// Gives `child`, which `parent` has just started, a copy of its parent's descriptors and
     /// working directory. A copy refers to the same open file as the original, so the answer an
     /// original waits on settles its copy too. Descriptors of a parent the table does not know
@@ -209,6 +222,10 @@ impl FdTable {
     pub fn fork(&mut self, parent: i32, child: i32) {
         // Whatever an earlier process with the child's pid left behind.
         self.detach(child);
+        match self.netns.get(&parent).copied() {
+            Some(netns) => self.netns.insert(child, netns),
+            None => self.netns.remove(&child),
+        };
         let Some(from) = self.procs.get(&parent) else {
             return;
         };
@@ -1101,6 +1118,7 @@ mod tests {
         let tty = Snapshot {
             fds: vec![(1, file("/dev/ttys001"))],
             cwd: Some("/work".into()),
+            netns: Some(7),
         };
         src.snapshots.insert(PID, tty);
         assert!(table.attach(PID, &mut src));
@@ -1108,12 +1126,15 @@ mod tests {
         let earlier = Snapshot {
             fds: vec![(9, file("/earlier"))],
             cwd: None,
+            netns: None,
         };
         src.snapshots.insert(CHILD, earlier);
         assert!(table.attach(CHILD, &mut src));
+        assert_eq!((table.netns(PID), table.netns(CHILD)), (Some(7), None));
         // The name of fd 3 rests on an answer libproc gives at 100.
         let answer = open_web2(&mut table, &mut src);
         table.fork(PID, CHILD);
+        assert_eq!(table.netns(CHILD), Some(7));
         let copied = table.target(CHILD, 1, 4, &mut src);
         assert_eq!(
             (&*copied.target, copied.provenance, copied.answer),
@@ -1143,6 +1164,10 @@ mod tests {
         // A child of a process the table does not know has its descriptors looked up.
         table.fork(7, 70);
         assert!(!table.is_attached(70));
+        assert_eq!(table.netns(70), None);
+        // Events of a process that has exited may still wait to be emitted.
+        table.detach(CHILD);
+        assert_eq!(table.netns(CHILD), Some(7));
     }
 
     #[test]
@@ -1379,6 +1404,7 @@ mod tests {
             Snapshot {
                 fds: vec![],
                 cwd: Some("/Users/me".into()),
+                netns: None,
             },
         );
         let mut table = FdTable::new(1_000);
@@ -1442,6 +1468,7 @@ mod tests {
             Snapshot {
                 fds: vec![],
                 cwd: Some(cwd.into()),
+                netns: None,
             },
         );
         let mut table = FdTable::new(1_000);
@@ -1757,6 +1784,7 @@ mod tests {
             Snapshot {
                 fds: vec![(3, file("/log")), (4, file(""))],
                 cwd: None,
+                netns: None,
             },
         );
         let mut table = FdTable::new(1_000);
@@ -1773,6 +1801,7 @@ mod tests {
             Snapshot {
                 fds: vec![(3, file("/log")), (4, file(""))],
                 cwd: None,
+                netns: None,
             },
         );
         assert!(table.attach(PID, &mut src));

@@ -750,6 +750,7 @@ mod tests {
                     },
                 )],
                 cwd: Some("/work".into()),
+                netns: None,
             },
         );
         procs

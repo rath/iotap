@@ -541,6 +541,7 @@ mod tests {
             Snapshot {
                 fds: vec![],
                 cwd: Some("/tmp".into()),
+                netns: None,
             },
         );
         let peer = Endpoint {

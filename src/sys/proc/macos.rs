@@ -285,6 +285,11 @@ pub fn cwd(pid: i32) -> Option<String> {
     (rc == 0 && !path.is_empty()).then_some(path)
 }
 
+/// The network namespace of a process: none, as macOS has none.
+pub fn netns(_pid: i32) -> Option<u64> {
+    None
+}
+
 fn endpoint(sock: &IotapSock) -> Endpoint {
     let mut out = Endpoint::unresolved(Proto::classify(sock.family, sock.sock_type, sock.protocol));
     match sock.kind {

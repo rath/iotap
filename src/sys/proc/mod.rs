@@ -1,8 +1,9 @@
-//! Which processes run, what they run and were started as, and what their descriptors refer to:
-//! through libproc and sysctl on macOS and `/proc` on Linux.
+//! Which processes run, what they run and were started as, what their descriptors refer to, and
+//! on Linux which network namespace they are in: through libproc and sysctl on macOS and `/proc`
+//! on Linux.
 //!
-//! The rest of iotap asks only [`list_pids`], [`info`], [`exe_path`], [`arg0`], [`cwd`], [`fds`]
-//! and [`fd_target`].
+//! The rest of iotap asks only [`list_pids`], [`info`], [`exe_path`], [`arg0`], [`cwd`], [`fds`],
+//! [`fd_target`] and [`netns`].
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -10,9 +11,9 @@ mod linux;
 mod macos;
 
 #[cfg(target_os = "linux")]
-pub use linux::{arg0, cwd, exe_path, fd_target, fds, info, list_pids};
+pub use linux::{arg0, cwd, exe_path, fd_target, fds, info, list_pids, netns};
 #[cfg(target_os = "macos")]
-pub use macos::{arg0, cwd, exe_path, fd_target, fds, info, list_pids};
+pub use macos::{arg0, cwd, exe_path, fd_target, fds, info, list_pids, netns};
 
 /// Facts that identify a running process.
 #[derive(Clone, Debug, PartialEq, Eq)]

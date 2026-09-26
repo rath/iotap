@@ -99,6 +99,18 @@ pub fn cwd(pid: i32) -> Option<String> {
     link(&format!("/proc/{pid}/cwd"))
 }
 
+/// The network namespace of a process, by the inode number its `/proc/<pid>/ns/net` link names;
+/// `None` if the process is gone.
+pub fn netns(pid: i32) -> Option<u64> {
+    namespace_inode(&link(&format!("/proc/{pid}/ns/net"))?)
+}
+
+/// The inode number in a namespace link, such as `net:[4026531840]`.
+fn namespace_inode(link: &str) -> Option<u64> {
+    let (_, inode) = link.split_once(":[")?;
+    inode.strip_suffix(']')?.parse().ok()
+}
+
 /// Open descriptors of a process and what each refers to; `None` if the process is gone.
 pub fn fds(pid: i32) -> Option<Vec<(i32, Target)>> {
     let dir = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
@@ -515,6 +527,16 @@ mod tests {
     }
 
     #[test]
+    fn processes_share_the_network_namespace_they_start_in() {
+        assert_eq!(namespace_inode("net:[4026531840]"), Some(4_026_531_840));
+        assert_eq!(namespace_inode("net:[x]"), None);
+        assert_eq!(namespace_inode("/dev/null"), None);
+        let sleeper = Sleeper::start("iotap-netns-sleeper");
+        assert_eq!(netns(sleeper.pid()), netns(me()));
+        assert_eq!(netns(i32::MAX), None);
+    }
+
+    #[test]
     fn finds_own_process() {
         let own = info(me()).expect("own process info");
         assert!(!own.name.is_empty());
@@ -524,6 +546,7 @@ mod tests {
         assert!(exe_path(me()).is_some_and(|p| p.starts_with('/')));
         assert!(cwd(me()).is_some_and(|p| p.starts_with('/')));
         assert_eq!(arg0(me()), std::env::args().next());
+        assert!(netns(me()).is_some());
         assert_eq!(info(-5), None);
         assert_eq!(info(i32::MAX), None);
         assert_eq!(arg0(i32::MAX), None);

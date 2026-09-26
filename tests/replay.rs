@@ -218,6 +218,7 @@ fn at_the_terminal(procs: &mut Fixed, pid: i32) {
                 },
             )],
             cwd: Some("/Users/me".into()),
+            netns: None,
         },
     );
 }

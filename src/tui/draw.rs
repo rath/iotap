@@ -722,6 +722,7 @@ mod tests {
                     },
                 )],
                 cwd: Some("/Users/me".into()),
+                netns: None,
             },
         );
         src.targets.insert(
