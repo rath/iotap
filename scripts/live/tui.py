@@ -10,6 +10,9 @@ sudo of its own, and takes signals from here.
         host names: CURL downloads from IP, which the resolver names NAME, and PEER has UDP
         sockets connected to 1.1.1.1, to 192.0.2.1, which has no name, and to SLOW, whose lookup
         is slow
+    tui.py interfaces BIN PID IFACE LOOPBACK FAR
+        the interface table: PID uses IFACE through a UDP socket connected to FAR, and the
+        loopback interface LOOPBACK
 
 Prints each screen it looks at, and a PASS or FAIL line for each expectation.
 """
@@ -367,6 +370,40 @@ def names(binary, curl, peer, ip, name, slow):
     )
 
 
+def interfaces(binary, pid, iface, loopback, far):
+    ui = Ui("J interfaces", [binary, "--tui", pid])
+    ui.pump(2.5)
+    lines = ui.show("Files tab")
+    ui.verdict(
+        has(lines, "FILE READ") and not has(lines, "INTERFACE"), "no interface table at first"
+    )
+    ui.verdict("i interfaces" in lines[-1], "the footer offers it")
+    ui.keys("i", wait=1.5)
+    lines = ui.show("after i")
+    header = next((line for line in lines if " INTERFACE " in line), "")
+    rates = next((line for line in lines if "FILE READ" in line), "")
+    ui.verdict(
+        bool(header) and len(header) == len(rates),
+        "i shows the interface table, its columns in line with the rates",
+    )
+    ui.verdict(any(line.startswith(f" {iface} ") for line in lines), f"with a row for {iface}")
+    ui.verdict(any(line.startswith(f" {loopback} ") for line in lines), f"and one for {loopback}")
+    ui.keys("2", wait=1.0)
+    ui.keys("g", wait=0.4)
+    ui.verdict(ui.select(f"udp {far}:9", tries=20), f"the socket connected to {far} is selected")
+    ui.keys("\r", wait=0.8)
+    lines = ui.show("details")
+    line = next((line for line in lines if line.startswith(" interface ")), "")
+    ui.verdict(line.endswith(f" {iface}"), f"the details name its interface ({line.strip()!r})")
+    ui.keys("\x1b", wait=0.3)
+    ui.keys("i", wait=0.8)
+    lines = ui.show("after a second i")
+    ui.verdict(not has(lines, "INTERFACE") and has(lines, "FILE READ"), "a second i hides it")
+    ui.keys("q", wait=0.1)
+    after = ui.finish()
+    ui.verdict(f"\n    {iface} " in after, "the summary lists the network I/O of each interface")
+
+
 if __name__ == "__main__":
     scenario, args = sys.argv[1], sys.argv[2:]
-    {"keys": keys, "names": names}[scenario](*args)
+    {"keys": keys, "names": names, "interfaces": interfaces}[scenario](*args)

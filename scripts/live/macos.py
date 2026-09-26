@@ -377,6 +377,11 @@ def children(run):
     shared.children(run)
 
 
+@check("Darwin", 13, "Network interfaces")
+def interfaces(run):
+    shared.interfaces(run)
+
+
 def traced_program(run, name, *args):
     """Starts a program of programs.py that waits to be traced, traces it until it exits, and
     returns what it wrote about itself and the events iotap saw."""

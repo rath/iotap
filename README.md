@@ -536,6 +536,17 @@ checks need Python's pyte package, and the host-name checks a connection to the 
     ended before iotap could trace it, and the summary must count the latter. Traced with `-f`,
     a process that iotap runs under, such as the shell that started it, must take in neither
     iotap nor its sudo, but must take in a process it starts meanwhile.
+13. **Network interfaces.** Trace, with `--json` and `--record`, a program that receives on a UDP
+    socket connected to an address the default route leads to, sends to 127.0.0.1, to `::1` and
+    to the host's own address, sends over a socketpair and from a socket bound to every address,
+    each with a size of its own, such as `interfaces` in `scripts/live/programs.py`. Expect the
+    `interface` of the first to be the one `route -n get` names, the loopback interface for the
+    next three, null for the socketpair and `?` for the last, the summary's `interfaces` to add
+    up to its network totals, and the replay to match the live output. With `-i` and that
+    interface, expect only its I/O and a count of the calls left out; with `-q -i lo0`, a
+    Totals line for `lo0` and no Files table; with a name no interface has, a warning and the
+    trace. In the terminal UI, `i` must show a row for each interface, its columns in line with
+    the throughput's, and the details of the connected socket its interface.
 
 ### Linux
 
@@ -582,6 +593,7 @@ loaded; iotap's are named `sys_enter`, `sys_exit`, from Linux 6.16 `process_exit
     public server.
 13. **Children**, as on macOS, except that every child is traced from its start: each of the
     children that end at once must be traced, with the write it makes.
+14. **Network interfaces**, as on macOS, with the interface `ip route get` names and `lo`.
 
 When scripting these checks, signal iotap itself, or send the signal from another process group.
 sudo does not pass on a signal that comes from its own process group, which is where `kill -INT $!`

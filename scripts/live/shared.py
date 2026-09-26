@@ -33,6 +33,9 @@ SERVER = "proof.ovh.net"
 # An address whose reverse lookup takes seconds: 30 on macOS and 10 on Ubuntu when this was
 # written. The checks hold whether or not it is slow at the moment.
 SLOW = "93.184.215.14"
+# A documentation address (TEST-NET-1), reached over the default route, to which the checks
+# send nothing.
+FAR = "192.0.2.1"
 
 
 def dropped(run, *options):
@@ -335,6 +338,134 @@ def tui(run, scenario, *args):
         rc == 0, f"the driver finished ({scenario})", run.read(f"tui-{scenario}.err").strip()[-300:]
     )
     return True
+
+
+def route_interface(address):
+    """The interface of the route to `address`, or None."""
+    if MACOS:
+        argv, pattern = ["route", "-n", "get", address], r"^\s*interface: (\S+)$"
+    else:
+        argv, pattern = ["ip", "route", "get", address], r"\bdev (\S+)"
+    listing = subprocess.run(argv, capture_output=True, text=True, check=False).stdout
+    m = re.search(pattern, listing, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def interfaces(run):
+    """The interface of each way a socket's I/O can go, -i and the terminal UI's table."""
+    far = route_interface(FAR)
+    if far is None:
+        run.skip("network interfaces", f"no route to {FAR}")
+        return
+    loopback = "lo0" if MACOS else "lo"
+    run.note(f"the route to {FAR} goes over {far}")
+    work = os.path.join(run.work, "interfaces")
+    os.makedirs(work)
+    program = run.start(
+        [sys.executable, PROGRAMS, "interfaces", work, FAR], stderr="interfaces.program.err"
+    )
+    if not run.expect(
+        wait_for(lambda: os.path.exists(os.path.join(work, "ready")), 10), "the program runs"
+    ):
+        return
+    with open(os.path.join(work, "own")) as f:
+        own = f.read()
+
+    recording = run.file("interfaces.iotaprec")
+    rc = run.iotap(
+        "--json",
+        "-d",
+        "2",
+        "--record",
+        recording,
+        program.pid,
+        stdout="interfaces.json",
+        stderr="interfaces.err",
+    )
+    traced = json_lines(run.file("interfaces.json"))
+    events = [o for o in traced if o.get("type") == "event"]
+    total = next((o for o in traced if o.get("type") == "summary"), {})
+    run.expect(rc == 0 and bool(events), "iotap traces the program", f"exit status {rc}")
+    ways = [
+        (1111, far, f"a receive on a socket connected to {FAR} goes over {far}"),
+        (1222, loopback, "a send to 127.0.0.1 goes over the loopback interface"),
+        (1333, loopback, f"a send to the host's own address {own} goes over it too"),
+        (1444, None, "a send over a socketpair goes over none"),
+        (1555, "?", "a send from a socket bound to every address goes over one iotap cannot tell"),
+        (1777, loopback, "a send to ::1 goes over the loopback interface"),
+    ]
+    no_v6 = "no ::1" in run.read("interfaces.program.err")
+    for size, wanted, what in ways:
+        if size == 1777 and no_v6:
+            run.skip(what, "the host has no ::1")
+            continue
+        seen = {e.get("interface", "MISSING") for e in events if e.get("requested") == size}
+        run.expect(seen == {wanted}, what, f"{sorted(map(str, seen))}")
+    for side in ("read", "write"):
+        by_interface = sum(i.get(f"{side}_bytes", 0) for i in total.get("interfaces", []))
+        whole = total.get("totals", {}).get(f"net_{side}", {}).get("bytes")
+        run.expect(
+            bool(events) and by_interface == whole,
+            f"the summary's interfaces add up to the network total {side}",
+            f"{by_interface} of {whole}",
+        )
+
+    with open(run.file("interfaces.replay"), "wb") as out:
+        again = subprocess.run(
+            [run.bin, "--json", "--replay", recording], stdout=out, stderr=DEVNULL, check=False
+        ).returncode
+    run.expect(
+        again == 0
+        and bool(events)
+        and filecmp.cmp(run.file("interfaces.json"), run.file("interfaces.replay"), shallow=False),
+        "the replay of the recording is identical to the live output",
+    )
+
+    rc = run.iotap(
+        "--json", "-d", "2", "-i", far, program.pid, stdout="only.json", stderr="only.err"
+    )
+    only = json_lines(run.file("only.json"))
+    kept = [o for o in only if o.get("type") == "event"]
+    left_out = next((o for o in only if o.get("type") == "summary"), {})
+    run.expect(
+        rc == 0 and bool(kept) and all(e.get("interface") == far for e in kept),
+        f"-i {far} reports only the I/O over {far}",
+        f"{len(kept)} events",
+    )
+    run.expect(
+        bool(kept) and left_out.get("unknown_interface_calls", 0) > 0,
+        "and counts the calls over an interface iotap cannot tell",
+        str(left_out.get("unknown_interface_calls")),
+    )
+    run.expect(
+        f"reporting only network I/O over {far};" in run.read("only.err"),
+        "the startup line says so",
+    )
+
+    rc = run.iotap("-q", "-d", "2", "-i", loopback, program.pid, stdout="lo.out", stderr="lo.err")
+    text = summary(run.read("lo.out"))
+    listed = rf"^    {re.escape(loopback)} +received \S+ \S+ \(\d+ calls?\), sent "
+    run.expect(
+        rc == 0 and re.search(listed, text, re.MULTILINE) and "Files (" not in text,
+        f"with -q -i {loopback}, the totals list {loopback} and there is no Files table",
+    )
+    run.expect("Note: --interface left out " in text, "the summary notes the calls -i left out")
+
+    rc = run.iotap("-q", "-d", "1", "-i", "nosuch0", program.pid, stderr="nosuch.err")
+    err = run.read("nosuch.err")
+    run.expect(
+        rc == 0 and "iotap: tracing" in err and "no network interface is named 'nosuch0'" in err,
+        "a name no interface has is warned of, and iotap goes on",
+        err.strip().replace("\n", " | ")[:300],
+    )
+    if far.upper() != far:
+        rc = run.iotap("-q", "-d", "1", "-i", far.upper(), program.pid, stderr="case.err")
+        run.expect(
+            rc == 0 and f"did you mean '{far}'?" in run.read("case.err"),
+            "a name in another case is offered the right one",
+        )
+
+    tui(run, "interfaces", run.bin, program.pid, far, loopback, FAR)
 
 
 class Clipboard:

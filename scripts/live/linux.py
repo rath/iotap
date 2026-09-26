@@ -351,3 +351,8 @@ def replay_ui_names(run):
 @check("Linux", 13, "Children")
 def children(run):
     shared.children(run)
+
+
+@check("Linux", 14, "Network interfaces")
+def interfaces(run):
+    shared.interfaces(run)

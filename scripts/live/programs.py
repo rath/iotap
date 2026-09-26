@@ -24,9 +24,16 @@
                                    begins a child that starts a grandchild, a child that runs
                                    `write` by exec, and twenty children that write 100 bytes each
                                    to DIR/brief and end at once; writes the pids to OUT as JSON
+    programs.py interfaces DIR FAR a call of its own size for each way to a network interface,
+                                   every 0.2 s until killed: a receive of 1111 bytes on a UDP
+                                   socket connected to FAR, over the default route, and sends
+                                   of 1222 bytes to 127.0.0.1, 1333 to the host's own address,
+                                   1444 over a socketpair, 1555 from a socket bound to every
+                                   address, and 1777 to ::1; writes the host's own address to
+                                   DIR/own; no packet leaves the machine
 
 workload, lab, family and paced create DIR/ready once set up, then wait for DIR/go before their
-I/O.
+I/O; interfaces creates DIR/ready once set up and goes on at once.
 """
 
 import fcntl
@@ -507,6 +514,56 @@ def family(out, directory):
         json.dump(pids, f)
 
 
+def interfaces(directory, far):
+    # Connecting a UDP socket sends nothing, and neither does a receive that finds nothing.
+    remote = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    remote.connect((far, 9))
+    own = remote.getsockname()[0]
+    receivers = []
+
+    def to(address, family=socket.AF_INET):
+        server = socket.socket(family, socket.SOCK_DGRAM)
+        server.bind((address, 0))
+        client = socket.socket(family, socket.SOCK_DGRAM)
+        client.connect(server.getsockname())
+        receivers.append(server)
+        return client, server.getsockname()
+
+    loopback, _ = to("127.0.0.1")
+    own_address, _ = to(own)
+    v6 = None
+    try:
+        v6, _ = to("::1", socket.AF_INET6)
+    except OSError as err:
+        print(f"interfaces: no ::1: {err}", file=sys.stderr, flush=True)
+    pair = socket.socketpair()
+    wildcard = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    wildcard.bind(("0.0.0.0", 0))
+    _, wildcard_to = to("127.0.0.1")
+    with open(os.path.join(directory, "own"), "w") as f:
+        f.write(own)
+    open(os.path.join(directory, "ready"), "w").close()
+    while True:
+        try:
+            remote.recv(1111, socket.MSG_DONTWAIT)
+        except OSError:
+            pass
+        loopback.send(b"l" * 1222)
+        own_address.send(b"o" * 1333)
+        pair[0].send(b"p" * 1444)
+        pair[1].recv(65536)
+        wildcard.sendto(b"w" * 1555, wildcard_to)
+        if v6 is not None:
+            v6.send(b"6" * 1777)
+        for receiver in receivers:
+            try:
+                while True:
+                    receiver.recv(65536, socket.MSG_DONTWAIT)
+            except OSError:
+                pass
+        time.sleep(0.2)
+
+
 def main():
     name, args = sys.argv[1], sys.argv[2:]
     if name == "sockets":
@@ -527,6 +584,8 @@ def main():
         paced(args[0], int(args[1]), int(args[2]))
     elif name == "family":
         family(*args)
+    elif name == "interfaces":
+        interfaces(*args)
     else:
         sys.exit(f"programs.py: no program named {name!r}")
 
