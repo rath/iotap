@@ -354,6 +354,49 @@ impl fmt::Display for Target {
     }
 }
 
+/// The network interface that an event's I/O went over, as far as iotap can tell. Named
+/// interfaces order before the others, by name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Via {
+    Interface(Arc<str>),
+    /// An Internet socket, or one that may be, whose interface iotap cannot tell.
+    Unknown,
+    /// No interface: a file or another descriptor, or a socket that stays within the host, such
+    /// as a Unix-domain socket.
+    NoInterface,
+}
+
+impl Via {
+    /// The interface's name, when iotap knows it.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Interface(name) => Some(name),
+            Self::Unknown | Self::NoInterface => None,
+        }
+    }
+}
+
+impl fmt::Display for Via {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Interface(name) => name,
+            Self::Unknown => "?",
+            Self::NoInterface => "none",
+        })
+    }
+}
+
+/// The name, `"?"` when unknown, or null for no interface.
+impl Serialize for Via {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Interface(name) => serializer.serialize_str(name),
+            Self::Unknown => serializer.serialize_str("?"),
+            Self::NoInterface => serializer.serialize_none(),
+        }
+    }
+}
+
 /// How iotap learned what a descriptor refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -576,6 +619,28 @@ mod tests {
             serde_json::to_string(&pipe).unwrap(),
             r#"{"kind":"other","fd_type":"pipe"}"#
         );
+    }
+
+    #[test]
+    fn interfaces_display_and_serialize() {
+        let en0 = Via::Interface("en0".into());
+        assert_eq!(en0.to_string(), "en0");
+        assert_eq!(en0.name(), Some("en0"));
+        assert_eq!(Via::Unknown.to_string(), "?");
+        assert_eq!(Via::NoInterface.to_string(), "none");
+        assert_eq!(Via::Unknown.name(), None);
+        assert_eq!(serde_json::to_string(&en0).unwrap(), r#""en0""#);
+        assert_eq!(serde_json::to_string(&Via::Unknown).unwrap(), r#""?""#);
+        assert_eq!(serde_json::to_string(&Via::NoInterface).unwrap(), "null");
+        let mut order = [
+            Via::NoInterface,
+            Via::Unknown,
+            en0,
+            Via::Interface("awdl0".into()),
+        ];
+        order.sort();
+        let names: Vec<String> = order.iter().map(Via::to_string).collect();
+        assert_eq!(names, ["awdl0", "en0", "?", "none"]);
     }
 
     #[test]
