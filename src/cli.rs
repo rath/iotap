@@ -36,12 +36,13 @@ pub struct Cli {
     ///
     /// Keys: 1, 2 and 3 switch between the Files, Network and Events tabs; s changes the sort
     /// order; p pauses the view while tracing goes on; r resets the view to zero, though the
-    /// summary still covers the whole trace; n shows remote addresses as host names, or as
-    /// addresses again; the arrow keys, Page Up, Page Down, Home and End select a row of the
-    /// Files and Network tables and scroll the Events tab; Enter shows the selected row's
-    /// details; y copies its path or address; Esc closes the details, then lets go of the
-    /// selection, then quits; q quits and prints the summary. The UI stays open after tracing
-    /// stops. With --quiet it has no Events tab.
+    /// summary still covers the whole trace; i shows network I/O by interface above the tabs,
+    /// or hides it again; n shows remote addresses as host names, or as addresses again; the
+    /// arrow keys, Page Up, Page Down, Home and End select a row of the Files and Network tables
+    /// and scroll the Events tab; Enter shows the selected row's details; y copies its path or
+    /// address; Esc closes the details, then lets go of the selection, then quits; q quits and
+    /// prints the summary. The UI stays open after tracing stops. With --quiet it has no Events
+    /// tab.
     #[arg(long, conflicts_with = "json")]
     pub tui: bool,
 
@@ -60,6 +61,21 @@ pub struct Cli {
     /// Report only network I/O.
     #[arg(long)]
     pub net_only: bool,
+
+    /// Report only network I/O over this network interface, such as en0 or wlan0; repeat the
+    /// option for several.
+    ///
+    /// The name must match exactly, case included. A socket's I/O goes over the interface that
+    /// holds its local address, or over the loopback interface when it goes to one of the
+    /// host's own addresses. File and other I/O is not reported, and neither is I/O whose
+    /// interface iotap cannot tell, such as that of a socket sending from every address.
+    #[arg(
+        short = 'i',
+        long = "interface",
+        value_name = "NAME",
+        conflicts_with = "files_only"
+    )]
+    pub interfaces: Vec<String>,
 
     /// Show remote addresses as host names in the summary, and in the terminal UI from the
     /// start. Names come from the system's resolver (reverse DNS), asked in the background for
@@ -121,5 +137,18 @@ mod tests {
             assert!(Cli::try_parse_from(["iotap", flag, "1"]).unwrap().children);
         }
         assert!(!Cli::try_parse_from(["iotap", "1"]).unwrap().children);
+    }
+
+    #[test]
+    fn parses_interfaces() {
+        let cli = Cli::try_parse_from(["iotap", "-i", "en0", "--interface", "lo0", "1234"]).unwrap();
+        assert_eq!(
+            (cli.interfaces, cli.targets),
+            (vec!["en0".into(), "lo0".into()], vec!["1234".into()])
+        );
+        assert!(Cli::try_parse_from(["iotap", "-i", "en0", "--files-only", "1"]).is_err());
+        assert!(Cli::try_parse_from(["iotap", "-i", "en0", "--net-only", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["iotap", "--replay", "x.iotaprec", "-i", "en0"]).is_ok());
+        assert!(Cli::try_parse_from(["iotap", "1"]).unwrap().interfaces.is_empty());
     }
 }

@@ -14,6 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::Cli;
 use crate::hosts::Hosts;
+use crate::interfaces::Table;
 use crate::output::json::JsonSink;
 use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
@@ -96,13 +97,59 @@ pub fn run(cli: &Cli) -> Result<ExitCode> {
     trace_live(cli)
 }
 
-/// What the session reports, from the command-line filters.
+/// What the session reports, from the command-line filters. Only network I/O goes over an
+/// interface, so naming interfaces leaves out file and other I/O.
 pub fn filter(cli: &Cli) -> Filter {
+    let network_only = cli.net_only || !cli.interfaces.is_empty();
     Filter {
-        files: !cli.net_only,
+        files: !network_only,
         network: !cli.files_only,
-        other: !cli.files_only && !cli.net_only,
-        interfaces: Vec::new(),
+        other: !cli.files_only && !network_only,
+        interfaces: cli.interfaces.clone(),
+    }
+}
+
+/// What to tell of the interfaces `wanted` that `table` does not list, when the table comes
+/// from the system or, for `replay`, from a recording.
+fn interface_warnings(wanted: &[String], table: &Table, replay: bool) -> Vec<String> {
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    if table.is_empty() {
+        return vec![if replay {
+            "the recording lists no network interfaces, so --interface matches no I/O".to_owned()
+        } else {
+            "the system listed no network interfaces, so --interface matches no I/O".to_owned()
+        }];
+    }
+    wanted
+        .iter()
+        .filter(|name| table.names().all(|known| known != name.as_str()))
+        .map(|name| {
+            let missing = if replay {
+                format!("the recording lists no network interface named '{name}'")
+            } else {
+                format!("no network interface is named '{name}'")
+            };
+            match table.names().find(|known| known.eq_ignore_ascii_case(name)) {
+                Some(like) => format!("{missing}; did you mean '{like}'?"),
+                None => missing,
+            }
+        })
+        .collect()
+}
+
+/// Tells of the interfaces `-i` names that the session's table does not list, on stderr and,
+/// in the terminal UI, in the status line, which hides stderr.
+fn warn_of_interfaces(cli: &Cli, session: &Session, app: Option<&mut App>) {
+    let warnings = interface_warnings(&cli.interfaces, session.interfaces(), cli.replay.is_some());
+    for warning in &warnings {
+        let _ = writeln!(io::stderr(), "iotap: {warning}");
+    }
+    if let Some(app) = app
+        && !warnings.is_empty()
+    {
+        app.message(warnings.join("; "));
     }
 }
 
@@ -166,6 +213,10 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     } else {
         Output::Printer(Printer::new(cli, session.info())?)
     };
+    match &mut output {
+        Output::Tui(app) => warn_of_interfaces(cli, &session, Some(app)),
+        Output::Printer(_) => warn_of_interfaces(cli, &session, None),
+    }
 
     let (tx, rx) = mpsc::channel();
     let (facility_ref, stop_ref, config_ref) = (&mut facility, &*stop, &config);
@@ -427,6 +478,7 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
             interrupted: &interrupted,
         };
         let mut app = tui_app(cli);
+        warn_of_interfaces(cli, &session, Some(&mut app));
         if finish_output(tui::run(&mut session, &mut feed, &mut app), TUI_FAILED)? {
             // The summary covers the whole recording, as it does without --tui.
             for input in feed.inputs.by_ref() {
@@ -439,6 +491,7 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     }
+    warn_of_interfaces(cli, &session, None);
     let mut printer = Printer::new(cli, session.info())?;
     let sink = printer.sink();
     let fed = replay
@@ -536,7 +589,15 @@ impl Targets {
         } else {
             "press Ctrl-C to stop"
         };
-        format!("tracing {}; {how}", what.join(", "))
+        let only = if cli.interfaces.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; reporting only network I/O over {}",
+                cli.interfaces.join(" or ")
+            )
+        };
+        format!("tracing {}{only}; {how}", what.join(", "))
     }
 }
 
@@ -592,6 +653,7 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+    use crate::interfaces::{Interface, Listing};
 
     fn process(pid: i32, name: &str) -> Tracked {
         Tracked {
@@ -636,6 +698,57 @@ mod tests {
             followed.announcement(&cli(&["-f", "make"])),
             "tracing 10 (make), new processes named 'make', and their descendants; \
              press Ctrl-C to stop"
+        );
+        assert_eq!(
+            make.announcement(&cli(&["-i", "wlP9s9", "-i", "lo", "10"])),
+            "tracing 10 (make); reporting only network I/O over wlP9s9 or lo; press Ctrl-C to stop"
+        );
+    }
+
+    #[test]
+    fn interfaces_leave_out_file_and_other_io() {
+        let cli = |args: &[&str]| Cli::try_parse_from(["iotap"].iter().chain(args)).unwrap();
+        assert_eq!(filter(&cli(&["1"])), Filter::ALL);
+        let only = filter(&cli(&["-i", "en0", "1"]));
+        assert_eq!(
+            (only.files, only.network, only.other, only.interfaces),
+            (false, true, false, vec!["en0".to_owned()])
+        );
+    }
+
+    #[test]
+    fn warns_of_interfaces_the_table_does_not_list() {
+        let listing = Listing {
+            interfaces: ["lo", "wlP9s9"]
+                .iter()
+                .map(|&name| Interface {
+                    name: name.into(),
+                    index: 1,
+                    loopback: name == "lo",
+                    addrs: Vec::new(),
+                })
+                .collect(),
+            netns: None,
+        };
+        let table = Table::new(listing, 0, 1);
+        let wanted = |names: &[&str]| -> Vec<String> { names.iter().map(|&name| name.to_owned()).collect() };
+        assert!(interface_warnings(&[], &table, false).is_empty());
+        assert!(interface_warnings(&wanted(&["wlP9s9", "lo"]), &table, false).is_empty());
+        assert_eq!(
+            interface_warnings(&wanted(&["wlp9s9", "eth9"]), &table, false),
+            [
+                "no network interface is named 'wlp9s9'; did you mean 'wlP9s9'?",
+                "no network interface is named 'eth9'"
+            ]
+        );
+        assert_eq!(
+            interface_warnings(&wanted(&["eth9"]), &table, true),
+            ["the recording lists no network interface named 'eth9'"]
+        );
+        let empty = Table::new(Listing::default(), 0, 1);
+        assert_eq!(
+            interface_warnings(&wanted(&["eth9"]), &empty, true),
+            ["the recording lists no network interfaces, so --interface matches no I/O"]
         );
     }
 }

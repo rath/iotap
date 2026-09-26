@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use iotap::interfaces::{Interface, Listing};
 use iotap::model::{Endpoint, Proto, Target};
 use iotap::record::{Recorder, Recording};
 #[cfg(target_os = "macos")]
@@ -235,9 +236,29 @@ fn record(path: &Path, info: SessionInfo, procs: Fixed, inputs: &[Input]) {
     recording.finish().unwrap();
 }
 
+/// The host's interfaces: the loopback interface, and en0, which holds 192.168.1.20.
+fn interfaces() -> Listing {
+    let interface = |name: &str, index, loopback, addr: &str| Interface {
+        name: name.into(),
+        index,
+        loopback,
+        addrs: vec![addr.parse().unwrap()],
+    };
+    Listing {
+        interfaces: vec![
+            interface("lo0", 1, true, "127.0.0.1"),
+            interface("en0", 4, false, "192.168.1.20"),
+        ],
+        netns: None,
+    }
+}
+
 fn write_recording(path: &Path) {
     let (records, timebase, path_records, end) = traced();
-    let mut procs = Fixed::default();
+    let mut procs = Fixed {
+        interfaces: vec![interfaces()],
+        ..Fixed::default()
+    };
     at_the_terminal(&mut procs, PID);
     procs.targets.insert(
         (PID, 5),
@@ -340,6 +361,74 @@ fn replay_honours_filters_and_quiet() {
         !files.contains("tcp ") && files.contains("/Users/me/page.html"),
         "{files}"
     );
+}
+
+#[test]
+fn replay_tells_the_interface_of_each_event() {
+    let dir = TempDir::new("interfaces");
+    let path = dir.0.join("curl.iotaprec");
+    write_recording(&path);
+    let path = path.to_str().unwrap();
+    let json = |args: &[&str]| -> Vec<serde_json::Value> {
+        let output = iotap(&[&["--replay", path, "--json"], args].concat());
+        assert!(output.status.success(), "{output:?}");
+        stdout(&output)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let of = |lines: &[serde_json::Value], kind: &str| -> Vec<serde_json::Value> {
+        lines.iter().filter(|l| l["type"] == kind).cloned().collect()
+    };
+
+    let all = json(&[]);
+    let interfaces: Vec<serde_json::Value> = of(&all, "event")
+        .iter()
+        .map(|event| event["interface"].clone())
+        .collect();
+    let (en0, none) = (serde_json::json!("en0"), serde_json::Value::Null);
+    assert_eq!(
+        interfaces,
+        [en0.clone(), en0.clone(), en0, none.clone(), none],
+        "the socket's, then the files'"
+    );
+    let summary = &of(&all, "summary")[0];
+    assert_eq!(
+        summary["interfaces"],
+        serde_json::json!([{"interface": "en0", "read_bytes": 4096, "read_calls": 2, "write_bytes": 517, "write_calls": 1}])
+    );
+    assert_eq!(summary["unknown_interface_calls"], 0);
+    let text = stdout(&iotap(&["--replay", path, "--quiet"]));
+    assert!(
+        text.contains(
+            "  network  received 4.0 KiB (2 calls), sent 517 B (1 call)\n    en0    received 4.0 KiB (2 calls), sent 517 B (1 call)\n"
+        ),
+        "{text}"
+    );
+
+    let en0 = json(&["-i", "en0"]);
+    let events = of(&en0, "event");
+    assert_eq!(events.len(), 3, "{en0:?}");
+    assert!(events.iter().all(|e| e["interface"] == "en0"), "{en0:?}");
+    assert_eq!(of(&en0, "summary")[0]["files"], serde_json::json!([]));
+    let lo0 = json(&["-i", "lo0"]);
+    assert!(of(&lo0, "event").is_empty(), "{lo0:?}");
+    assert_eq!(of(&lo0, "summary")[0]["interfaces"], serde_json::json!([]));
+
+    let stderr =
+        |args: &[&str]| String::from_utf8(iotap(&[&["--replay", path, "-q"], args].concat()).stderr).unwrap();
+    assert!(
+        stderr(&["-i", "eth9"]).contains("iotap: the recording lists no network interface named 'eth9'\n"),
+        "{}",
+        stderr(&["-i", "eth9"])
+    );
+    assert!(
+        stderr(&["-i", "EN0"]).contains("named 'EN0'; did you mean 'en0'?\n"),
+        "{}",
+        stderr(&["-i", "EN0"])
+    );
+    let conflict = iotap(&["--replay", path, "--files-only", "-i", "en0"]);
+    assert_eq!(conflict.status.code(), Some(2), "{conflict:?}");
 }
 
 #[test]

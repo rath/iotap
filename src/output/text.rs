@@ -5,11 +5,13 @@ use std::io::{self, Write};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use unicode_width::UnicodeWidthStr;
+
 use super::{bytes, count, duration, latency};
 use crate::hosts::Hosts;
 use crate::model::{IoEvent, errno_name};
 use crate::session::{Filter, Notice, Sink, Summary, UntracedReason};
-use crate::stats::SummaryRow;
+use crate::stats::{Counter, SummaryRow};
 use crate::sys::time::LocalClock;
 
 /// Longest wait for the host names of the summary's network rows.
@@ -196,16 +198,18 @@ pub fn write_summary(
         )?;
     }
 
+    write_totals(out, summary, filter)?;
+    write_gaps(out, summary)
+}
+
+/// Writes the totals by kind of I/O, and network I/O by interface.
+fn write_totals(out: &mut dyn Write, summary: &Summary, filter: &Filter) -> io::Result<()> {
     let t = &summary.totals;
     writeln!(out)?;
     writeln!(out, "Totals")?;
-    let line = |label: &str,
-                read_word: &str,
-                read: crate::stats::Counter,
-                write_word: &str,
-                write: crate::stats::Counter| {
+    let line = |label: &str, read_word: &str, read: Counter, write_word: &str, write: Counter| {
         format!(
-            "  {label:<8} {read_word} {} ({}), {write_word} {} ({})",
+            "{label} {read_word} {} ({}), {write_word} {} ({})",
             bytes(read.bytes),
             count(read.calls, "call"),
             bytes(write.bytes),
@@ -213,28 +217,37 @@ pub fn write_summary(
         )
     };
     if filter.files {
-        writeln!(
-            out,
-            "{}",
-            line("files", "read", t.file_read, "written", t.file_write)
-        )?;
+        let files = line("  files   ", "read", t.file_read, "written", t.file_write);
+        writeln!(out, "{files}")?;
     }
     if filter.network {
-        writeln!(
-            out,
-            "{}",
-            line("network", "received", t.net_read, "sent", t.net_write)
-        )?;
+        let network = line("  network ", "received", t.net_read, "sent", t.net_write);
+        writeln!(out, "{network}")?;
+        let names: Vec<String> = summary
+            .interfaces
+            .iter()
+            .map(|totals| totals.interface.to_string())
+            .collect();
+        // Under the network line, with names up to six columns wide in line with its words.
+        let width = names.iter().map(|name| name.width()).max().unwrap_or(0).max(6);
+        for (name, totals) in names.iter().zip(&summary.interfaces) {
+            let read = Counter {
+                bytes: totals.read_bytes,
+                calls: totals.read_calls,
+            };
+            let write = Counter {
+                bytes: totals.write_bytes,
+                calls: totals.write_calls,
+            };
+            let label = format!("    {name}{}", " ".repeat(width - name.width()));
+            writeln!(out, "{}", line(&label, "received", read, "sent", write))?;
+        }
     }
     if filter.other && t.other_read.calls + t.other_write.calls > 0 {
-        writeln!(
-            out,
-            "{}",
-            line("other", "read", t.other_read, "written", t.other_write)
-        )?;
+        let other = line("  other   ", "read", t.other_read, "written", t.other_write);
+        writeln!(out, "{other}")?;
     }
-    writeln!(out, "  {}, {} failed", count(t.events, "call"), t.errors)?;
-    write_gaps(out, summary)
+    writeln!(out, "  {}, {} failed", count(t.events, "call"), t.errors)
 }
 
 /// Says what the trace is missing, if anything.
@@ -265,6 +278,13 @@ fn write_gaps(out: &mut dyn Write, summary: &Summary) -> io::Result<()> {
         let (children, _) = children(untraced.ended);
         let them = if untraced.ended == 1 { "it" } else { "them" };
         writeln!(out, "Note: {children} ended before iotap could trace {them}.")?;
+    }
+    if summary.unknown_interface_calls > 0 {
+        writeln!(
+            out,
+            "Note: --interface left out {} on sockets whose interface iotap cannot tell.",
+            count(summary.unknown_interface_calls, "call")
+        )?;
     }
     Ok(())
 }
@@ -342,7 +362,7 @@ mod tests {
     use crate::hosts::HostName;
     use crate::model::{Category, Endpoint, Op, Proto, Provenance, Target, Via};
     use crate::session::{Process, UntracedChildren};
-    use crate::stats::Stats;
+    use crate::stats::{InterfaceTotals, Stats};
 
     /// A summary of reads from three servers: two with names, one without.
     fn summary() -> Summary {
@@ -446,6 +466,68 @@ mod tests {
             notice_text(&attached, &mut clock),
             "now tracing 9 (cc), a child of 7"
         );
+    }
+
+    fn over(interface: Via, read: (u64, u64), write: (u64, u64)) -> InterfaceTotals {
+        InterfaceTotals {
+            interface,
+            read_bytes: read.0,
+            read_calls: read.1,
+            write_bytes: write.0,
+            write_calls: write.1,
+        }
+    }
+
+    #[test]
+    fn the_totals_break_network_io_down_by_interface() {
+        let mut summary = summary();
+        summary.interfaces = vec![
+            over(Via::Interface("wlP9s9".into()), (5_120, 2), (517, 1)),
+            over(Via::Interface("lo".into()), (1_024, 1), (0, 0)),
+            over(Via::Unknown, (0, 0), (40, 1)),
+            over(Via::NoInterface, (0, 0), (120, 1)),
+        ];
+        let text = written(&summary, 30, None);
+        let expected = "\
+  network  received 5.9 KiB (3 calls), sent 0 B (0 calls)
+    wlP9s9 received 5.0 KiB (2 calls), sent 517 B (1 call)
+    lo     received 1.0 KiB (1 call), sent 0 B (0 calls)
+    ?      received 0 B (0 calls), sent 40 B (1 call)
+    none   received 0 B (0 calls), sent 120 B (1 call)
+  3 calls, 0 failed
+";
+        assert!(text.ends_with(expected), "{text}");
+
+        // A longer name moves the words along for every interface.
+        summary
+            .interfaces
+            .push(over(Via::Interface("br-4f2a8c9d1e3b".into()), (1, 1), (0, 0)));
+        summary.unknown_interface_calls = 12;
+        let text = written(&summary, 30, None);
+        assert!(
+            text.contains("\n    lo              received 1.0 KiB (1 call), sent 0 B (0 calls)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n    br-4f2a8c9d1e3b received 1 B (1 call), sent 0 B (0 calls)\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "\nNote: --interface left out 12 calls on sockets whose interface iotap cannot tell.\n"
+            ),
+            "{text}"
+        );
+
+        // Without network I/O traced, neither.
+        let files_only = Filter {
+            network: false,
+            ..Filter::ALL
+        };
+        let mut out = Vec::new();
+        write_summary(&mut out, &summary, 30, &files_only, None).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("network") && !text.contains(" lo "), "{text}");
     }
 
     #[test]

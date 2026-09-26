@@ -8,7 +8,7 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use crate::model::{Dir, IoEvent, Op, Provenance, Target, errno_name};
+use crate::model::{Dir, IoEvent, Op, Provenance, Target, Via, errno_name};
 use crate::session::{Notice, Process, SessionInfo, Sink, Summary, UntracedReason};
 
 #[derive(Serialize)]
@@ -37,6 +37,7 @@ struct Event<'a> {
     error: Option<Cow<'static, str>>,
     latency_ns: Option<u64>,
     target: &'a Target,
+    interface: &'a Via,
     resolved: Provenance,
 }
 
@@ -134,6 +135,7 @@ impl<W: Write> Sink for JsonSink<W> {
             error: (!event.is_ok()).then(|| errno_name(event.errno)),
             latency_ns: event.latency_ns,
             target: &event.target,
+            interface: &event.interface,
             resolved: event.provenance,
         })
     }
@@ -232,7 +234,7 @@ mod tests {
                 "syscall": "recvfrom_nocancel", "fd": 4, "requested": 1024, "bytes": null,
                 "messages": null, "errno": libc::EAGAIN, "error": "EAGAIN", "latency_ns": 1500,
                 "target": {"kind": "socket", "proto": "udp", "remote": "1.2.3.4:53"},
-                "resolved": "lazy"
+                "interface": "?", "resolved": "lazy"
             })
         );
         assert_eq!(out[1], json!({"type": "exited", "pid": 7, "name": "dig"}));
@@ -244,6 +246,42 @@ mod tests {
             out[3],
             json!({"type": "untraced", "pid": 9, "parent": null, "reason": "ended"})
         );
+    }
+
+    #[test]
+    fn events_name_their_interface_or_none() {
+        let mut sink = JsonSink::new(Vec::new(), false);
+        let event = IoEvent {
+            time_ns: 5,
+            pid: 7,
+            tid: 9,
+            op: Op::Write,
+            syscall: "write",
+            fd: Some(4),
+            requested: Some(10),
+            bytes: Some(10),
+            messages: None,
+            errno: 0,
+            latency_ns: None,
+            target: Arc::new(Target::Socket(Endpoint {
+                local: Some("192.168.1.20:61000".parse().unwrap()),
+                ..Endpoint::unresolved(Proto::Tcp)
+            })),
+            provenance: Provenance::Traced,
+            interface: Via::Interface("wlP9s9".into()),
+        };
+        sink.event(&event).unwrap();
+        let file = IoEvent {
+            target: Arc::new(Target::File {
+                path: "/tmp/x".into(),
+            }),
+            interface: Via::NoInterface,
+            ..event
+        };
+        sink.event(&file).unwrap();
+        let out = lines(&sink.into_inner());
+        let interfaces: Vec<&Value> = out.iter().map(|line| &line["interface"]).collect();
+        assert_eq!(interfaces, [&json!("wlP9s9"), &Value::Null]);
     }
 
     #[test]
