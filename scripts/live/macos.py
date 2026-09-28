@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -171,14 +172,17 @@ def network(run):
         f.write(bytes(16 * MIB))
     server, port = serve(run, www)
     url = f"http://127.0.0.1:{port}/big.bin"
-    first = run.start(["curl", "-s", "--limit-rate", "2M", "-o", "/dev/null", url])
+    # Started through a link of a name of its own, so that curls that are not this run's are not
+    # traced, and cannot change what it finds.
+    name = f"iotap-curl-{os.getpid()}"
+    curl = os.path.join(run.work, name)
+    os.symlink(shutil.which("curl"), curl)
+    first = run.start([curl, "-s", "--limit-rate", "2M", "-o", "/dev/null", url])
     time.sleep(0.5)
-    iotap = run.root_start(
-        [run.bin, "-q", "-d", "25", "curl"], stdout="curl.out", stderr="curl.err"
-    )
+    iotap = run.root_start([run.bin, "-q", "-d", "25", name], stdout="curl.out", stderr="curl.err")
     run.started("curl.err")
     time.sleep(1)
-    second = run.start(["curl", "-s", "--limit-rate", "4M", "-o", "/dev/null", url])
+    second = run.start([curl, "-s", "--limit-rate", "4M", "-o", "/dev/null", url])
     first.wait(40)
     second.wait(40)
     rc = run.root_wait(iotap, 40)
@@ -202,7 +206,7 @@ def network(run):
     ]
     run.expect(len(rows) == 1, "one tcp row for the server", str(rows))
 
-    third = run.start(["curl", "-s", "--limit-rate", "3M", "-o", "/dev/null", url])
+    third = run.start([curl, "-s", "--limit-rate", "3M", "-o", "/dev/null", url])
     time.sleep(0.5)
     rc = run.iotap("-q", "-d", "3", server.pid, stdout="server.out", stderr="server.err")
     run.stop(third)
