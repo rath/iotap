@@ -203,6 +203,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
 
     let config = ReaderConfig {
         follow: targets.follow,
+        checked: targets.listed,
         children: cli.children,
         // Short, so that the system is asked about new descriptors before most are closed again.
         wait: Duration::from_millis(10),
@@ -531,12 +532,14 @@ struct Targets {
     named: usize,
     /// Names whose new processes are traced too.
     follow: Vec<String>,
+    /// The processes the names were matched against, which are not new.
+    listed: Vec<Tracked>,
 }
 
 impl Targets {
     fn resolve(cli: &Cli, own_pid: i32) -> Result<Self> {
         let specs: Vec<Spec> = cli.targets.iter().map(|raw| Spec::parse(raw, cli.name)).collect();
-        let mut tracked = target::resolve(&specs, own_pid)?;
+        let target::Resolved { mut tracked, listed } = target::resolve(&specs, own_pid)?;
         let named = tracked.len();
         if cli.children {
             // Traced from the start, as the processes the targets name are.
@@ -554,6 +557,7 @@ impl Targets {
             tracked,
             named,
             follow,
+            listed,
         })
     }
 
@@ -719,6 +723,7 @@ mod tests {
             tracked: tracked.iter().map(|&(pid, name)| process(pid, name)).collect(),
             named,
             follow: follow.iter().map(|&name| name.to_owned()).collect(),
+            listed: Vec::new(),
         };
         let make = targets(&[(10, "make")], 1, &[]);
         assert_eq!(

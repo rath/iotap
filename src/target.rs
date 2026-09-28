@@ -103,8 +103,17 @@ pub enum TargetError {
     NoName { name: String, hint: String },
 }
 
+/// The processes that specs name, and those their names were matched against.
+#[derive(Debug)]
+pub struct Resolved {
+    pub tracked: Vec<Tracked>,
+    /// Every process but iotap that ran when the names were matched, as it was then; empty when
+    /// no spec is a name.
+    pub listed: Vec<Tracked>,
+}
+
 /// Resolves every spec, excluding `own_pid`. Each name must match at least one process.
-pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError> {
+pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Resolved, TargetError> {
     let mut tracked: Vec<Tracked> = Vec::new();
     let mut everyone: Option<Vec<Tracked>> = None;
     for spec in specs {
@@ -128,7 +137,10 @@ pub fn resolve(specs: &[Spec], own_pid: i32) -> Result<Vec<Tracked>, TargetError
             }
         }
     }
-    Ok(tracked)
+    Ok(Resolved {
+        tracked,
+        listed: everyone.unwrap_or_default(),
+    })
 }
 
 /// Every running process descended from one in `roots`, parents before their children. Left
@@ -282,7 +294,13 @@ mod tests {
         let command = format!("iotap-test-{me}-nap");
         let sleeper = Sleeper::start(&command);
         let found = resolve(&[Spec::Name(command.clone())], me).unwrap();
-        assert_eq!(found.iter().map(|t| t.pid).collect::<Vec<_>>(), [sleeper.pid()]);
+        assert_eq!(
+            found.tracked.iter().map(|t| t.pid).collect::<Vec<_>>(),
+            [sleeper.pid()]
+        );
+        // Every process the name was matched against, which is every one but iotap's own.
+        assert!(found.listed.iter().any(|t| t.pid == sleeper.pid()));
+        assert!(found.listed.iter().all(|t| t.pid != me));
         // Part of the command names no process, but the process is offered.
         let missed = resolve(&[Spec::Name(format!("iotap-test-{me}"))], me).unwrap_err();
         let offer = format!("; similar: {command} ({})", sleeper.pid());
@@ -357,7 +375,8 @@ mod tests {
         let me = i32::try_from(std::process::id()).unwrap();
         let parent = std::os::unix::process::parent_id().cast_signed();
         let found = resolve(&[Spec::Pid(parent), Spec::Pid(parent)], me).unwrap();
-        assert_eq!(found.len(), 1, "duplicates collapse");
+        assert_eq!(found.tracked.len(), 1, "duplicates collapse");
+        assert!(found.listed.is_empty(), "no name was matched against anything");
         assert!(matches!(
             resolve(&[Spec::Pid(i32::MAX)], me),
             Err(TargetError::NoPid(_))
