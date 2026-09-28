@@ -555,31 +555,30 @@ impl Ring {
         Self::position(&self.producer).load(Ordering::Acquire)
     }
 
-    /// Hands each complete record to `take`, oldest first, and frees its space once taken.
-    /// Stops at a record still being written. Returns the position it reached.
+    /// Hands each complete record written by now to `take`, oldest first, and frees its space
+    /// once taken. Stops at a record still being written. Returns the position it reached.
     fn drain(&self, mut take: impl FnMut(&[u8]) -> Result<(), EbpfError>) -> Result<u64, EbpfError> {
         let consumer = Self::position(&self.consumer);
         let mut at = consumer.load(Ordering::Acquire);
-        loop {
-            let written = self.written();
-            if at >= written {
-                return Ok(at);
+        // What the program writes while this reads is left for the next read. A program that
+        // writes as fast as this reads would otherwise keep it here, with the records piling up
+        // and none passed on. The ring holds no more than its size, so a read is bounded.
+        let written = self.written();
+        while at < written {
+            // The size is a power of two, so this is the offset within the data.
+            let offset = (at % self.size as u64) as usize;
+            let word = self.length_word(offset).load(Ordering::Acquire);
+            if word & BUSY != 0 {
+                break;
             }
-            while at < written {
-                // The size is a power of two, so this is the offset within the data.
-                let offset = (at % self.size as u64) as usize;
-                let word = self.length_word(offset).load(Ordering::Acquire);
-                if word & BUSY != 0 {
-                    return Ok(at);
-                }
-                let len = (word & !(BUSY | DISCARDED)) as usize;
-                if word & DISCARDED == 0 {
-                    take(self.record(offset, len)?)?;
-                }
-                at += (RECORD_HEADER + len).next_multiple_of(8) as u64;
-                consumer.store(at, Ordering::Release);
+            let len = (word & !(BUSY | DISCARDED)) as usize;
+            if word & DISCARDED == 0 {
+                take(self.record(offset, len)?)?;
             }
+            at += (RECORD_HEADER + len).next_multiple_of(8) as u64;
+            consumer.store(at, Ordering::Release);
         }
+        Ok(at)
     }
 
     /// The length word of the record at `offset` into the data.
@@ -744,6 +743,102 @@ mod tests {
         assert!(log.starts_with("\n  libbpf: line 0\n"), "{log}");
         assert!(log.ends_with(&format!("libbpf: line {}", LOG_LINES - 1)));
         assert_eq!(take_log(), "");
+    }
+
+    /// A ring buffer of `size` bytes in memory of the test's own, which `push` writes as the
+    /// program does. It has no second copy of the data, so a record must not wrap around.
+    fn ring(size: usize) -> Ring {
+        // SAFETY: `sysconf` has no preconditions.
+        let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+        let anonymous = |len| {
+            // SAFETY: a new anonymous mapping leaves all existing memory alone.
+            let ptr = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(ptr, libc::MAP_FAILED);
+            Mapping {
+                ptr: NonNull::new(ptr).unwrap(),
+                len,
+            }
+        };
+        Ring {
+            consumer: anonymous(page),
+            producer: anonymous(page + 2 * size),
+            data: page,
+            size,
+        }
+    }
+
+    /// Writes a record of `len` bytes whose length word is `len` with `flags` set.
+    fn push(ring: &Ring, len: usize, flags: u32) {
+        let producer = Ring::position(&ring.producer);
+        let at = producer.load(Ordering::Acquire);
+        let offset = (at % ring.size as u64) as usize;
+        ring.length_word(offset)
+            .store(u32::try_from(len).unwrap() | flags, Ordering::Release);
+        producer.store(
+            at + (RECORD_HEADER + len).next_multiple_of(8) as u64,
+            Ordering::Release,
+        );
+    }
+
+    #[test]
+    fn a_program_that_writes_as_fast_as_it_is_read_does_not_hold_the_reader() {
+        let ring = ring(1 << 20);
+        for _ in 0..3 {
+            push(&ring, 16, 0);
+        }
+        let mut taken = 0;
+        // Each record taken is followed by another, as a program that keeps up with the reader
+        // writes them.
+        let at = ring
+            .drain(|_| {
+                taken += 1;
+                if taken < 1_000 {
+                    push(&ring, 16, 0);
+                }
+                Ok(())
+            })
+            .unwrap();
+        // The read is of what the ring held when it began; the rest is for the next.
+        assert_eq!(taken, 3);
+        assert_eq!(at, 3 * 24);
+        assert!(ring.written() > at);
+    }
+
+    #[test]
+    fn a_read_skips_discarded_records_and_stops_at_one_being_written() {
+        let ring = ring(1 << 20);
+        push(&ring, 16, 0);
+        push(&ring, 16, DISCARDED);
+        push(&ring, 16, 0);
+        push(&ring, 16, BUSY);
+        push(&ring, 16, 0);
+        let mut taken = 0;
+        let at = ring
+            .drain(|_| {
+                taken += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!((taken, at), (2, 3 * 24));
+        // Once it is complete, the rest is read.
+        let busy = usize::try_from(at).unwrap();
+        ring.length_word(busy).store(16, Ordering::Release);
+        let at = ring
+            .drain(|_| {
+                taken += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!((taken, at), (4, 5 * 24));
     }
 
     #[test]
