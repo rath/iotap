@@ -363,13 +363,15 @@ the screen is short, the last row sums the interfaces that did not fit.
 
 ### Recordings
 
-`--record FILE` saves the raw kernel records together with every answer libproc or `/proc` gave
-and when it gave it, and each list of the host's network interfaces, and `--replay FILE` feeds them through the same processing, so a replay
-reproduces the output of the live run in any output mode. A recording holds paths and addresses
-but no transferred data. It replays on the operating system it was made on, since its calls use
-that system's numbers for errors, address families and flags. iotap writes the file out each time
-it has read the trace up to a new point, so the recording of a run that was killed replays up to
-about there, and says that it ends abruptly.
+`--record FILE` saves the raw kernel records together with every answer libproc or `/proc` gave and
+when it gave it, and each list of the host's network interfaces, and `--replay FILE` feeds them
+through the same processing, so a replay reproduces the output of the live run in any output mode,
+except that the text and terminal output write times of day in the local time zone of the machine
+that shows them, where JSON Lines give times as nanoseconds since the epoch. A recording holds paths
+and addresses but no transferred data. It replays on the operating system it was made on, since its
+calls use that system's numbers for errors, address families and flags. iotap writes the file out
+each time it has read the trace up to a new point, so the recording of a run that was killed replays
+up to about there, and says that it ends abruptly.
 
 ## How it works
 
@@ -408,7 +410,8 @@ about there, and says that it ends abruptly.
    `/proc` and on the lists of the host's network interfaces, never on the clock, which is why
    recordings replay exactly. Only the live terminal UI
    reads the clock, for its elapsed time and its current second, and host names, when asked for,
-   are what the resolver answers at the time.
+   are what the resolver answers at the time. Times of day in text and terminal output are in the
+   time zone of the machine that shows them.
 
 ## Limitations
 
@@ -416,8 +419,8 @@ about there, and says that it ends abruptly.
   fs_usage, ktrace, Instruments or tailspin. On Linux several iotap runs, and other eBPF tools,
   can trace at once.
 - **Only syscalls.** Memory-mapped file I/O and I/O the kernel does on a process's behalf, such as
-  page-cache writeback, never appear. On Linux neither does I/O submitted through io_uring, nor
-  data that `splice`, `tee` or `copy_file_range` move between descriptors.
+  page-cache writeback, never appear. On Linux neither does I/O submitted through io_uring or
+  libaio (`io_submit`), nor data that `splice`, `tee`, `vmsplice` or `copy_file_range` move.
 - **Unknown sizes.** On macOS, `sendfile` returns its byte count through a pointer the trace does
   not carry, and `sendmsg_x` and `recvmsg_x` return message counts, so iotap counts those calls
   without bytes. On Linux, `sendmmsg` and `recvmmsg` return message counts, and `sendfile` counts
@@ -455,7 +458,8 @@ about there, and says that it ends abruptly.
   macOS a later one on the same file, still holds its number by the time iotap asks. Otherwise a
   relative path is joined to the working directory or the directory descriptor. On macOS that is
   wrong after a link with a relative target other than `/etc`, `/tmp` and `/var`, and a truncated
-  path is shown as `…` followed by its end.
+  path is shown as `…` followed by its end. A name that is not valid UTF-8 is shown with U+FFFD
+  in place of the invalid bytes, so two files whose names differ only in those bytes count as one.
 - **32-bit processes, on Linux.** iotap knows the call numbers of 64-bit processes. A 32-bit
   program numbers its calls differently, so its trace is misread; do not trace one.
 - **Exits, on Linux before 6.16.** Only from Linux 6.16 does the kernel tell the program when a
