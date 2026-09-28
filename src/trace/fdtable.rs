@@ -303,7 +303,10 @@ impl FdTable {
     /// Applies a call that creates, copies or closes descriptors, or changes directory.
     pub fn apply(&mut self, done: &Completed, src: &mut dyn ProcSource) {
         let connecting = done.call.role == Role::Connect && done.errno == libc::EINPROGRESS;
-        if !done.is_ok() && !connecting {
+        // A close reports an error of its file's own after the descriptor is gone; only one
+        // that was refused (EPERM: a guarded descriptor) or not open (EBADF) closed nothing.
+        let closing = done.call.role == Role::Close && !matches!(done.errno, libc::EPERM | libc::EBADF);
+        if !done.is_ok() && !connecting && !closing {
             return;
         }
         let (pid, ts) = (done.pid, done.end_ts);
@@ -1409,6 +1412,26 @@ mod tests {
             let found = table.target(PID, fd, 104, &mut src);
             assert_eq!((&*found.target, found.answer), (&file("rel"), None), "fd {fd}");
         }
+    }
+
+    #[test]
+    fn a_close_that_failed_still_released_its_descriptor_unless_it_was_refused() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        for fd in [3, 4, 5] {
+            table.apply(&open_of(1, 2, &format!("/f{fd}"), 0, fd), &mut src);
+        }
+        // close returns what the file's own close reports, such as EINTR or EIO, after the
+        // descriptor is gone. EPERM is a guarded descriptor, which stays, and EBADF a number
+        // that was not open.
+        for (fd, errno) in [(3, libc::EINTR), (4, libc::EPERM), (5, libc::EBADF)] {
+            let mut close = close_of(3, 4, fd);
+            close.errno = errno;
+            table.apply(&close, &mut src);
+        }
+        assert_eq!(target_of(&mut table, 3, 5, &mut src).0, Target::Unknown);
+        assert_eq!(target_of(&mut table, 4, 5, &mut src).0, file("/f4"));
+        assert_eq!(target_of(&mut table, 5, 5, &mut src).0, file("/f5"));
     }
 
     #[test]
