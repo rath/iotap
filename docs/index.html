@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iotap: see the file and network I/O of any process</title>
+  <meta name="description" content="A command-line tool for macOS and Linux that reports every read and write a process makes: the file or address, the bytes, the latency. Summed up per file and per endpoint.">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1418">
+  <link rel="canonical" href="https://iotap.told.me/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="iotap">
+  <meta property="og:title" content="iotap: see the file and network I/O of any process">
+  <meta property="og:description" content="Every read and write a process makes, with the file or address, the bytes and the latency. For macOS and Linux.">
+  <meta property="og:url" content="https://iotap.told.me/">
+  <meta property="og:image" content="https://iotap.told.me/assets/og.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The headline of the iotap website above a few lines of iotap output: a sendto and two recvfrom calls with their sizes and latencies.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preload" href="assets/fonts/hubot-sans-latin-wdth.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/fonts/mona-sans-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+  <script>document.documentElement.classList.add("js")</script>
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the content</a>
+
+  <header class="wrap top">
+    <a class="mark" href="./" aria-label="iotap, home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <path d="M2 21h28" stroke="#8aa0a8" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <path d="M16 4v17" stroke="#5fd4ea" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <circle cx="16" cy="21" r="4.2" fill="#5fd4ea"/>
+      </svg>
+      iotap
+    </a>
+    <nav aria-label="Sections">
+      <a class="opt" href="#why">Why</a>
+      <a href="#usage">Usage</a>
+      <a href="#output">Output</a>
+      <a class="opt" href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/rath/iotap">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="wrap hero" aria-labelledby="title">
+      <h1 id="title">See what a process is really doing with your files and your network.</h1>
+      <p class="lede">iotap is a command-line tool for macOS and Linux. Give it a process ID or a name and it reports every read and write that process makes as it happens: the file or the remote address, how many bytes were asked for and how many moved, how long the call took, and whether it failed. When you stop, it sums the trace up per file and per endpoint.</p>
+      <div class="actions">
+        <a class="btn" href="#install">Build it from source</a>
+        <a class="textlink" href="https://github.com/rath/iotap">View on GitHub</a>
+      </div>
+
+      <figure class="trace" id="trace">
+        <div class="trace-bar">
+          <span class="prompt"><span data-typed="sudo iotap curl">sudo iotap curl</span></span>
+          <button class="ghost replay" id="replay" type="button">Replay</button>
+        </div>
+        <div class="term" role="group" aria-label="Example output of sudo iotap curl" tabindex="0">
+        <div class="ln dm" data-pause="420">iotap: tracing 4242 (curl); press Ctrl-C to stop</div>
+        <div class="ln dm" data-pause="260">TIME                PID  OP               FD   REQUESTED      RESULT     LATENCY  TARGET</div>
+        <div class="ln" data-pause="700" data-call="1">14:13:20.004541    4242  sendto            5         517         517    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="2">14:13:20.104625    4242  recvfrom          5       16384        4096    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="3">14:13:20.104708    4242  recvfrom          5       16384      EAGAIN    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="4">14:13:20.104791    4242  write             4        4096        4096    0.041 ms  /Users/me/page.html</div>
+        <div class="ln" data-pause="520" data-call="5">14:13:20.104875    4242  write             1          20          20    0.041 ms  /dev/ttys004</div>
+        <div class="ln dm" data-pause="0">iotap: 4242 (curl) exited</div>
+        </div>
+      </figure>
+
+      <p class="story-lead">Read top to bottom, this is the whole life of one <code>curl</code>:</p>
+      <ol class="story">
+        <li tabindex="0" data-call="1">Sends a 517-byte request to 93.184.216.34 on port 443.</li>
+        <li tabindex="0" data-call="2">Asks for 16 KiB back and gets 4 KiB.</li>
+        <li tabindex="0" data-call="3">Asks again and finds nothing waiting yet: <code>EAGAIN</code>.</li>
+        <li tabindex="0" data-call="4">Writes the 4 KiB to <code>page.html</code>.</li>
+        <li tabindex="0" data-call="5">Writes 20 bytes of progress to the terminal, then exits.</li>
+      </ol>
+    </section>
+
+    <section class="sec" id="why" aria-labelledby="why-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="why-title">The usual tools each show a piece</h2>
+          <p>Something on your machine is busy and you want to know with what. A process is chewing through the disk, an app you just installed is talking to somewhere you never asked for, a build step is slow and you suspect I/O, or a program keeps failing and you want to see which file or connection it trips on.</p>
+          <p>iotap puts the pieces together: the bytes, the process they belong to, and the file or endpoint they went to.</p>
+        </div>
+        <table class="tools">
+          <caption class="vh">What each tool shows and what it leaves out</caption>
+          <thead>
+            <tr><th scope="col">Tool</th><th scope="col">Shows</th><th scope="col">Leaves out</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">lsof, netstat</th><td data-label="Shows">What is open right now</td><td data-label="Leaves out">What moves through it</td></tr>
+            <tr><th scope="row">Activity Monitor, top</th><td data-label="Shows">How many bytes</td><td data-label="Leaves out">Where they went</td></tr>
+            <tr><th scope="row">A packet capture</th><td data-label="Shows">The traffic of the whole machine</td><td data-label="Leaves out">Which process it belongs to</td></tr>
+            <tr><th scope="row">strace, fs_usage</th><td data-label="Shows">Each call a process makes</td><td data-label="Leaves out">The adding up, per file and per endpoint</td></tr>
+            <tr class="us"><th scope="row">iotap</th><td data-label="Shows">Each read and write of the processes you name, with bytes, latency and target, summed per file and endpoint</td><td data-label="Leaves out">Memory-mapped I/O, and on Linux io_uring and libaio</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" id="usage" aria-labelledby="usage-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="usage-title">Choose what to watch</h2>
+          <p>A target is a process ID or a name. A name matches every running process whose name, executable or first argument equals it, ignoring case, and iotap also traces processes started later under that name.</p>
+          <p>With <code>-f</code>, it also traces every process the traced ones start, those running when it begins and those started later.</p>
+        </div>
+        <div class="cmd">
+          <pre><code>sudo iotap 1234                <span class="c"># one process</span>
+sudo iotap Safari              <span class="c"># every Safari process, and new ones</span>
+sudo iotap -f make             <span class="c"># make and every process it starts</span>
+sudo iotap -i wlan0 firefox    <span class="c"># only network I/O over wlan0</span>
+sudo iotap -q -d 10 Finder     <span class="c"># summary only, after 10 seconds</span></code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="output" aria-labelledby="output-title">
+      <div class="wrap grid stack">
+        <div class="say">
+          <h2 id="output-title">One trace, four ways to read it</h2>
+          <p>The event stream is what you saw above. When tracing ends, iotap sums it up. For a process that runs longer, the terminal UI shows the same tables live, JSON Lines feed <code>jq</code> or a log, and a recording lets you replay the trace later, in any of these forms, without root.</p>
+        </div>
+        <div class="tabs">
+          <div class="tablist" role="tablist" aria-label="Ways to read a trace">
+            <button class="tab" role="tab" type="button" id="tab-summary" aria-controls="panel-summary" aria-selected="true">Summary</button>
+            <button class="tab" role="tab" type="button" id="tab-tui" aria-controls="panel-tui" aria-selected="false" tabindex="-1">Terminal UI</button>
+            <button class="tab" role="tab" type="button" id="tab-json" aria-controls="panel-json" aria-selected="false" tabindex="-1">JSON Lines</button>
+            <button class="tab" role="tab" type="button" id="tab-record" aria-controls="panel-record" aria-selected="false" tabindex="-1">Recordings</button>
+          </div>
+
+          <section class="panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
+            <h3>Summary</h3>
+            <p>When you press Ctrl-C or the process exits, iotap sums the trace up per file and per endpoint. Here the network traffic went over en0, the interface that holds 192.168.1.20.</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="Example summary" tabindex="0">
+        <div class="ln dm">iotap summary: 4242 (curl) traced for 0.1 s</div>
+        <div class="ln"> </div>
+        <div class="ln">Files (2 targets)</div>
+        <div class="ln">        READ    CALLS     WRITTEN    CALLS  FAILED  TARGET</div>
+        <div class="ln">         0 B        0     4.0 KiB        1       0  /Users/me/page.html</div>
+        <div class="ln">         0 B        0        20 B        1       0  /dev/ttys004</div>
+        <div class="ln"> </div>
+        <div class="ln">Network (1 target)</div>
+        <div class="ln">    RECEIVED    CALLS        SENT    CALLS  FAILED  TARGET</div>
+        <div class="ln">     4.0 KiB        2       517 B        1       1  tcp 93.184.216.34:443</div>
+        <div class="ln"> </div>
+        <div class="ln">Totals</div>
+        <div class="ln">  files    read 0 B (0 calls), written 4.0 KiB (2 calls)</div>
+        <div class="ln">  network  received 4.0 KiB (2 calls), sent 517 B (1 call)</div>
+        <div class="ln">    en0    received 4.0 KiB (2 calls), sent 517 B (1 call)</div>
+        <div class="ln">  5 calls, 1 failed</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-tui" role="tabpanel" aria-labelledby="tab-tui" data-later>
+            <h3>Terminal UI</h3>
+            <p><code>--tui</code> shows throughput for the last complete second and in total, then three tabs: files, network endpoints, and the latest 10,000 events. This is the Files tab after replaying a recorded download.</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="The terminal UI, Files tab" tabindex="0">
+        <div class="ln"><span class="rev"> iotap </span> <span class="dm">4242 curl (exited)</span>                                                               0:00:12</div>
+        <div class="ln">                FILE READ  FILE WRITTEN  NET RECEIVED      NET SENT</div>
+        <div class="ln"> per second           0 B       1.2 MiB       1.2 MiB           0 B</div>
+        <div class="ln"> total                0 B      14.1 MiB      14.1 MiB         517 B</div>
+        <div class="ln ban"> End of the recording. Press q for the summary.</div>
+        <div class="ln"><span class="rev"> 1 Files (2) </span>  2 Network (1)   3 Events (7,205)                                     sort: bytes</div>
+        <div class="ln">       READ   CALLS    WRITTEN   CALLS FAILED IDLE TARGET</div>
+        <div class="ln">        0 B       0   14.1 MiB    3601      0  &lt;1s /Users/me/big.iso</div>
+        <div class="ln">        0 B       0       20 B       1      0  &lt;1s /dev/ttys004</div>
+        <div class="ln"> </div>
+        <div class="ln dm"> 4242 (curl) exited    q quit  s sort  p pause  i interfaces  r reset  ↑↓ select  enter details</div>
+              </div>
+            </div>
+            <ul class="keys">
+              <li><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> switch tabs</li>
+              <li><kbd>s</kbd> sort by bytes, read, write, calls or recency</li>
+              <li><kbd>Enter</kbd> details of the selected row</li>
+              <li><kbd>p</kbd> pause the view; tracing goes on</li>
+              <li><kbd>y</kbd> copy the selected path or address</li>
+              <li><kbd>i</kbd> traffic of each network interface</li>
+              <li><kbd>q</kbd> quit and print the summary</li>
+            </ul>
+          </section>
+
+          <section class="panel" id="panel-json" role="tabpanel" aria-labelledby="tab-json" data-later>
+            <h3>JSON Lines</h3>
+            <p><code>--json</code> writes every event as one line, with times in nanoseconds since the Unix epoch and the target as a small object. Pipe it to <code>jq</code>, or keep it as a log. This is one event, spread over several lines.</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="One event as JSON" tabindex="0">
+        <div class="ln">{</div>
+        <div class="ln">  <span class="k">"type"</span>: <span class="s">"event"</span>,</div>
+        <div class="ln">  <span class="k">"time_ns"</span>: <span class="n">1790259200104708333</span>,</div>
+        <div class="ln">  <span class="k">"pid"</span>: <span class="n">4242</span>,</div>
+        <div class="ln">  <span class="k">"tid"</span>: <span class="n">2</span>,</div>
+        <div class="ln">  <span class="k">"op"</span>: <span class="s">"recvfrom"</span>,</div>
+        <div class="ln">  <span class="k">"dir"</span>: <span class="s">"read"</span>,</div>
+        <div class="ln">  <span class="k">"syscall"</span>: <span class="s">"recvfrom"</span>,</div>
+        <div class="ln">  <span class="k">"fd"</span>: <span class="n">5</span>,</div>
+        <div class="ln">  <span class="k">"requested"</span>: <span class="n">16384</span>,</div>
+        <div class="ln">  <span class="k">"bytes"</span>: <span class="z">null</span>,</div>
+        <div class="ln">  <span class="k">"messages"</span>: <span class="z">null</span>,</div>
+        <div class="ln">  <span class="k">"errno"</span>: <span class="n">35</span>,</div>
+        <div class="ln">  <span class="k">"error"</span>: <span class="s">"EAGAIN"</span>,</div>
+        <div class="ln">  <span class="k">"latency_ns"</span>: <span class="n">41666</span>,</div>
+        <div class="ln">  <span class="k">"target"</span>: {</div>
+        <div class="ln">    <span class="k">"kind"</span>: <span class="s">"socket"</span>,</div>
+        <div class="ln">    <span class="k">"proto"</span>: <span class="s">"tcp"</span>,</div>
+        <div class="ln">    <span class="k">"local"</span>: <span class="s">"192.168.1.20:61000"</span>,</div>
+        <div class="ln">    <span class="k">"remote"</span>: <span class="s">"93.184.216.34:443"</span></div>
+        <div class="ln">  },</div>
+        <div class="ln">  <span class="k">"interface"</span>: <span class="s">"en0"</span>,</div>
+        <div class="ln">  <span class="k">"resolved"</span>: <span class="s">"traced"</span></div>
+        <div class="ln">}</div>
+              </div>
+            </div>
+            <div class="cmd has-copy" style="margin-top: 1rem">
+              <pre id="json-cmd"><code>sudo iotap --json curl | jq -c 'select(.type == "event")'</code></pre>
+              <button class="ghost" type="button" data-copy="json-cmd">Copy</button>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" data-later>
+            <h3>Recordings</h3>
+            <p><code>--record FILE</code> saves the trace, and <code>--replay FILE</code> feeds it through the same processing, so a replay reproduces the output of the live run in any output mode. A recording holds paths and addresses but no transferred data, and replays on the operating system it was made on.</p>
+            <div class="cmd has-copy">
+              <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
+iotap --replay t.iotaprec              <span class="c"># the same output again, without root</span></code></pre>
+              <button class="ghost" type="button" data-copy="record-cmd">Copy</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="how" aria-labelledby="how-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="how-title">It reads what the kernel already records</h2>
+          <p>Every read, write, open and connect a program makes is a system call, and the kernel can be told to log each one as it happens, with the process it came from, its arguments and its result. iotap reads that log.</p>
+          <p>It attaches no debugger, injects no code and changes nothing in the program it watches.</p>
+        </div>
+        <dl class="facts">
+          <div>
+            <dt>On macOS</dt>
+            <dd>The log is the kernel trace facility, kdebug, the same source Apple's <code>fs_usage</code> reads. It is built into the kernel, so nothing has to be installed.</dd>
+          </div>
+          <div>
+            <dt>On Linux</dt>
+            <dd>iotap loads a small eBPF program of its own onto the kernel's syscall tracepoints. The kernel verifies it before running it and unloads it when iotap exits.</dd>
+          </div>
+          <div>
+            <dt>Why it needs sudo</dt>
+            <dd>Both are a view into every process on the machine, so the kernel gives them only to root. Without it, iotap says so and stops before it touches anything. Replaying a recording needs no root.</dd>
+          </div>
+          <div>
+            <dt>Metadata only</dt>
+            <dd>iotap records the call, the descriptor, byte counts, latency, the path and the socket endpoint. It never reads or stores the data being transferred: a process reading your SSH key shows up as a read of that file and its size, never its contents.</dd>
+          </div>
+          <div>
+            <dt>Only what you name</dt>
+            <dd>The kernel is asked to record the calls of the processes you name and, with <code>-f</code>, of the processes they start. No others.</dd>
+          </div>
+          <div>
+            <dt>Nothing left behind</dt>
+            <dd>On macOS only one program can own kdebug at a time, so iotap releases it on every exit path, including errors, signals and panics. On Linux the kernel drops the eBPF program the moment iotap exits. The terminal UI restores the terminal the same way.</dd>
+          </div>
+          <div>
+            <dt>One binary, no daemon</dt>
+            <dd>iotap runs only while you run it and makes no connections of its own. The optional host name lookups (<code>--resolve</code>) go through the system's resolver.</dd>
+          </div>
+          <div>
+            <dt>What it does not see</dt>
+            <dd>Memory-mapped file I/O and I/O the kernel does on a process's behalf, such as page-cache writeback. On Linux also I/O submitted through io_uring or libaio. The <a href="https://github.com/rath/iotap#limitations">Limitations</a> section of the README lists the rest.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="sec" id="install" aria-labelledby="install-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="install-title">Build it, then run it with sudo</h2>
+          <p>iotap builds from source with Cargo. It runs on macOS, and on Linux 5.8 or later on 64-bit Arm or x86-64 with BPF and syscall tracepoints, as distribution kernels have them.</p>
+          <p>To build you need Rust 1.98.1, which <code>rust-toolchain.toml</code> selects. On macOS, add the Xcode Command Line Tools. On Linux, add clang, make, pkg-config, a C compiler, and the libelf and zlib development files.</p>
+        </div>
+        <div>
+          <p class="note">On Debian and Ubuntu, install what the Linux build needs first:</p>
+          <div class="cmd has-copy">
+            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+  libelf-dev zlib1g-dev</code></pre>
+            <button class="ghost" type="button" data-copy="apt-cmd">Copy</button>
+          </div>
+          <p class="note">Then build it and trace a process:</p>
+          <div class="cmd has-copy">
+            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+cd iotap
+cargo build --release
+sudo ./target/release/iotap curl</code></pre>
+            <button class="ghost" type="button" data-copy="build-cmd">Copy</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <p>iotap is open source under the MIT license, made by <a rel="author" href="https://xrath.com">Jang-Ho Hwang</a>.</p>
+      <nav aria-label="Project links">
+        <a href="https://github.com/rath/iotap">GitHub</a>
+        <a href="https://github.com/rath/iotap#readme">README</a>
+        <a href="https://github.com/rath/iotap/issues">Issues</a>
+      </nav>
+    </div>
+  </footer>
+
+  <p class="vh" id="status" role="status" aria-live="polite"></p>
+</body>
+</html>

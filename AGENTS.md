@@ -148,6 +148,7 @@ without it they are skipped. When changing the scripts:
 | `csrc/iotap_shim.c` | Flattens the libproc descriptor structs the `libc` crate lacks |
 | `bpf/iotap.bpf.c` | iotap's eBPF program: pairs each traced call's entry and return and writes one record per call, and one per process exit, in the layout `trace::linux::Record` reads; for `--children` it traces the processes traced ones start, from their start, with a record of each |
 | `tests/replay.rs` | Runs the built binary on recordings made the way a live trace makes them |
+| `docs/` | The website at iotap.told.me, served by GitHub Pages from this directory: static HTML, CSS and JS with self-hosted fonts and no build step; `CNAME` names the domain |
 | `scripts/live/` | The live checks: `run.py` runs README.md's checks for this system with the user's sudo and judges each expectation; `macos.py`, `linux.py` and `shared.py` hold the checks, `harness.py` what they share, `tui.py` drives the terminal UI in a pseudo-terminal, `programs.py` holds programs for them to trace, and `macos.command` starts a run in Terminal.app |
 
 ## Commits

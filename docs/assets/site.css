@@ -1,0 +1,822 @@
+/* The iotap website. Static, no build step. Colors follow the terminal UI's own: cyan marks what is
+   selected, yellow a notice, red a failure; everything else is grey on dark glass. */
+
+@font-face {
+  font-family: "Hubot Sans";
+  src: url("fonts/hubot-sans-latin-wdth.woff2") format("woff2");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Mona Sans";
+  src: url("fonts/mona-sans-latin-wght.woff2") format("woff2");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-wght.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  --glass: #0b1418;
+  --bench: #111d22;
+  --bench-hi: #172a31;
+  --rule: #1f3038;
+  --ink: #dbe7ea;
+  --soft: #b7c8cd;
+  --dim: #8aa0a8;
+  --tap: #5fd4ea;
+  --caution: #f2c14e;
+  --fail: #ff7b72;
+
+  --sans: "Mona Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --display: "Hubot Sans", var(--sans);
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --measure: 62ch;
+  --gutter: clamp(1.25rem, 4.5vw, 3rem);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--glass);
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--glass);
+  color: var(--ink);
+  font: 400 clamp(1rem, 0.35vw + 0.93rem, 1.125rem) / 1.62 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--tap);
+  color: var(--glass);
+}
+
+a {
+  color: inherit;
+  text-decoration-color: var(--dim);
+  text-underline-offset: 0.22em;
+}
+
+a:hover {
+  text-decoration-color: var(--tap);
+}
+
+:focus-visible {
+  outline: 2px solid var(--tap);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--mono);
+}
+
+p code,
+li code,
+dd code,
+td code {
+  font-size: 0.86em;
+  padding: 0.12em 0.4em;
+  background: var(--bench);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 74rem;
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.skip {
+  position: absolute;
+  left: var(--gutter);
+  top: -4rem;
+  z-index: 10;
+  padding: 0.6rem 1rem;
+  background: var(--tap);
+  color: var(--glass);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.skip:focus {
+  top: 0.75rem;
+}
+
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Header */
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 2rem;
+  padding-block: 1.4rem;
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font: 800 1.5rem / 1 var(--display);
+  font-stretch: 80%;
+  letter-spacing: -0.005em;
+  text-decoration: none;
+}
+
+.mark svg {
+  width: 1.7rem;
+  height: 1.7rem;
+  flex: none;
+}
+
+.top nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.75rem;
+  font-size: 0.95rem;
+}
+
+.top nav a {
+  padding-block: 0.3rem;
+  color: var(--dim);
+  text-decoration: none;
+}
+
+.top nav a:hover {
+  color: var(--ink);
+}
+
+@media (max-width: 34rem) {
+  .top nav .opt {
+    display: none;
+  }
+}
+
+/* Hero */
+
+.hero {
+  padding-block: clamp(2rem, 6vw, 5.5rem) clamp(3rem, 7vw, 6rem);
+}
+
+h1 {
+  max-width: 13em;
+  margin: 0;
+  font: 800 clamp(2.6rem, 7.4vw, 5.9rem) / 0.97 var(--display);
+  font-stretch: 76%;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.lede {
+  max-width: 58ch;
+  margin: clamp(1.25rem, 3vw, 2rem) 0 0;
+  color: var(--soft);
+  font-size: 1.0625em;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.75rem;
+  margin-top: clamp(1.5rem, 3vw, 2.25rem);
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.72em 1.25em;
+  background: var(--tap);
+  color: var(--glass);
+  font-weight: 650;
+  text-decoration: none;
+  border-radius: 4px;
+  transition: background-color 0.15s;
+}
+
+.btn:hover {
+  background: #8de3f3;
+}
+
+.textlink {
+  color: var(--soft);
+  font-weight: 500;
+}
+
+/* The trace: terminal output, set directly on the page */
+
+.trace {
+  margin: clamp(2.25rem, 5vw, 4rem) 0 0;
+  background: var(--bench);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+.trace-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0.7rem 0.55rem 1.1rem;
+  border-bottom: 1px solid var(--rule);
+  font: 500 0.8125rem / 1.4 var(--mono);
+  color: var(--soft);
+}
+
+.prompt::before {
+  content: "$ ";
+  color: var(--dim);
+}
+
+.ghost {
+  padding: 0.35rem 0.8rem;
+  background: transparent;
+  color: var(--soft);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font: 500 0.8125rem / 1.3 var(--sans);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ghost:hover {
+  border-color: var(--dim);
+  color: var(--ink);
+}
+
+/* The buttons that need scripting show only when it runs. */
+.replay,
+[data-copy] {
+  display: none;
+}
+
+.js .replay,
+.js [data-copy] {
+  display: inline-block;
+}
+
+.term {
+  padding-block: 1rem;
+  overflow-x: auto;
+  font: 400 0.8125rem / 1.65 var(--mono);
+  color: var(--ink);
+  tab-size: 4;
+}
+
+.ln {
+  position: relative;
+  min-width: max-content;
+  padding: 0 1.25rem 0 1.7rem;
+  white-space: pre;
+}
+
+.ln::before {
+  content: "\258C";
+  position: absolute;
+  left: 0.7rem;
+  color: var(--tap);
+  opacity: 0;
+}
+
+.ln.on {
+  background: var(--bench-hi);
+  font-weight: 700;
+}
+
+.ln.on::before {
+  opacity: 1;
+}
+
+.ln.dm,
+.dm {
+  color: var(--dim);
+}
+
+.js .ln.pending {
+  visibility: hidden;
+}
+
+.story {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0 2.25rem;
+  margin: 1.75rem 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: call;
+}
+
+.story li {
+  position: relative;
+  padding: 0.75rem 0 0.75rem 2rem;
+  border-top: 1px solid var(--rule);
+  color: var(--soft);
+  counter-increment: call;
+}
+
+.story li::before {
+  content: counter(call);
+  position: absolute;
+  left: 0;
+  top: 0.75rem;
+  font: 600 0.8125rem / 1.9 var(--mono);
+  color: var(--dim);
+}
+
+.story li:hover,
+.story li.on {
+  color: var(--ink);
+}
+
+.story li:hover::before,
+.story li.on::before {
+  color: var(--tap);
+}
+
+.story-lead {
+  margin: 1.75rem 0 0;
+  color: var(--soft);
+}
+
+.story-lead + .story {
+  margin-top: 0.75rem;
+}
+
+/* Sections: the argument on the left, the evidence on the right */
+
+.sec {
+  padding-block: clamp(3.5rem, 8vw, 6.5rem);
+  border-top: 1px solid var(--rule);
+  scroll-margin-top: 0.5rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 2.25rem clamp(2rem, 6vw, 5.5rem);
+  align-items: start;
+}
+
+/* A grid item may not grow past its track for the sake of a code block that scrolls. */
+.grid > * {
+  min-width: 0;
+}
+
+.grid > .say {
+  position: sticky;
+  top: 2rem;
+}
+
+/* The section whose evidence is wide, such as the terminal UI, gives it the full width. */
+.grid.stack {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.grid.stack > .say {
+  position: static;
+}
+
+@media (max-width: 56rem) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .grid > .say {
+    position: static;
+  }
+}
+
+h2 {
+  margin: 0 0 1.1rem;
+  font: 780 clamp(2rem, 4.2vw, 3.1rem) / 1.04 var(--display);
+  font-stretch: 80%;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+h3 {
+  margin: 0;
+  font: 700 1.125rem / 1.3 var(--display);
+  font-stretch: 90%;
+}
+
+.say p {
+  max-width: var(--measure);
+  margin: 0 0 1em;
+  color: var(--soft);
+}
+
+.say p:last-child {
+  margin-bottom: 0;
+}
+
+/* Comparison table */
+
+.tools {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.975rem;
+}
+
+.tools th,
+.tools td {
+  padding: 0.95rem 1.1rem 0.95rem 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.tools thead th {
+  padding-block: 0 0.7rem;
+  color: var(--dim);
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.tools tbody th {
+  width: 26%;
+  font: 500 0.875rem / 1.5 var(--mono);
+  color: var(--soft);
+}
+
+.tools td {
+  color: var(--soft);
+}
+
+.tools .us th,
+.tools .us td {
+  background: var(--bench);
+  color: var(--ink);
+}
+
+.tools .us th {
+  padding-left: 1rem;
+  box-shadow: inset 3px 0 0 var(--tap);
+  color: var(--tap);
+  font-weight: 700;
+}
+
+.tools .us td:last-child {
+  padding-right: 1rem;
+}
+
+@media (max-width: 40rem) {
+  .tools thead {
+    display: none;
+  }
+
+  .tools tr,
+  .tools th,
+  .tools td {
+    display: block;
+    width: auto !important;
+  }
+
+  .tools tbody tr {
+    padding-block: 0.9rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .tools th,
+  .tools td {
+    padding: 0.15rem 0;
+    border: 0;
+  }
+
+  .tools td::before {
+    content: attr(data-label) ": ";
+    color: var(--dim);
+  }
+
+  .tools .us {
+    padding-inline: 1rem;
+    box-shadow: inset 3px 0 0 var(--tap);
+  }
+
+  .tools .us th {
+    padding-left: 0;
+    box-shadow: none;
+  }
+
+  .tools .us td:last-child {
+    padding-right: 0;
+  }
+}
+
+/* Code blocks with a copy button */
+
+.cmd {
+  position: relative;
+  background: var(--bench);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+.note {
+  margin: 0 0 0.6rem;
+  color: var(--soft);
+  font-size: 0.95rem;
+}
+
+.cmd + .note {
+  margin-top: 1.5rem;
+}
+
+.cmd pre {
+  margin: 0;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  font: 400 0.8125rem / 1.75 var(--mono);
+  color: var(--ink);
+}
+
+.cmd.has-copy pre {
+  padding-right: 5.5rem;
+}
+
+.cmd .c {
+  color: var(--dim);
+}
+
+.cmd .ghost {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  background: var(--bench);
+}
+
+/* Where the text may scroll under it, the button sits below the commands instead. */
+@media (max-width: 40rem) {
+  .cmd.has-copy pre {
+    padding-right: 1.15rem;
+  }
+
+  .cmd .ghost {
+    position: static;
+    margin: 0 0 0.75rem 1.15rem;
+  }
+}
+
+/* Tabs over the ways to read a trace */
+
+.tablist {
+  display: none;
+  flex-wrap: wrap;
+  gap: 0 1.75rem;
+  margin: 0 0 1.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.js .tablist {
+  display: flex;
+}
+
+.tab {
+  margin-bottom: -1px;
+  padding: 0.6rem 0;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  font: 600 0.975rem / 1.3 var(--sans);
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--tap);
+}
+
+.panel + .panel {
+  margin-top: 3rem;
+}
+
+.js .panel[data-later] {
+  display: none;
+}
+
+.js .panel + .panel {
+  margin-top: 0;
+}
+
+.js .panel > h3 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.panel > h3 {
+  margin-bottom: 0.75rem;
+}
+
+.panel > p {
+  max-width: var(--measure);
+  margin: 0 0 1.25rem;
+  color: var(--soft);
+}
+
+.panel .trace {
+  margin-top: 0;
+}
+
+.panel .term {
+  padding-block: 0.9rem;
+}
+
+.keys {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.5rem 2rem;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--soft);
+  font-size: 0.925rem;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0.05em 0.45em;
+  text-align: center;
+  background: var(--bench);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  font-size: 0.85em;
+  color: var(--ink);
+}
+
+/* The terminal UI as it is drawn: reversed title and tab, yellow banner, dim hints */
+
+.rev {
+  background: var(--ink);
+  color: var(--glass);
+  font-weight: 700;
+}
+
+.ban {
+  background: var(--caution);
+  color: var(--glass);
+}
+
+.k {
+  color: var(--dim);
+}
+
+.s {
+  color: var(--soft);
+}
+
+.n {
+  color: var(--tap);
+}
+
+.z {
+  color: var(--caution);
+}
+
+/* How it works */
+
+.facts {
+  margin: 0;
+}
+
+.facts > div {
+  padding: 1.25rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.facts > div:first-child {
+  padding-top: 0;
+}
+
+.facts dt {
+  margin: 0 0 0.35rem;
+  font: 700 1.125rem / 1.3 var(--display);
+  font-stretch: 90%;
+}
+
+.facts dd {
+  max-width: var(--measure);
+  margin: 0;
+  color: var(--soft);
+}
+
+/* Footer */
+
+.foot {
+  padding-block: 3rem 4rem;
+  border-top: 1px solid var(--rule);
+  color: var(--dim);
+  font-size: 0.925rem;
+}
+
+.foot .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem 3rem;
+}
+
+.foot p {
+  margin: 0;
+}
+
+.foot nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.75rem;
+}
+
+.foot a {
+  color: var(--soft);
+}
+
+/* The 404 page */
+
+.lost {
+  padding-block: clamp(3rem, 12vw, 9rem);
+}
+
+.lost h1 {
+  font-size: clamp(2.4rem, 6vw, 4.4rem);
+}
+
+/* Terminal output is shown as the terminal prints it: "->" stays two characters. This comes after
+   the font shorthands above, which reset the variants. */
+code,
+pre,
+kbd,
+.trace-bar,
+.term,
+.cmd pre {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  * {
+    transition: none !important;
+  }
+
+  .js .replay {
+    display: none;
+  }
+}
+
+@media print {
+  html,
+  body {
+    background: #fff;
+    color: #000;
+  }
+}

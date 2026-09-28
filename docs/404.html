@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iotap: no such file or directory</title>
+  <meta name="robots" content="noindex">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1418">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/assets/fonts/hubot-sans-latin-wdth.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the content</a>
+  <header class="wrap top">
+    <a class="mark" href="/" aria-label="iotap, home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <path d="M2 21h28" stroke="#8aa0a8" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <path d="M16 4v17" stroke="#5fd4ea" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <circle cx="16" cy="21" r="4.2" fill="#5fd4ea"/>
+      </svg>
+      iotap
+    </a>
+  </header>
+  <main id="main" class="wrap lost">
+    <h1>That page does not exist.</h1>
+    <p class="lede">The address you followed does not lead anywhere on this site. This is what the kernel would say about it:</p>
+    <figure class="trace">
+      <div class="term" role="group" aria-label="A failed open call" tabindex="0">
+        <div class="ln">open("<span id="path">/this/page</span>", O_RDONLY) = -1 ENOENT (No such file or directory)</div>
+      </div>
+    </figure>
+    <div class="actions">
+      <a class="btn" href="/">Go to the iotap home page</a>
+    </div>
+  </main>
+  <script>document.getElementById("path").textContent = location.pathname;</script>
+</body>
+</html>
