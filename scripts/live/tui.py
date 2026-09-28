@@ -69,7 +69,7 @@ class Ui:
     def __init__(self, name, argv):
         self.name = name
         self.screen = pyte.Screen(COLS, ROWS)
-        self.stream = pyte.Stream(self.screen)
+        self.stream = pyte.ByteStream(self.screen)
         self.raw = []
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
@@ -112,7 +112,7 @@ class Ui:
             if not chunk:
                 return
             self.raw.append(chunk)
-            self.stream.feed(chunk.decode("utf-8", "replace"))
+            self.stream.feed(chunk)
 
     def keys(self, keys, wait=0.8):
         try:
