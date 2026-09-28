@@ -1,7 +1,7 @@
 //! Host names of remote addresses, for the terminal UI and the text summary.
 //!
 //! The system's resolver can take half a minute to answer, so threads of their own ask it, at
-//! most [`THREADS`] at once, and whoever shows names takes the answers in as they arrive,
+//! most `THREADS` at once, and whoever shows names takes the answers in as they arrive,
 //! showing the address until then. Nothing is looked up before a name is asked for, and each
 //! address is looked up once.
 

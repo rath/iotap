@@ -19,7 +19,7 @@ use crate::trace::Records;
 const IDLE_WATERMARK: Duration = Duration::from_millis(100);
 
 /// How many polls after its first check a process that matched no followed name is checked
-/// again: a program may name itself through argv[0] a moment after it starts, as Node.js
+/// again: a program may name itself through `argv[0]` a moment after it starts, as Node.js
 /// programs do by setting `process.title`, and on Linux exec renames a process a moment before
 /// the new program's arguments are in place. Two seconds at the interval iotap polls at.
 const RECHECKS: u8 = 8;

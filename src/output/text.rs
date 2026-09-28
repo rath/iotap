@@ -144,7 +144,7 @@ impl<W: Write> Sink for TextSink<W> {
 }
 
 /// Writes the end-of-session summary tables. With `hosts`, the network rows name the hosts of
-/// their remote addresses, as far as the resolver answers within [`HOST_NAMES_WAIT`].
+/// their remote addresses, as far as the resolver answers within `HOST_NAMES_WAIT`.
 pub fn write_summary(
     out: &mut dyn Write,
     summary: &Summary,
