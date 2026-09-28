@@ -213,6 +213,8 @@ impl Endpoint {
             Proto::Unix => self.path.is_none(),
             // The trace can name the peer of a connection whose local end only a lookup knows.
             Proto::Tcp => self.remote.is_none() || self.local.is_none(),
+            // These have no address that a lookup could add.
+            Proto::Route | Proto::System | Proto::Netlink | Proto::Packet => false,
             _ => self.local.is_none_or(|addr| addr.port() == 0) || self.remote.is_none(),
         }
     }
@@ -576,6 +578,24 @@ mod tests {
         assert_eq!(Endpoint::unresolved(Proto::Udp).to_string(), "udp ?");
         assert_eq!(Endpoint::unresolved(Proto::System).to_string(), "system");
         assert!(Endpoint::unresolved(Proto::Udp).is_incomplete());
+    }
+
+    #[test]
+    fn only_sockets_with_addresses_have_any_to_learn() {
+        for proto in [Proto::Route, Proto::System, Proto::Netlink, Proto::Packet] {
+            assert!(!Endpoint::unresolved(proto).is_incomplete(), "{proto:?}");
+        }
+        // Nothing is known of these until a lookup says, or of what an unclassified one is.
+        for proto in [
+            Proto::Tcp,
+            Proto::Udp,
+            Proto::Icmp,
+            Proto::Raw,
+            Proto::Unix,
+            Proto::Other,
+        ] {
+            assert!(Endpoint::unresolved(proto).is_incomplete(), "{proto:?}");
+        }
     }
 
     #[test]

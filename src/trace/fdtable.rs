@@ -1758,6 +1758,18 @@ mod tests {
     }
 
     #[test]
+    fn a_socket_with_no_address_to_learn_is_described_once() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        let kernel = Target::Socket(Endpoint::unresolved(Proto::Netlink));
+        src.live.insert((PID, 7), kernel.clone());
+        for ts in [1, 2_000, 4_000, 6_000] {
+            assert_eq!(target_of(&mut table, 7, ts, &mut src).0, kernel);
+        }
+        assert_eq!(src.describes, 1);
+    }
+
+    #[test]
     fn the_address_a_connect_named_outlasts_its_socket() {
         let mut src = Fake {
             answered_at: 100,
