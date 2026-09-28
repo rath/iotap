@@ -686,6 +686,12 @@ impl FdTable {
 
     /// Puts the two ends of a pipe or socket pair, both `target`, in the table.
     fn insert_pair(&mut self, pid: i32, fds: [u32; 2], target: &Target, (ts, since): (u64, u64)) {
+        // A pair never has one number twice. Zeros are what a call that succeeded decodes to
+        // when the trace could not read the descriptors it stored, and taking them for the
+        // pair would overwrite standard input; the ends are looked up when first used.
+        if fds[0] == fds[1] {
+            return;
+        }
         for fd in fds {
             let entry = FdEntry::new(target.clone(), Provenance::Traced, ts);
             self.insert(pid, fd.cast_signed(), entry, since);
@@ -1826,6 +1832,25 @@ mod tests {
         // Not even a second later is either end looked up.
         target_of(&mut table, 7, 5_000, &mut src);
         assert_eq!(src.describes, 0);
+    }
+
+    #[test]
+    fn a_pair_of_descriptors_the_trace_could_not_read_changes_nothing() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        table.apply(&open_of(1, 2, "/srv/input", 0, 0), &mut src);
+        // The two ends of a pipe or socket pair are never one number: the same number twice
+        // is what a call decodes to when the program could not read the descriptors it stored.
+        let unread = done(42, 3, 4, [0; 4], 0, &[]);
+        assert_eq!(unread.rval, [0, 0]);
+        table.apply(&unread, &mut src);
+        let (af_unix, stream) = (i64::from(libc::AF_UNIX), i64::from(libc::SOCK_STREAM));
+        let socketpair = linux_call(Role::SocketPair, "socketpair", (5, 6), [af_unix, stream, 0, 0], 0);
+        table.apply(&socketpair, &mut src);
+        assert_eq!(
+            target_of(&mut table, 0, 7, &mut src),
+            (file("/srv/input"), Provenance::Traced)
+        );
     }
 
     #[test]
