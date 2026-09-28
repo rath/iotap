@@ -277,8 +277,19 @@ impl FdTable {
     /// Confirms the answers given before trace time `ts`: the trace up to then has been read,
     /// and it did not close their descriptors.
     pub fn advance(&mut self, ts: u64) {
+        self.settle_while(|at| at < ts);
+    }
+
+    /// Settles every answer still pending, as the trace has ended: no time is late enough for an
+    /// answer that a recording stamps with the last one there is.
+    pub fn finish(&mut self) {
+        self.settle_while(|_| true);
+    }
+
+    /// Settles the oldest answers, while `due` holds of the trace time they were given at.
+    fn settle_while(&mut self, due: impl Fn(u64) -> bool) {
         while let Some(&(at, answer)) = self.by_time.front() {
-            if at >= ts {
+            if !due(at) {
                 break;
             }
             self.by_time.pop_front();
@@ -1329,6 +1340,19 @@ mod tests {
         table.apply(&done(41, 2, 3, [5, 0, 0, 0], 6, &[]), &mut src);
         table.apply(&close_of(4, 5, 6), &mut src);
         table.advance(101);
+        assert_eq!(table.take_verdicts(), [Verdict::Confirmed(answer)]);
+    }
+
+    #[test]
+    fn finishing_settles_an_answer_stamped_with_the_last_time_there_is() {
+        let mut src = Fake {
+            answered_at: u64::MAX,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        src.live.insert((PID, 5), file("/later"));
+        let answer = table.target(PID, 5, 1, &mut src).answer.expect("unconfirmed");
+        table.finish();
         assert_eq!(table.take_verdicts(), [Verdict::Confirmed(answer)]);
     }
 

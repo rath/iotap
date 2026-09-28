@@ -439,7 +439,7 @@ impl Session {
     /// Call it when no more input will come; a `Stopped` input does it too.
     pub fn finish(&mut self, sink: &mut dyn Sink) -> io::Result<()> {
         self.reach(u64::MAX, sink)?;
-        self.fds.advance(u64::MAX);
+        self.fds.finish();
         self.settle(sink)
     }
 
@@ -901,6 +901,37 @@ mod tests {
             .map(|e| format!("{:?} {}", e.fd, e.target))
             .collect();
         assert_eq!(shown, ["Some(5) /srv/shared", "Some(1) /dev/ttys001"]);
+    }
+
+    #[test]
+    fn an_answer_stamped_with_the_last_time_there_is_does_not_hold_back_the_end() {
+        let mut src = procs();
+        // A recording may stamp what libproc said with any time.
+        src.targets.insert(
+            (PID, 5),
+            Target::File {
+                path: "/srv/late".into(),
+            },
+        );
+        src.answered_at = u64::MAX;
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        let records = synth.io(7, PID, 4, 5, 8, 8);
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
+            .unwrap();
+        assert!(sink.events.is_empty(), "the answer is not checked yet");
+        session
+            .handle(&Input::Stopped { ticks: 60_000 }, &mut src, &mut sink)
+            .unwrap();
+        assert_eq!(sink.events.len(), 1);
+        assert_eq!(
+            *sink.events[0].target,
+            Target::File {
+                path: "/srv/late".into()
+            }
+        );
     }
 
     #[test]
