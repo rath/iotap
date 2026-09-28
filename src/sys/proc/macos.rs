@@ -422,6 +422,25 @@ mod tests {
             (Some(listener.local_addr().unwrap()), None)
         );
 
+        // A socket on both IP versions, as one bound to :: is unless it asks for IPv6 alone,
+        // has both flags set and an IPv6 address.
+        let dual = TcpListener::bind("[::]:0").unwrap();
+        let ep = fd_socket(me(), dual.as_raw_fd()).unwrap();
+        assert_eq!(ep.local, Some(dual.local_addr().unwrap()));
+        // A connection it accepts from an IPv4 client is on IPv4 alone, where std writes the
+        // address as one mapped into IPv6.
+        let dual_port = dual.local_addr().unwrap().port();
+        let peer = TcpStream::connect(("127.0.0.1", dual_port)).unwrap();
+        let (accepted, _) = dual.accept().unwrap();
+        let ep = fd_socket(me(), accepted.as_raw_fd()).unwrap();
+        assert_eq!(
+            (ep.local, ep.remote),
+            (
+                Some(SocketAddr::from(([127, 0, 0, 1], dual_port))),
+                Some(peer.local_addr().unwrap())
+            )
+        );
+
         let udp = UdpSocket::bind("[::1]:0").unwrap();
         let ep = fd_socket(me(), udp.as_raw_fd()).unwrap();
         assert_eq!(

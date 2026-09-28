@@ -115,7 +115,9 @@ iotap_fd_socket(int pid, int fd, struct iotap_sock *out)
 		/* Ports are stored in network byte order inside an int. */
 		out->lport = ntohs((uint16_t)in->insi_lport);
 		out->rport = ntohs((uint16_t)in->insi_fport);
-		if (in->insi_vflag & INI_IPV4) {
+		/* A socket bound to :: for both IP versions has both flags set and an IPv6 address;
+		 * only one with IPv4 alone keeps its addresses in the 4-byte view. */
+		if ((in->insi_vflag & INI_IPV4) && !(in->insi_vflag & INI_IPV6)) {
 			out->is_v4 = 1;
 			memcpy(out->laddr, &in->insi_laddr.ina_46.i46a_addr4, 4);
 			memcpy(out->raddr, &in->insi_faddr.ina_46.i46a_addr4, 4);
