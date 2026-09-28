@@ -17,11 +17,15 @@ pub struct Cli {
     /// Process IDs or names to trace. A name matches every process whose name, or the file name
     /// of its executable or of its first argument (the command it was started by), equals it,
     /// ignoring case; processes started later under that name are traced too.
-    #[arg(value_name = "TARGET", required_unless_present_any = ["replay", "dump_fds"])]
+    #[arg(
+        value_name = "TARGET",
+        required_unless_present_any = ["replay", "dump_fds"],
+        conflicts_with = "replay"
+    )]
     pub targets: Vec<String>,
 
     /// Treat every TARGET as a process name, even when it is numeric.
-    #[arg(short = 'n', long)]
+    #[arg(short = 'n', long, conflicts_with = "replay")]
     pub name: bool,
 
     /// Also trace the processes that traced ones start, and theirs in turn.
@@ -29,7 +33,7 @@ pub struct Cli {
     /// Every descendant is traced, whether running already or started later. On Linux a child
     /// is traced from its start; on macOS from a few milliseconds after, so iotap misses a child
     /// that ends sooner, and says so.
-    #[arg(short = 'f', long)]
+    #[arg(short = 'f', long, conflicts_with = "replay")]
     pub children: bool,
 
     /// Show a live terminal UI instead of streaming events.
@@ -84,7 +88,7 @@ pub struct Cli {
     pub resolve: bool,
 
     /// Stop after this many seconds.
-    #[arg(short, long, value_name = "SECS")]
+    #[arg(short, long, value_name = "SECS", conflicts_with = "replay")]
     pub duration: Option<u64>,
 
     /// Rows per table in the text summary.
@@ -94,7 +98,12 @@ pub struct Cli {
     /// Kernel trace buffer size in records of 64 bytes, as macOS records are. On Linux the ring
     /// buffer takes as many bytes, rounded up to a power of two, and holds about half as many of
     /// its larger records. Raise it if iotap reports dropped records.
-    #[arg(long, value_name = "RECORDS", default_value_t = 524_288)]
+    #[arg(
+        long,
+        value_name = "RECORDS",
+        default_value_t = 524_288,
+        conflicts_with = "replay"
+    )]
     pub buffer: u32,
 
     /// Also save the raw trace to FILE, for later --replay.
@@ -131,6 +140,21 @@ mod tests {
         assert!(Cli::try_parse_from(["iotap", "--tui", "-q", "1"]).is_ok());
         assert!(Cli::try_parse_from(["iotap", "--files-only", "--net-only", "1"]).is_err());
         assert!(Cli::try_parse_from(["iotap", "--replay", "x.iotaprec"]).is_ok());
+        // A replay traces nothing, so what only a live trace uses is refused, not ignored.
+        for live_only in [
+            &["1234"][..],
+            &["-n"],
+            &["-f"],
+            &["-d", "1"],
+            &["--buffer", "1024"],
+        ] {
+            let mut args = vec!["iotap", "--replay", "x.iotaprec"];
+            args.extend(live_only);
+            assert!(Cli::try_parse_from(args).is_err(), "{live_only:?}");
+        }
+        assert!(
+            Cli::try_parse_from(["iotap", "--replay", "x.iotaprec", "--json", "-q", "--top", "5"]).is_ok()
+        );
         assert!(Cli::try_parse_from(["iotap", "--tui", "--resolve", "1"]).is_ok());
         assert!(Cli::try_parse_from(["iotap", "--json", "--resolve", "1"]).is_err());
         for flag in ["-f", "--children"] {
