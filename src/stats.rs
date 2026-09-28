@@ -23,7 +23,7 @@ pub struct Counter {
 impl Counter {
     fn add(&mut self, bytes: Option<u64>) {
         self.calls += 1;
-        self.bytes += bytes.unwrap_or(0);
+        self.bytes = self.bytes.saturating_add(bytes.unwrap_or(0));
     }
 }
 
@@ -195,7 +195,7 @@ pub struct Row {
 
 impl Row {
     pub fn bytes(&self) -> u64 {
-        self.read.bytes + self.write.bytes
+        self.read.bytes.saturating_add(self.write.bytes)
     }
 
     pub fn calls(&self) -> u64 {
@@ -256,7 +256,7 @@ struct Moved {
 
 impl Traffic {
     pub fn bytes(&self) -> u64 {
-        self.read.bytes + self.write.bytes
+        self.read.bytes.saturating_add(self.write.bytes)
     }
 
     pub fn calls(&self) -> u64 {
@@ -297,8 +297,8 @@ impl Traffic {
             return;
         };
         match dir {
-            Dir::Read => moved.read += bytes,
-            Dir::Write => moved.write += bytes,
+            Dir::Read => moved.read = moved.read.saturating_add(bytes),
+            Dir::Write => moved.write = moved.write.saturating_add(bytes),
         }
     }
 }
@@ -437,7 +437,7 @@ impl Stats {
         if let Err(at) = row.pids.binary_search(&event.pid) {
             row.pids.insert(at, event.pid);
         }
-        row.messages += event.messages.unwrap_or(0);
+        row.messages = row.messages.saturating_add(event.messages.unwrap_or(0));
         if !event.is_ok() {
             row.errors += 1;
             self.totals.errors += 1;
@@ -476,10 +476,10 @@ impl Stats {
         if let Some(bytes) = event.bytes {
             let second = self.second(event.time_ns / 1_000_000_000);
             match (category, dir) {
-                (Category::File, Dir::Read) => second.file_read += bytes,
-                (Category::File, Dir::Write) => second.file_write += bytes,
-                (Category::Network, Dir::Read) => second.net_read += bytes,
-                (Category::Network, Dir::Write) => second.net_write += bytes,
+                (Category::File, Dir::Read) => second.file_read = second.file_read.saturating_add(bytes),
+                (Category::File, Dir::Write) => second.file_write = second.file_write.saturating_add(bytes),
+                (Category::Network, Dir::Read) => second.net_read = second.net_read.saturating_add(bytes),
+                (Category::Network, Dir::Write) => second.net_write = second.net_write.saturating_add(bytes),
                 (Category::Other, _) => {}
             }
         }
@@ -673,6 +673,41 @@ mod tests {
             provenance: Provenance::Traced,
             interface,
         }
+    }
+
+    #[test]
+    fn sums_of_bytes_stop_at_the_top_of_a_u64() {
+        // A kernel cannot return this from read or write, but a recording can hold it, and a
+        // debug build must not panic on it nor a release build wrap around to a small number.
+        let file = || Target::File { path: "/big".into() };
+        let socket = || {
+            Target::Socket(Endpoint {
+                proto: crate::model::Proto::Tcp,
+                local: None,
+                remote: Some("192.0.2.1:443".parse().unwrap()),
+                path: None,
+            })
+        };
+        let mut stats = Stats::default();
+        for at in 0..3 {
+            let big = 1 << 63;
+            stats.record(&event(Op::Read, file(), Some(big), 0, at));
+            stats.record(&event(Op::Write, file(), Some(big), 0, at));
+            let mut sent = event(Op::Sendto, socket(), Some(big), 0, at);
+            sent.messages = Some(u64::MAX);
+            stats.record(&sent);
+        }
+        let totals = stats.totals();
+        assert_eq!(totals.file_read.bytes, u64::MAX);
+        assert_eq!(totals.file_write.bytes, u64::MAX);
+        assert_eq!(totals.file_read.calls, 3);
+        let rows = stats.summary_rows(Category::File);
+        assert_eq!(rows[0].read_bytes, u64::MAX);
+        let network = stats.summary_rows(Category::Network);
+        assert_eq!(network[0].messages, u64::MAX);
+        assert_eq!(stats.history()[0].file_read, u64::MAX);
+        let file = stats.rows(Category::File, SortBy::Bytes);
+        assert_eq!(file[0].1.bytes(), u64::MAX, "read and written together");
     }
 
     #[test]

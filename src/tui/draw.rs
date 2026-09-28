@@ -235,10 +235,13 @@ fn interface_rows(shown: &Shown<'_>, room: usize) -> Option<Vec<InterfaceRow>> {
         };
         for (_, traffic) in rest {
             let (read, write) = traffic.during(second);
-            sum.per_second = (sum.per_second.0 + read, sum.per_second.1 + write);
+            sum.per_second = (
+                sum.per_second.0.saturating_add(read),
+                sum.per_second.1.saturating_add(write),
+            );
             sum.total = (
-                sum.total.0 + traffic.read.bytes,
-                sum.total.1 + traffic.write.bytes,
+                sum.total.0.saturating_add(traffic.read.bytes),
+                sum.total.1.saturating_add(traffic.write.bytes),
             );
         }
         rows.push(sum);
