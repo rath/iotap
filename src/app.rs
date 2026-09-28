@@ -208,9 +208,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         poll: Duration::from_millis(250),
         own_pid,
     };
-    let deadline = cli
-        .duration
-        .map(|secs| Instant::now() + Duration::from_secs(secs));
+    let deadline = deadline(cli.duration, Instant::now());
     let mut output = if cli.tui {
         Output::Tui(Box::new(tui_app(cli)))
     } else {
@@ -605,6 +603,12 @@ impl Targets {
     }
 }
 
+/// When a trace of `secs` seconds that begins at `now` ends. A duration beyond what the clock
+/// can add, which is longer than anyone will wait, has no end.
+fn deadline(secs: Option<u64>, now: Instant) -> Option<Instant> {
+    now.checked_add(Duration::from_secs(secs?))
+}
+
 /// Sets a flag when dropped. A panic in the thread that consumes the reader's input unwinds
 /// through the thread scope, which waits for the reader before it goes on; this stops the
 /// reader, so that the process ends instead of tracing on with nobody to hear it.
@@ -785,6 +789,15 @@ mod tests {
             interface_warnings(&wanted(&["eth9"]), &empty, true),
             ["the recording lists no network interfaces, so --interface matches no I/O"]
         );
+    }
+
+    #[test]
+    fn a_duration_beyond_the_clock_is_no_deadline() {
+        let now = Instant::now();
+        assert_eq!(deadline(None, now), None);
+        assert_eq!(deadline(Some(0), now), Some(now));
+        assert_eq!(deadline(Some(90), now), Some(now + Duration::from_secs(90)));
+        assert_eq!(deadline(Some(u64::MAX), now), None);
     }
 
     #[test]
