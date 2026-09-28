@@ -11,7 +11,6 @@ import time
 
 import shared
 from harness import (
-    DEVNULL,
     PIPE,
     PROGRAMS,
     check,
@@ -131,14 +130,12 @@ def dropped(run):
 def programs_loaded(run):
     """How many of the kernel's eBPF programs have the names of iotap's."""
     # Like every root step, with a time limit: a run that hangs here can outlast sudo's approval.
-    listing = subprocess.run(
-        ["sudo", "-n", "bpftool", "prog", "show"],
-        stdin=DEVNULL,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    ).stdout
+    # Through the run, which stops what sudo runs; a timeout of subprocess.run would stop sudo
+    # alone, and leave bpftool running as root.
+    rc = run.root(["bpftool", "prog", "show"], stdout="bpftool.txt", timeout=30)
+    if rc is None:
+        raise subprocess.TimeoutExpired(["bpftool", "prog", "show"], 30)
+    listing = run.read("bpftool.txt")
     pattern = r"^\d+: \S+\s+name (?:sys_enter|sys_exit|process_exit|task_newtask)\s"
     return len(re.findall(pattern, listing, re.MULTILINE))
 
