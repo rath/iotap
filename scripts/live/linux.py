@@ -130,12 +130,14 @@ def dropped(run):
 
 def programs_loaded(run):
     """How many of the kernel's eBPF programs have the names of iotap's."""
+    # Like every root step, with a time limit: a run that hangs here can outlast sudo's approval.
     listing = subprocess.run(
         ["sudo", "-n", "bpftool", "prog", "show"],
         stdin=DEVNULL,
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     ).stdout
     pattern = r"^\d+: \S+\s+name (?:sys_enter|sys_exit|process_exit|task_newtask)\s"
     return len(re.findall(pattern, listing, re.MULTILINE))
