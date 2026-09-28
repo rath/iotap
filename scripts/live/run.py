@@ -17,6 +17,7 @@ import datetime
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -108,6 +109,18 @@ def main():
     out = os.path.join(REPO, "target", "live")
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
+    # From here the run ends with sudo -k however it ends, refused, interrupted, or told to stop
+    # by SIGTERM or SIGHUP, which raise as Ctrl-C does.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.default_int_handler)
+    try:
+        return run_all(chosen, binary, out)
+    finally:
+        subprocess.run(["sudo", "-k"], check=False)
+
+
+def run_all(chosen, binary, out):
+    """Runs the checks `chosen` against `binary`; returns the exit status."""
     why = obstacle(binary)
     if why:
         # Also where whoever waits for the run looks.
@@ -121,9 +134,10 @@ def main():
         try:
             run_checks(run, chosen, log)
         finally:
-            run.stop_all()
-            subprocess.run(["sudo", "-k"], check=False)
-            shutil.rmtree(work, ignore_errors=True)
+            try:
+                run.stop_all()
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
         counts = {
             v: sum(1 for _, verdict, _ in run.verdicts if verdict == v)
             for v in ("PASS", "FAIL", "SKIP")
