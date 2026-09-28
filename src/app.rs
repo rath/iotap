@@ -171,6 +171,11 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
         bail!(FacilityError::NotPermitted);
     }
     let own_pid = i32::try_from(std::process::id())?;
+    // Before anything is configured, so that no signal ends iotap while the trace facility is
+    // held and there is no release to run: starting it alone takes a fifth of a second on macOS.
+    // A signal that arrives on the way only sets `stop`, which the reader and the consumer see.
+    let stop = Arc::new(AtomicBool::new(false));
+    let interrupted = watch_signals(&stop)?;
     let targets = Targets::resolve(cli, own_pid)?;
 
     let timebase = Timebase::host();
@@ -195,8 +200,6 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
     let mut src = Recording::new(Live, recorder);
     let mut session = Session::new(info, filter(cli), &mut src);
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let interrupted = watch_signals(&stop)?;
     let config = ReaderConfig {
         follow: targets.follow,
         children: cli.children,
@@ -601,12 +604,20 @@ impl Targets {
     }
 }
 
+/// How long the terminal UI has to leave once iotap is asked to stop.
+const UI_GRACE: Duration = Duration::from_secs(2);
+
 /// The first signal asks for a clean stop: it sets `stop` and the returned flag. A second one
-/// releases the trace facility, restores the terminal and exits at once, in case output is
-/// blocked.
+/// gives up at once, in case output is blocked, and so does the first when the terminal UI is
+/// still there [`UI_GRACE`] later: a terminal that has hung up leaves the UI stuck in reading
+/// its events, and it never gets to see the flag.
+///
+/// Every signal that ends a process by default, and that someone can send it, asks for the stop
+/// rather than ends iotap: dying of one would skip the release of the trace facility.
 fn watch_signals(stop: &Arc<AtomicBool>) -> Result<Arc<AtomicBool>> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP])?;
+    use signal_hook::consts::{SIGALRM, SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2};
+    let mut signals =
+        signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGALRM])?;
     let interrupted = Arc::new(AtomicBool::new(false));
     let (stop, flag) = (Arc::clone(stop), Arc::clone(&interrupted));
     thread::Builder::new().name("signals".into()).spawn(move || {
@@ -614,14 +625,26 @@ fn watch_signals(stop: &Arc<AtomicBool>) -> Result<Arc<AtomicBool>> {
             if received == 0 {
                 flag.store(true, Ordering::SeqCst);
                 stop.store(true, Ordering::SeqCst);
+                let _ = thread::Builder::new().name("ui-watchdog".into()).spawn(|| {
+                    thread::sleep(UI_GRACE);
+                    if tui::is_active() {
+                        give_up();
+                    }
+                });
             } else {
-                sys::release();
-                tui::emergency_restore();
-                std::process::exit(130);
+                give_up();
             }
         }
     })?;
     Ok(interrupted)
+}
+
+/// Ends iotap at once, for when the clean stop does not happen: releases the trace facility,
+/// restores the terminal and exits as a process does that a signal interrupted.
+fn give_up() -> ! {
+    sys::release();
+    tui::emergency_restore();
+    std::process::exit(130)
 }
 
 /// Releases the trace facility before the default panic output. The terminal UI installs its

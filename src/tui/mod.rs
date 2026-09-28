@@ -67,6 +67,11 @@ pub fn run(session: &mut Session, feed: &mut dyn Feed, app: &mut App) -> io::Res
     result.and(restored)
 }
 
+/// True while the terminal UI is up: from when it takes the terminal until it gives it back.
+pub fn is_active() -> bool {
+    ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Restores the terminal from any thread, for exits that skip the normal path.
 pub fn emergency_restore() {
     if ACTIVE.swap(false, Ordering::SeqCst) {
