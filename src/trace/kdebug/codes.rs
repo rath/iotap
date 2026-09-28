@@ -134,6 +134,7 @@ pub fn syscall(number: u16) -> Option<Syscall> {
         480 => ("recvmsg_x", io(RecvmsgX, 0, None)),
         481 => ("sendmsg_x", io(SendmsgX, 0, None)),
         484 => ("guarded_open_dprotected_np", open(None)),
+        485 => ("guarded_write_np", io(Write, 0, Some(3))),
         486 => ("guarded_pwrite_np", io(Pwrite, 0, Some(3))),
         487 => ("guarded_writev_np", io(Writev, 0, None)),
         501 => ("necp_open", Role::NewFd(NewFd::Necp)),
@@ -165,12 +166,14 @@ mod tests {
 
     #[test]
     fn table_covers_io_variants() {
-        for number in [3, 4, 153, 154, 396, 397, 414, 415, 486, 540, 541] {
+        for number in [3, 4, 153, 154, 396, 397, 414, 415, 485, 486, 487, 540, 541] {
             assert!(
                 matches!(syscall(number).map(|s| s.role), Some(Role::Io { .. })),
                 "{number}"
             );
         }
+        // The guarded calls take a guard after the descriptor, so the length is the fourth argument.
+        assert_eq!(syscall(485).map(|s| s.role), Some(io(Op::Write, 0, Some(3))));
         assert_eq!(syscall(486).map(|s| s.role), Some(io(Op::Pwrite, 0, Some(3))));
         assert_eq!(syscall(337).map(|s| s.role), Some(io(Op::Sendfile, 1, None)));
         assert_eq!(syscall(59), None, "execve is not tracked");
