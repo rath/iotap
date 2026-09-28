@@ -1,23 +1,45 @@
 # iotap
 
-See what a process on your machine is really doing: which files it reads and writes, which
-addresses it talks to, and how many bytes go each way. For macOS and Linux.
+**See what a process is really doing with your files and your network: which files it reads and
+writes, which addresses it talks to, and how many bytes go each way.** iotap is a command-line tool
+for macOS and Linux.
 
-## Why
+Give iotap a process ID or a name and it reports every read and write that process makes as it
+happens: the file or the remote address, how many bytes were asked for and how many moved, how long
+the call took, and whether it failed. When you stop, it sums the trace up per file and per endpoint.
 
-Something on your machine is busy and you want to know with what. A process is chewing through
-the disk, an app you just installed is talking to somewhere you never asked for, a build step is
-slow and you suspect I/O, or a program keeps failing and you want to see which file or
-connection it trips on. The usual tools each show a piece: `lsof` and `netstat` list what is open
-right now but not what moves through it, Activity Monitor and `top` count bytes but do not say
-where they went, and a packet capture shows the traffic of the whole machine with no process
-behind it.
+It is for the moment when something on your machine is busy and you want to know with what: a
+process is chewing through the disk, an app you just installed is talking to somewhere you never
+asked for, a build step is slow and you suspect I/O, or a program keeps failing and you want to see
+which file or connection it trips on. The usual tools each show a piece. `lsof` and `netstat` list
+what is open right now but not what moves through it, Activity Monitor and `top` count bytes but do
+not say where they went, a packet capture shows the traffic of the whole machine with no process
+behind it, and `strace` on Linux and `fs_usage` on macOS print the calls but leave the adding up to
+you. iotap puts the pieces together: the bytes, the process they belong to, and the file or endpoint
+they went to.
 
-iotap watches the processes you name and reports every read and write they make as it happens:
-the file or the remote address, how many bytes were asked for and how many moved, how long the
-call took, and whether it failed. When the process exits or you press Ctrl-C, it sums this up per
-file and per endpoint. Point it at a name and it also picks up processes started later under that
-name; add `-f` and it follows every process the traced ones start.
+It works from the kernel's own record of the system calls a program makes, so no debugger is
+attached to the program, no code is injected into it, and it runs exactly as it would otherwise.
+iotap keeps only metadata (paths, addresses, sizes and timings) and never the data that moves.
+
+## Quick start
+
+```
+cargo build --release
+sudo ./target/release/iotap 1234         # one process, by ID
+sudo ./target/release/iotap curl         # by name; processes started later under it too
+sudo ./target/release/iotap --tui curl   # the same as live tables you can drill into
+```
+
+Tracing needs root. [Why it needs root](#why-it-needs-root) says what iotap does with that access
+and what it leaves alone. Add `-f` to follow the processes a traced one starts, `--json` for one
+JSON object per line, and `--record FILE` to save a trace that `--replay FILE` shows again later,
+without root. [Requirements](#requirements) lists what a build needs, and [Usage](#usage) lists
+every option.
+
+## Example
+
+Here is iotap following one `curl` download:
 
 ```
 $ sudo iotap curl
@@ -104,13 +126,6 @@ What iotap does with that access is deliberately narrow:
     build: make, pkg-config, a C compiler, and the libelf and zlib development files. On Debian
     and Ubuntu that is `sudo apt install build-essential clang pkg-config libelf-dev zlib1g-dev`.
     The binary links libelf and zlib.
-
-## Build
-
-```
-cargo build --release
-sudo ./target/release/iotap <TARGET>...
-```
 
 ## Usage
 
