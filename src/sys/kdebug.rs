@@ -233,9 +233,7 @@ impl Kdebug {
             filter.allow(class, subclass);
         }
         set_typefilter(&mut filter).map_err(|e| KdebugError::from_os("KERN_KDSET_TYPEFILTER", e))?;
-        for &pid in pids {
-            session.add_pid(pid)?;
-        }
+        flag_all(pids, |pid| session.add_pid(pid))?;
         enable(true).map_err(|e| KdebugError::from_os("KERN_KDENABLE", e))?;
         Ok(session)
     }
@@ -243,6 +241,27 @@ impl Kdebug {
     /// How this kernel lays out lookup paths in its records.
     pub fn path_records() -> PathRecords {
         os_release().map_or_else(PathRecords::default, |release| PathRecords::for_release(&release))
+    }
+}
+
+/// Flags each of `pids` with `add`. A process that has ended since it was listed is left out
+/// as long as another is flagged: the reader tells the session of its end when it polls. With
+/// none flagged there is no pid filter, and every process would be traced, so that is an error.
+fn flag_all(pids: &[i32], mut add: impl FnMut(i32) -> Result<(), KdebugError>) -> Result<(), KdebugError> {
+    let mut flagged = 0usize;
+    let mut gone = None;
+    for &pid in pids {
+        match add(pid) {
+            Ok(()) => flagged += 1,
+            Err(KdebugError::NoSuchProcess(pid)) => {
+                gone.get_or_insert(pid);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    match gone {
+        Some(pid) if flagged == 0 => Err(KdebugError::NoSuchProcess(pid)),
+        _ => Ok(()),
     }
 }
 
@@ -433,6 +452,39 @@ mod tests {
 
     fn after(start: Instant, millis: u64) -> Instant {
         start + Duration::from_millis(millis)
+    }
+
+    #[test]
+    fn a_process_that_ended_before_it_was_flagged_is_left_out() {
+        let ended = |pid: i32| {
+            if pid == 2 {
+                Err(KdebugError::NoSuchProcess(pid))
+            } else {
+                Ok(())
+            }
+        };
+        assert!(flag_all(&[1, 2, 3], ended).is_ok());
+        // With none left the pid filter would never be set, and everything would be traced.
+        assert!(matches!(
+            flag_all(&[2], ended),
+            Err(KdebugError::NoSuchProcess(2))
+        ));
+        assert!(matches!(
+            flag_all(&[2, 2], ended),
+            Err(KdebugError::NoSuchProcess(2))
+        ));
+        // Any other failure is one, whatever else was flagged.
+        let refused = |pid: i32| {
+            if pid == 3 {
+                Err(KdebugError::NotPermitted)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            flag_all(&[1, 3, 2], refused),
+            Err(KdebugError::NotPermitted)
+        ));
     }
 
     #[test]
