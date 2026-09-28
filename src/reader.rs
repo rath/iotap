@@ -210,6 +210,10 @@ struct Watch {
     own_pid: i32,
     /// Processes already checked against `follow`, by pid.
     seen: HashMap<i32, Seen>,
+    /// Until the first check of the followed names: the first one meets processes that were
+    /// there before it, which started after the targets were matched and before the reader
+    /// began, and no name has been looked at yet.
+    catching_up: bool,
 }
 
 /// A process checked against the followed names. exec renames a process without starting it
@@ -223,26 +227,15 @@ struct Seen {
 
 impl Watch {
     fn new(tracked: Vec<Tracked>, config: &ReaderConfig) -> Self {
-        let mut watch = Self {
+        Self {
             tracked,
             follow: config.follow.clone(),
             children: config.children,
             swept: false,
             own_pid: config.own_pid,
             seen: HashMap::new(),
-        };
-        if !watch.follow.is_empty() {
-            // Processes running now were matched at startup; only later ones are new.
-            for info in proc::list_pids().into_iter().filter_map(proc::info) {
-                let seen = Seen {
-                    start: info.start,
-                    name: info.name,
-                    rechecks: 0,
-                };
-                watch.seen.insert(info.pid, seen);
-            }
+            catching_up: !config.follow.is_empty(),
         }
-        watch
     }
 
     fn is_empty(&self) -> bool {
@@ -389,6 +382,7 @@ impl Watch {
                 }
             }
         }
+        self.catching_up = false;
     }
 
     /// Notes the process `info` describes. True when it is to be checked against `follow`: when
@@ -402,10 +396,12 @@ impl Watch {
             seen.rechecks = seen.rechecks.saturating_sub(1);
             return due;
         }
+        // The processes the first check meets have run for a while already; a later one may be
+        // still naming itself.
         let seen = Seen {
             start: info.start,
             name: info.name.clone(),
-            rechecks: RECHECKS,
+            rechecks: if self.catching_up { 0 } else { RECHECKS },
         };
         self.seen.insert(info.pid, seen);
         true
@@ -647,6 +643,40 @@ mod tests {
             "{inputs:?}"
         );
         assert_eq!(tracer.added, [sleeper.pid()]);
+    }
+
+    #[test]
+    fn follows_a_process_that_started_before_the_reader_did() {
+        let me = i32::try_from(std::process::id()).unwrap();
+        let command = format!("iotap-early-{me}");
+        // It started after the targets were matched, while the facility was being set up.
+        let sleeper = Sleeper::start(&command);
+        let config = ReaderConfig {
+            follow: vec![command.clone()],
+            own_pid: me,
+            ..config(Duration::ZERO)
+        };
+        let mut watch = Watch::new(Vec::new(), &config);
+        let mut tracer = Scripted::new([], None);
+        let inputs = watch.poll(&mut tracer).unwrap();
+        assert!(
+            matches!(
+                &inputs[..],
+                [Input::Attached { process, parent: None }] if process.pid == sleeper.pid()
+            ),
+            "{inputs:?}"
+        );
+        assert_eq!(tracer.added, [sleeper.pid()]);
+        // What the first poll finds and does not follow is not looked at again, unless it is
+        // renamed, as it is not new to later polls.
+        let checks = |watch: &mut Watch, info: &ProcInfo| (0..20).filter(|_| watch.due(info)).count();
+        let stranger = ProcInfo {
+            pid: me,
+            name: "stranger".into(),
+            start: (1, 0),
+            parent: 1,
+        };
+        assert_eq!(checks(&mut watch, &stranger), 1 + usize::from(RECHECKS));
     }
 
     #[test]
