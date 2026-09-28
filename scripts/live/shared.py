@@ -315,20 +315,24 @@ def tui(run, scenario, *args):
             f"{sys.executable} lacks pyte and wcwidth: python3 -m pip install pyte",
         )
         return False
-    # sudo drops PYTHONPATH, so tell root's Python where these came from.
+    # sudo drops PYTHONPATH, so tell root's Python where these came from. Its -B keeps root from
+    # leaving bytecode of them in the user's directories.
     paths = sorted({os.path.dirname(os.path.dirname(m.__file__)) for m in (pyte, wcwidth)})
+    # A scenario takes about a minute. A hang must end before sudo's approval does, which on
+    # macOS is after five minutes.
     rc = run.root(
         [
             "env",
             "PYTHONPATH=" + os.pathsep.join(paths),
             sys.executable,
+            "-B",
             os.path.join(HERE, "tui.py"),
             scenario,
             *args,
         ],
         stdout=f"tui-{scenario}.txt",
         stderr=f"tui-{scenario}.err",
-        timeout=300,
+        timeout=200,
     )
     for line in run.read(f"tui-{scenario}.txt").splitlines():
         m = re.match(r"^  (PASS|FAIL)  (.*)$", line)
