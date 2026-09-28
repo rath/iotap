@@ -733,6 +733,17 @@ impl FdTable {
             self.forget(pid, new, (since, ts));
             return;
         }
+        // Two descriptors resting on one answer already refer to the same open file, so copying
+        // one onto the other changes nothing. Replacing the entry would drop it from the
+        // answer's entries, and could settle the answer on the spot, with the new entry
+        // resting on it.
+        if found.answer.is_some()
+            && let Some(entry) = self.entry_mut(pid, new)
+            && entry.answer == found.answer
+        {
+            entry.opened_at = ts;
+            return;
+        }
         let original = self.entry(pid, old);
         let entry = FdEntry {
             target: found.target,
@@ -742,13 +753,15 @@ impl FdTable {
             answer: found.answer,
             vnode: original.map_or(0, |entry| entry.vnode),
         };
-        self.insert(pid, new, entry, since);
-        // The copy refers to the same open file, so the answer's verdict holds for it too.
+        // The copy refers to the same open file, so the answer's verdict holds for it too. It
+        // joins the answer's entries before it takes its number: replacing what held the
+        // number can settle the answer, and the copy must hear of it.
         if let Some(answer) = found.answer
             && let Some(unconfirmed) = self.unconfirmed.get_mut(&answer)
         {
             unconfirmed.entries.push((pid, new));
         }
+        self.insert(pid, new, entry, since);
     }
 
     fn open(
@@ -1338,6 +1351,61 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_onto_a_descriptor_of_the_same_open_file_leaves_the_answer_pending() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        src.live.insert((PID, 5), file("/later"));
+        let answer = table.target(PID, 5, 1, &mut src).answer.expect("unconfirmed");
+        // fd 6 is a copy of fd 5, and dup2 puts it back on 5: the same open file again.
+        table.apply(&done(41, 2, 3, [5, 0, 0, 0], 6, &[]), &mut src);
+        table.apply(&done(90, 4, 5, [6, 5, 0, 0], 5, &[]), &mut src);
+        assert_eq!(table.take_verdicts(), [], "nothing about the file changed");
+        for fd in [5, 6] {
+            let found = table.target(PID, fd, 6, &mut src);
+            assert_eq!(
+                (&*found.target, found.answer),
+                (&file("/later"), Some(answer)),
+                "fd {fd}"
+            );
+        }
+        // Past the answer with both descriptors open, it holds for both.
+        table.advance(101);
+        assert_eq!(table.take_verdicts(), [Verdict::Confirmed(answer)]);
+        for fd in [5, 6] {
+            let found = table.target(PID, fd, 102, &mut src);
+            assert_eq!((&*found.target, found.answer), (&file("/later"), None), "fd {fd}");
+        }
+    }
+
+    #[test]
+    fn a_copy_that_takes_the_number_of_its_answer_falls_back_with_the_others() {
+        let mut src = Fake {
+            answered_at: 100,
+            ..Fake::default()
+        };
+        let mut table = FdTable::new(1_000);
+        src.live.insert((PID, 5), file("/dir/rel"));
+        table.apply(&done(5, 1, 2, [0; 4], 5, &["rel"]), &mut src);
+        // The name of fd 5 rests on libproc's answer at 100, and so does its copy on 6.
+        table.apply(&done(41, 3, 4, [5, 0, 0, 0], 6, &[]), &mut src);
+        // A call across that time gives the number to another file, which may be what libproc
+        // described instead.
+        table.apply(&done(5, 99, 101, [0; 4], 5, &["/abs"]), &mut src);
+        assert_eq!(table.take_verdicts(), []);
+        // Copying 6 onto it leaves the number to a file that is not the one described, so the
+        // answer falls through, and the new copy with the old.
+        table.apply(&done(90, 102, 103, [6, 5, 0, 0], 5, &[]), &mut src);
+        assert!(matches!(table.take_verdicts()[..], [Verdict::Stale { .. }]));
+        for fd in [5, 6] {
+            let found = table.target(PID, fd, 104, &mut src);
+            assert_eq!((&*found.target, found.answer), (&file("rel"), None), "fd {fd}");
+        }
+    }
+
+    #[test]
     fn a_different_protocol_means_the_number_was_reused() {
         let mut src = Fake::default();
         let mut table = FdTable::new(1_000);
@@ -1826,6 +1894,140 @@ mod tests {
         open.errno = libc::ENOENT;
         table.apply(&open, &mut src);
         assert_eq!(target_of(&mut table, 3, 3, &mut src).0, Target::Unknown);
+    }
+
+    /// The sequences below come from this generator, so that a failing one can be run again.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+    }
+
+    /// What is wrong with how the entries and the answers they rest on refer to each other, if
+    /// anything. An entry on a settled answer would keep the events on it waiting for a verdict
+    /// that has already come.
+    fn answer_fault(table: &FdTable) -> Option<String> {
+        for (pid, proc_fds) in &table.procs {
+            for (fd, entry) in &proc_fds.fds {
+                let Some(answer) = entry.answer else {
+                    continue;
+                };
+                match table.unconfirmed.get(&answer) {
+                    None => return Some(format!("fd {fd} of {pid} rests on the settled answer {answer}")),
+                    Some(unconfirmed) if !unconfirmed.entries.contains(&(*pid, *fd)) => {
+                        return Some(format!(
+                            "answer {answer} does not list fd {fd} of {pid}, which rests on it"
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        table.unconfirmed.iter().find_map(|(answer, unconfirmed)| {
+            unconfirmed.entries.iter().find_map(|&(pid, fd)| {
+                let rests = table.entry(pid, fd).and_then(|entry| entry.answer);
+                (rests != Some(*answer))
+                    .then(|| format!("answer {answer} lists fd {fd} of {pid}, which does not rest on it"))
+            })
+        })
+    }
+
+    #[test]
+    fn no_sequence_of_calls_leaves_the_answers_and_their_entries_at_odds() {
+        const CHILD: i32 = PID + 1;
+        let inet = i64::from(libc::AF_INET);
+        for seed in 1..=3_000_u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let mut src = Fake::default();
+            let mut table = FdTable::new(50);
+            let mut steps: Vec<String> = Vec::new();
+            let mut now = 100_u64;
+            for _ in 0..40 {
+                now += 1 + rng.below(4);
+                // libproc answers a little after the trace time it is asked at, or at once.
+                src.answered_at = if rng.below(4) == 0 { 0 } else { now + rng.below(30) };
+                let pid = if rng.below(3) == 0 { CHILD } else { PID };
+                let fd = 3 + rng.below(4) as i32;
+                let other = 3 + rng.below(4) as i32;
+                let start = now - rng.below(3);
+                for number in [fd, other] {
+                    if rng.below(4) != 0 {
+                        src.live
+                            .insert((pid, number), file(&format!("/live/{pid}/{number}")));
+                    }
+                }
+                let fd_arg = i64::from(fd);
+                let mut call = match rng.below(12) {
+                    0 => {
+                        src.live.insert((pid, fd), file("/dir/rel"));
+                        done(5, start, now, [0; 4], fd_arg, &["rel"])
+                    }
+                    1 => done(5, start, now, [0; 4], fd_arg, &["/abs"]),
+                    2 => close_of(start, now, fd_arg),
+                    3 => done(41, start, now, [fd_arg, 0, 0, 0], i64::from(other), &[]),
+                    4 | 5 => done(
+                        90,
+                        start,
+                        now,
+                        [fd_arg, i64::from(other), 0, 0],
+                        i64::from(other),
+                        &[],
+                    ),
+                    6 => {
+                        let dupfd = i64::from(libc::F_DUPFD);
+                        done(92, start, now, [fd_arg, dupfd, 3, 0], i64::from(other), &[])
+                    }
+                    7 => done(
+                        97,
+                        start,
+                        now,
+                        [inet, i64::from(libc::SOCK_STREAM), 0, 0],
+                        fd_arg,
+                        &[],
+                    ),
+                    _ => {
+                        match rng.below(6) {
+                            0 => table.fork(PID, CHILD),
+                            1 => table.detach(CHILD),
+                            2 => {
+                                let fds = vec![(fd, file("/snap"))];
+                                src.snapshots.insert(
+                                    pid,
+                                    Snapshot {
+                                        fds,
+                                        cwd: None,
+                                        netns: None,
+                                    },
+                                );
+                                table.attach(pid, &mut src);
+                            }
+                            3 => table.advance(now),
+                            _ => {
+                                table.target(pid, fd, now, &mut src);
+                            }
+                        }
+                        steps.push(format!("{now}: other step on fd {fd} of {pid}"));
+                        continue;
+                    }
+                };
+                call.pid = pid;
+                steps.push(format!(
+                    "{now}: {} {:?} -> {} in {start}..{now} of {pid}",
+                    call.call.name,
+                    call.start.map(|(_, args)| args),
+                    call.rval[0].cast_signed()
+                ));
+                table.apply(&call, &mut src);
+                if let Some(problem) = answer_fault(&table) {
+                    panic!("seed {seed}: {problem} after\n{}", steps.join("\n"));
+                }
+            }
+        }
     }
 
     #[test]

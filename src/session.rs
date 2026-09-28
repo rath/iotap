@@ -863,6 +863,47 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_onto_a_descriptor_of_the_same_file_does_not_hold_up_the_events_after_it() {
+        let mut src = procs();
+        // libproc describes fd 5, which the trace never saw made, long after the calls below.
+        src.targets.insert(
+            (PID, 5),
+            Target::File {
+                path: "/srv/shared".into(),
+            },
+        );
+        src.answered_at = 50_000;
+        let mut session = Session::new(info(), Filter::ALL, &mut src);
+        let mut synth = Synth::new(2_000, 10);
+        // dup(5) makes 6 rest on that answer, and dup2(6, 5) gives the number back to the same
+        // file.
+        let mut records = synth.call(Call {
+            ret: 6,
+            ..Call::new(7, PID, 41, [5, 0, 0, 0])
+        });
+        records.extend(synth.call(Call {
+            ret: 5,
+            ..Call::new(7, PID, 90, [6, 5, 0, 0])
+        }));
+        records.extend(synth.io(7, PID, 4, 5, 8, 8));
+        records.extend(synth.io(7, PID, 4, 1, 20, 20));
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut sink)
+            .unwrap();
+        assert!(sink.events.is_empty(), "the answer is not checked yet");
+        session
+            .handle(&Input::Stopped { ticks: 60_000 }, &mut src, &mut sink)
+            .unwrap();
+        let shown: Vec<String> = sink
+            .events
+            .iter()
+            .map(|e| format!("{:?} {}", e.fd, e.target))
+            .collect();
+        assert_eq!(shown, ["Some(5) /srv/shared", "Some(1) /dev/ttys001"]);
+    }
+
+    #[test]
     fn events_wait_for_libproc_and_drop_stale_answers() {
         let mut src = procs();
         src.interfaces = vec![listing(&[])];
