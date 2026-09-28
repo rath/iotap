@@ -333,6 +333,10 @@ fn wrap_path(path: &str, width: usize) -> Vec<String> {
 
 /// `items` separated by commas, as many as fit in `width` columns, then how many did not.
 fn fit_list(items: &[String], width: usize) -> String {
+    let all = items.join(", ");
+    if all.width() <= width {
+        return all;
+    }
     let mut out = String::new();
     for (i, item) in items.iter().enumerate() {
         let joined = if i == 0 {
@@ -382,6 +386,10 @@ mod tests {
             "the first item always shows"
         );
         assert_eq!(fit_list(&[], 10), "");
+        // All of it shows when it fits, though the count of what is left would not.
+        let letters: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(fit_list(&letters, 7), "a, b, c");
+        assert_eq!(fit_list(&letters, 6), "a, and 2 more");
     }
 
     #[test]
