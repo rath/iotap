@@ -6,8 +6,8 @@
 //! come from the process source, which records its answers, so which interface an event names
 //! depends only on the trace and those answers.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -61,6 +61,9 @@ pub struct Table {
     /// The interface that holds each address; `None` for an address that several hold.
     by_addr: HashMap<IpAddr, Option<Arc<str>>>,
     by_index: HashMap<u32, Arc<str>>,
+    /// The link-local addresses the interfaces hold, each with the index of the link it is on: an
+    /// address such as `fe80::1` belongs to whoever holds it on that link, and every link has one.
+    on_link: HashSet<(IpAddr, u32)>,
     loopback: Option<Arc<str>>,
     netns: Option<u64>,
     /// Trace time before which no listing is asked for.
@@ -82,6 +85,7 @@ impl Table {
             names: Vec::new(),
             by_addr: HashMap::new(),
             by_index: HashMap::new(),
+            on_link: HashSet::new(),
             loopback: None,
             netns: None,
             next_listing: 0,
@@ -103,6 +107,7 @@ impl Table {
         self.names.clear();
         self.by_addr.clear();
         self.by_index.clear();
+        self.on_link.clear();
         self.loopback = None;
         self.netns = listing.netns;
         for interface in listing.interfaces {
@@ -114,7 +119,13 @@ impl Table {
                 self.by_index.insert(interface.index, name.clone());
             }
             for addr in interface.addrs {
-                match self.by_addr.entry(canonical(addr).0) {
+                let (addr, embedded) = canonical(addr);
+                if is_link_local(addr)
+                    && let Some(link) = embedded.or((interface.index != 0).then_some(interface.index))
+                {
+                    self.on_link.insert((addr, link));
+                }
+                match self.by_addr.entry(addr) {
                     Entry::Vacant(entry) => {
                         entry.insert(Some(name.clone()));
                     }
@@ -192,13 +203,23 @@ impl Table {
         matches!((netns, self.netns), (Some(own), Some(listed)) if own != listed)
     }
 
+    /// True when an interface of the host holds `ip`. A link-local address counts only on the
+    /// link it is said to be on, when it is: the router at `fe80::1` on en0 is not the host that
+    /// holds `fe80::1` on lo0.
+    fn holds(&self, ip: IpAddr, link: Option<u32>) -> bool {
+        match link {
+            Some(link) if is_link_local(ip) => self.on_link.contains(&(ip, link)),
+            _ => self.by_addr.contains_key(&ip),
+        }
+    }
+
     /// The interface of an Internet socket.
     fn interface_of(&self, endpoint: &Endpoint) -> Option<Arc<str>> {
         // The host sends traffic to its own addresses over the loopback interface, whichever
         // address it comes from.
         if let Some(remote) = endpoint.remote {
-            let (ip, _) = canonical(remote.ip());
-            if ip.is_loopback() || self.by_addr.contains_key(&ip) {
+            let (ip, embedded) = canonical(remote.ip());
+            if ip.is_loopback() || self.holds(ip, embedded.or_else(|| scope_id(remote))) {
                 return self.loopback.clone();
             }
         }
@@ -212,6 +233,11 @@ impl Table {
             None => self.by_addr.get(&ip).cloned().flatten(),
         }
     }
+}
+
+/// True for a link-local IPv6 address, which names a host only together with its link.
+fn is_link_local(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local())
 }
 
 /// The interface index of a scoped IPv6 socket address.
@@ -340,6 +366,46 @@ mod tests {
             Some("[2001:db8::20]:80"),
         );
         assert_eq!(via(&own_v6), named("lo0"));
+    }
+
+    #[test]
+    fn a_link_local_address_is_the_hosts_own_only_on_its_own_link() {
+        let table = Table::new(listing(), 0, SECOND);
+        let via = |target: &Target| table.via(target, None);
+        let en0 = "[fe80:4::1c2d:3e4f:5a6b:7c8d]:5353";
+        // lo0 holds fe80::1, and so does the router on en0's link, which is another host.
+        let router = socket(Proto::Udp, Some(en0), Some("[fe80:4::1]:53"));
+        assert_eq!(via(&router), named("en0"));
+        let itself = socket(Proto::Udp, Some(en0), Some("[fe80:1::1]:53"));
+        assert_eq!(via(&itself), named("lo0"));
+        // The link as a scope id, which is how Linux gives it.
+        let scoped = |scope| {
+            Target::Socket(Endpoint {
+                local: Some(SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::1c2d:3e4f:5a6b:7c8d".parse().unwrap(),
+                    5353,
+                    0,
+                    4,
+                ))),
+                remote: Some(SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::1".parse().unwrap(),
+                    53,
+                    0,
+                    scope,
+                ))),
+                ..Endpoint::unresolved(Proto::Udp)
+            })
+        };
+        assert_eq!(via(&scoped(4)), named("en0"));
+        assert_eq!(via(&scoped(1)), named("lo0"));
+        // Without a link, the address alone decides.
+        let unscoped = socket(Proto::Udp, Some(en0), Some("[fe80::1]:53"));
+        assert_eq!(via(&unscoped), named("lo0"));
+        // An address of en0, on en0's link, is the host's own; on another link it is not.
+        let own = socket(Proto::Udp, Some(en0), Some("[fe80:4::1c2d:3e4f:5a6b:7c8d]:80"));
+        assert_eq!(via(&own), named("lo0"));
+        let neighbour = socket(Proto::Udp, Some(en0), Some("[fe80:9::1c2d:3e4f:5a6b:7c8d]:80"));
+        assert_eq!(via(&neighbour), named("en0"));
     }
 
     #[test]
