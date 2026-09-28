@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -7,7 +8,9 @@ fn main() -> ExitCode {
     match iotap::app::run(&cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("iotap: {err:#}");
+            // Not `eprintln!`, which panics when stderr cannot be written to, as after the
+            // terminal it belongs to has hung up.
+            let _ = writeln!(io::stderr(), "iotap: {err:#}");
             ExitCode::FAILURE
         }
     }

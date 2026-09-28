@@ -11,13 +11,17 @@ pub mod draw;
 mod fit;
 pub mod state;
 
+use std::fs::File;
 use std::io::{self, IsTerminal};
+use std::os::fd::AsFd;
+use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use ratatui::DefaultTerminal;
+use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::{cursor, execute, terminal};
+use ratatui::{DefaultTerminal, Terminal};
 
 use self::state::App;
 use crate::session::Session;
@@ -48,10 +52,11 @@ pub trait Feed {
 
 /// Runs the UI of `app` until the user quits, restoring the terminal on every path.
 pub fn run(session: &mut Session, feed: &mut dyn Feed, app: &mut App) -> io::Result<()> {
-    let mut terminal = match ratatui::try_init() {
+    install_panic_hook();
+    let mut terminal = match enter() {
         Ok(terminal) => terminal,
         Err(err) => {
-            ratatui::restore();
+            let _ = ratatui::try_restore();
             return Err(err);
         }
     };
@@ -60,11 +65,37 @@ pub fn run(session: &mut Session, feed: &mut dyn Feed, app: &mut App) -> io::Res
     // but asks the terminal for the cursor position, which not every terminal answers.
     let result = execute!(io::stdout(), terminal::Clear(terminal::ClearType::All))
         .and_then(|()| run_loop(&mut terminal, session, feed, app));
-    // Dropping the terminal shows the cursor again.
-    drop(terminal);
+    // Shows the cursor again, which dropping the terminal would too. That prints to stderr
+    // when it fails, as it does once the terminal has hung up, and printing to a stderr that
+    // cannot be written to panics: in this hook-less path the process would abort.
+    let _ = terminal.show_cursor();
+    std::mem::forget(terminal);
     ACTIVE.store(false, Ordering::SeqCst);
     let restored = ratatui::try_restore();
     result.and(restored)
+}
+
+/// Takes the terminal: raw mode, on the alternate screen. This is `ratatui::try_init` without
+/// the panic hook it installs. That hook prints with `eprintln!`, which panics when the
+/// terminal has hung up, and a panic inside a panic hook aborts the process before the hook of
+/// [`crate::app`] has released the trace facility.
+fn enter() -> io::Result<DefaultTerminal> {
+    terminal::enable_raw_mode()?;
+    execute!(io::stdout(), terminal::EnterAlternateScreen)?;
+    Terminal::new(CrosstermBackend::new(io::stdout()))
+}
+
+/// Restores the terminal before the message of a panic is printed, so that the message reaches
+/// the normal screen. Whatever fails is ignored: a terminal that has hung up cannot be restored.
+fn install_panic_hook() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            emergency_restore();
+            previous(info);
+        }));
+    });
 }
 
 /// True while the terminal UI is up: from when it takes the terminal until it gives it back.
@@ -76,11 +107,23 @@ pub fn is_active() -> bool {
 pub fn emergency_restore() {
     if ACTIVE.swap(false, Ordering::SeqCst) {
         let _ = terminal::disable_raw_mode();
-        // stdout may be locked by the stuck main thread; stderr is the same terminal.
-        let mut stderr = io::stderr();
-        if stderr.is_terminal() {
-            let _ = execute!(stderr, terminal::LeaveAlternateScreen, cursor::Show);
-        }
+        leave_screen();
+    }
+}
+
+/// Leaves the alternate screen and shows the cursor, on whichever of stderr and stdout is the
+/// terminal, through a duplicate of its descriptor. Not through `io::stdout()`, which the
+/// thread that is stuck writing to a terminal that does not drain may hold locked; and not to
+/// stderr alone, which may be redirected to a file.
+fn leave_screen() {
+    let (stderr, stdout) = (io::stderr(), io::stdout());
+    let terminal = [stderr.as_fd(), stdout.as_fd()]
+        .into_iter()
+        .find(IsTerminal::is_terminal)
+        .and_then(|fd| fd.try_clone_to_owned().ok());
+    if let Some(fd) = terminal {
+        let mut out = File::from(fd);
+        let _ = execute!(out, terminal::LeaveAlternateScreen, cursor::Show);
     }
 }
 
