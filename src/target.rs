@@ -67,7 +67,7 @@ impl Tracked {
     /// runs, links followed, while the first argument keeps the command it was started as, which
     /// is what `pgrep` and `killall` go by there.
     pub fn is_named(&self, wanted: &str) -> bool {
-        self.names().any(|name| name.eq_ignore_ascii_case(wanted))
+        self.names().any(|name| same_name(name, wanted))
     }
 
     /// Its name, then the file names of its executable and of its first argument.
@@ -83,6 +83,13 @@ impl Tracked {
 }
 
 /// The part of `path` after its last slash.
+/// True when `a` and `b` are the same in lower case, which is how `similar` compares names too.
+fn same_name(a: &str, b: &str) -> bool {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
+}
+
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -236,6 +243,10 @@ mod tests {
     fn parses_specs() {
         assert_eq!(Spec::parse("123", false), Spec::Pid(123));
         assert_eq!(Spec::parse("123", true), Spec::Name("123".into()));
+        // Not only ASCII: the hint of `similar` offers names this must match too.
+        assert!(process("Übersicht", None, None).is_named("übersicht"));
+        assert!(process("übersicht", None, None).is_named("ÜBERSICHT"));
+        assert!(!process("Übersicht", None, None).is_named("ubersicht"));
         assert_eq!(Spec::parse("-4", false), Spec::Name("-4".into()));
         assert_eq!(Spec::parse("Safari", false), Spec::Name("Safari".into()));
     }
