@@ -43,7 +43,9 @@ checks both.
   the live terminal UI reads the host clock for its elapsed time and its current second, its
   details panel reads a file's metadata (`lstat`) as it is now, and host names (`--resolve`, the
   UI's `n` key) are what the resolver answers now. A name lookup can block for half a minute, so
-  only the threads of `hosts` make them, and only for addresses about to be shown.
+  only the threads of `hosts` make them, and only for addresses about to be shown. Text and
+  terminal output also write times of day in the local time zone of the machine that shows them,
+  where JSON Lines give nanoseconds since the epoch.
 - Tests must not need root. Kernel-facing behaviour is covered by synthetic record streams built
   with `trace::kdebug::synth` and `trace::linux::synth`, the TUI by rendering into ratatui's
   `TestBackend`. After changing anything under `src/sys/`, `src/reader.rs`, the syscall tables,
@@ -68,7 +70,8 @@ asks, and the run ends with `sudo -k`.
   so the run opens a terminal of its own: `open -a Terminal scripts/live/macos.command`. In its
   window the user answers sudo, with Touch ID where `/etc/pam.d/sudo_local` enables `pam_tid.so`,
   or else with the password, which the agent never sees. `target/live/done` then holds the exit
-  status; wait for it by testing for the file in a loop, not by following the log with
+  status; remove it before opening the terminal, since the script removes it only once its window
+  has started, and wait for it by testing for the file in a loop, not by following the log with
   `tail -f | grep`, which can outlive the run. run.py will not start while an `iotap`,
   `fs_usage` or `ktrace` runs, as kdebug has one owner at a time: ask the user to quit theirs,
   and not to copy anything during the run, since the terminal UI check uses the pasteboard.
@@ -77,9 +80,14 @@ asks, and the run ends with `sudo -k`.
   waits for it:
 
   ```
+  rm -f target/live/done
   tmux send-keys -t iotap:0.0 'cd ~/work/iotap && python3 scripts/live/run.py; echo $? > target/live/done; tmux wait-for -S iotap-run' Enter
   timeout 1800 tmux wait-for iotap-run
+  cat target/live/done
   ```
+
+  A channel keeps a signal that nobody waited for, so the wait can return at once for an earlier
+  run: the run is over only when `target/live/done`, removed before it began, exists.
 
   Look at the pane only with `tmux capture-pane -p -t iotap:0.0`, and send keys only when it
   shows an idle shell prompt: keys sent while sudo asks for the password go into its prompt.
