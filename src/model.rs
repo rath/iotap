@@ -150,11 +150,13 @@ impl Proto {
             libc::AF_NETLINK => Self::Netlink,
             #[cfg(target_os = "linux")]
             libc::AF_PACKET => Self::Packet,
+            // A raw socket is one whatever protocol it speaks, except that the system lists the
+            // ones that speak ICMP with the others of that protocol.
             libc::AF_INET | libc::AF_INET6 => match (protocol, sock_type) {
-                (libc::IPPROTO_TCP, _) | (0, libc::SOCK_STREAM) => Self::Tcp,
-                (libc::IPPROTO_UDP, _) | (0, libc::SOCK_DGRAM) => Self::Udp,
                 (libc::IPPROTO_ICMP | libc::IPPROTO_ICMPV6, _) => Self::Icmp,
                 (_, libc::SOCK_RAW) => Self::Raw,
+                (libc::IPPROTO_TCP, _) | (0, libc::SOCK_STREAM) => Self::Tcp,
+                (libc::IPPROTO_UDP, _) | (0, libc::SOCK_DGRAM) => Self::Udp,
                 _ => Self::Other,
             },
             _ => Self::Other,
@@ -588,6 +590,17 @@ mod tests {
             Proto::classify(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP),
             Proto::Icmp
         );
+        // A raw socket that speaks TCP or UDP is still a raw socket, as the system lists it,
+        // and one that speaks ICMP is listed as ICMP.
+        for (family, protocol, proto) in [
+            (libc::AF_INET, libc::IPPROTO_TCP, Proto::Raw),
+            (libc::AF_INET6, libc::IPPROTO_UDP, Proto::Raw),
+            (libc::AF_INET, 255, Proto::Raw),
+            (libc::AF_INET, libc::IPPROTO_ICMP, Proto::Icmp),
+            (libc::AF_INET6, libc::IPPROTO_ICMPV6, Proto::Icmp),
+        ] {
+            assert_eq!(Proto::classify(family, libc::SOCK_RAW, protocol), proto);
+        }
         #[cfg(target_os = "linux")]
         {
             let cloexec = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
