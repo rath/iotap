@@ -258,12 +258,17 @@ def release(run):
     rc = run.iotap("-q", "-d", "1", yes.pid)
     run.expect(rc == 0, "iotap stops at --duration", f"exit status {rc}")
     released()
+    began = time.monotonic()
     rc = run.root_shell(
         '"$1" -q -d 15 "$2" > /dev/null & p=$!; sleep 2; kill -INT "$p"; wait "$p"',
         run.bin,
         yes.pid,
     )
-    run.expect(rc == 0, "iotap stops at SIGINT", f"exit status {rc}")
+    # Without the signal it would run for its 15 seconds and exit with status 0 all the same.
+    took = time.monotonic() - began
+    run.expect(
+        rc == 0 and took < 10, "iotap stops at SIGINT", f"exit status {rc} after {took:.0f} s"
+    )
     released()
     rc = run.root_shell(
         '"$1" -q -d 15 "$2" > "$3" & p=$!; sleep 2; kill -INT "$p"; kill -TERM "$p"; wait "$p"',
