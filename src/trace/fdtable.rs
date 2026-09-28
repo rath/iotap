@@ -28,6 +28,11 @@ use crate::model::{Endpoint, FdType, Proto, Provenance, Target};
 
 /// The `close_range` flag that only marks the descriptors close-on-exec, on Linux.
 const CLOSE_RANGE_CLOEXEC: u64 = 1 << 2;
+/// The longest working directory kept: `PATH_MAX` on Linux, the larger of the two systems. The
+/// trace joins each `chdir` to the directory before it without following `..`, so a program
+/// that enters a directory and leaves it again, once for each of many, would make it grow
+/// without bound.
+const CWD_MAX: usize = 4096;
 
 #[derive(Clone, Debug)]
 struct FdEntry {
@@ -387,8 +392,9 @@ impl FdTable {
             }
             Role::Chdir => {
                 if let Some(lookup) = &done.lookup {
-                    let cwd = self.guess(pid, None, lookup);
-                    self.procs.entry(pid).or_default().cwd = Some(cwd);
+                    // Past the limit it is not a directory anyone is in, so nothing is known.
+                    let cwd = Some(self.guess(pid, None, lookup)).filter(|cwd| cwd.len() <= CWD_MAX);
+                    self.procs.entry(pid).or_default().cwd = cwd;
                 }
             }
             Role::Fchdir => {
@@ -1528,6 +1534,29 @@ mod tests {
         table.apply(&done(13, 13, 14, [4, 0, 0, 0], 0, &[]), &mut src);
         table.apply(&done(5, 15, 16, [0; 4], 8, &["g"]), &mut src);
         assert_eq!(target_of(&mut table, 8, 17, &mut src).0, file("/var/db/g"));
+    }
+
+    #[test]
+    fn a_working_directory_is_not_kept_past_the_longest_path() {
+        let mut src = Fake::default();
+        src.snapshots.insert(
+            PID,
+            Snapshot {
+                fds: vec![],
+                cwd: Some("/work".into()),
+                netns: None,
+            },
+        );
+        let mut table = FdTable::new(1_000);
+        assert!(table.attach(PID, &mut src));
+        // A program that enters a directory and leaves it again, for each of very many.
+        for turn in 0..3_000 {
+            let at = 10 * turn;
+            table.apply(&done(12, at, at + 1, [0; 4], 0, &["sub"]), &mut src);
+            table.apply(&done(12, at + 2, at + 3, [0; 4], 0, &[".."]), &mut src);
+            let cwd = table.procs[&PID].cwd.as_ref();
+            assert!(cwd.is_none_or(|cwd| cwd.len() <= CWD_MAX), "after {turn} turns");
+        }
     }
 
     #[test]
