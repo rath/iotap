@@ -1282,6 +1282,55 @@ mod tests {
     }
 
     #[test]
+    fn a_file_with_no_name_is_not_taken_for_the_directory_it_was_made_in() {
+        let mut src = procs();
+        // What /proc says of the descriptor that open(dir, O_TMPFILE) returned.
+        src.targets.insert(
+            (PID, 5),
+            Target::File {
+                path: "/tmp/#7301".into(),
+            },
+        );
+        let info = SessionInfo {
+            system: System::LinuxX86_64,
+            ..info()
+        };
+        let mut session = Session::new(info, Filter::ALL, &mut src);
+        let mut synth = LinuxSynth::new(System::LinuxX86_64, 2_000, 10);
+        let (o_tmpfile, o_rdwr) = (0o20_200_000, 2);
+        let records = vec![
+            synth.call(linux_synth::Call {
+                ret: 5,
+                memory: Memory::Path(b"/tmp".to_vec()),
+                ..linux_synth::Call::new(
+                    7,
+                    PID,
+                    "openat",
+                    [
+                        linux_synth::AT_FDCWD,
+                        0xffff_0000,
+                        o_tmpfile | o_rdwr,
+                        0o600,
+                        0,
+                        0,
+                    ],
+                )
+            }),
+            synth.io(7, PID, "write", 5, 4096, 4096),
+        ];
+        let mut sink = Collect::default();
+        session
+            .handle(&Input::Records(Records::Linux(records)), &mut src, &mut sink)
+            .unwrap();
+        let shown: Vec<String> = sink
+            .events
+            .iter()
+            .map(|e| format!("{} {:?} {}", e.syscall, e.bytes, e.target))
+            .collect();
+        assert_eq!(shown, ["write Some(4096) /tmp/#7301"]);
+    }
+
+    #[test]
     fn a_child_is_traced_with_its_parents_descriptors() {
         const CHILD: i32 = 777;
         let mut src = procs();

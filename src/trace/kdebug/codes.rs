@@ -67,7 +67,10 @@ const fn io(op: Op, fd_arg: usize, len_arg: Option<usize>) -> Role {
 }
 
 const fn open(dirfd_arg: Option<usize>) -> Role {
-    Role::Open { dirfd_arg }
+    Role::Open {
+        dirfd_arg,
+        flags_arg: None,
+    }
 }
 
 /// Looks up a BSD syscall number. Returns `None` for calls iotap ignores.

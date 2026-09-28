@@ -27,8 +27,12 @@ pub enum Role {
         len_arg: Option<usize>,
     },
     /// Opens the looked-up path and returns a descriptor; `dirfd_arg` is set for `*at` calls.
+    /// `flags_arg` holds the flags as an `int`, when the call takes them so and the decoder needs
+    /// to read them. It is a `u8`, like the indices of what the eBPF program captures, so that
+    /// a call stays small.
     Open {
         dirfd_arg: Option<usize>,
+        flags_arg: Option<u8>,
     },
     Close,
     Dup,

@@ -10,7 +10,7 @@ pub mod synth;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
-use super::call::{Completed, Lookup, PathForm, Syscall};
+use super::call::{Completed, Lookup, PathForm, Role, Syscall};
 use super::{Decode, Step, System, Traced};
 
 /// Bytes before a record's memory: the fixed part of `struct record` in the eBPF program.
@@ -233,6 +233,8 @@ fn word<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
 pub struct Decoder {
     /// Traced calls by number.
     calls: Vec<Option<Syscall>>,
+    /// The flag that makes an open create a file with no name.
+    tmpfile: Option<u32>,
     before_trace: u64,
     in_progress: u64,
 }
@@ -252,6 +254,7 @@ impl Decoder {
         }
         Self {
             calls,
+            tmpfile: codes::o_tmpfile(system),
             before_trace: 0,
             in_progress: 0,
         }
@@ -278,6 +281,21 @@ impl Decoder {
         if start.is_none() {
             self.before_trace += 1;
         }
+        // The path an open with O_TMPFILE takes is the directory to make the file in, which has
+        // no name: what the descriptor is is left for a lookup to tell. The flags are known
+        // only for a call that was seen to enter.
+        let unnamed = match syscall.role {
+            Role::Open {
+                flags_arg: Some(arg), ..
+            } => self.tmpfile.is_some_and(|flag| {
+                start.is_some()
+                    && call
+                        .args
+                        .get(usize::from(arg))
+                        .is_some_and(|&flags| flags as u32 & flag == flag)
+            }),
+            _ => false,
+        };
         Some(Completed {
             call: syscall,
             tid: u64::from(call.tid.cast_unsigned()),
@@ -286,7 +304,7 @@ impl Decoder {
             end_ts,
             errno,
             rval,
-            lookup: lookup(&call.memory),
+            lookup: if unnamed { None } else { lookup(&call.memory) },
             remote: inet_address(&call.memory),
         })
     }
@@ -389,7 +407,7 @@ fn unix_path(addr: &[u8]) -> Option<(String, PathForm)> {
 
 #[cfg(test)]
 mod tests {
-    use super::synth::{Call, Synth, abstract_addr, inet_addr, unix_addr};
+    use super::synth::{AT_FDCWD, Call, Synth, abstract_addr, inet_addr, unix_addr};
     use super::*;
 
     const SYSTEM: System = System::LinuxAarch64;
@@ -517,6 +535,50 @@ mod tests {
         };
         assert_eq!(done.rval, [4, 5]);
         assert_eq!(decoder.calls_started_before_trace(), 0);
+    }
+
+    #[test]
+    fn the_directory_an_open_of_a_file_with_no_name_is_given_is_not_the_files_path() {
+        // O_TMPFILE is O_DIRECTORY and one flag more, and O_DIRECTORY differs by processor.
+        for (system, directory, tmpfile) in [
+            (System::LinuxX86_64, 0o200_000_u64, 0o20_200_000_u64),
+            (System::LinuxAarch64, 0o40_000, 0o20_040_000),
+        ] {
+            let mut synth = Synth::new(system, 1_000, 10);
+            let mut decoder = Decoder::new(system);
+            let mut opened = |name: &str, flags: u64, entered: bool| {
+                let flags_at = if name == "open" {
+                    [0xffff_0000, flags, 0o600, 0, 0, 0]
+                } else {
+                    [AT_FDCWD, 0xffff_0000, flags, 0o600, 0, 0]
+                };
+                let record = synth.call(Call {
+                    ret: 5,
+                    entered,
+                    memory: Memory::Path(b"/tmp".to_vec()),
+                    ..Call::new(7, 70, name, flags_at)
+                });
+                let Some(Traced::Call(done)) = decoder.decode(&record).unwrap().traced else {
+                    panic!()
+                };
+                done.lookup.map(|lookup| lookup.path)
+            };
+            let (read_write, create) = (2, 0o100);
+            let dir = Some("/tmp".to_owned());
+            assert_eq!(opened("openat", tmpfile | read_write, true), None, "{system:?}");
+            // Opening the directory itself, and any other file, keep the path.
+            assert_eq!(opened("openat", directory, true), dir, "{system:?}");
+            assert_eq!(opened("openat", read_write | create, true), dir, "{system:?}");
+            // The flags of a call that was not seen entering are not known.
+            assert_eq!(opened("openat", tmpfile | read_write, false), dir, "{system:?}");
+            if system == System::LinuxX86_64 {
+                // open has them a place earlier, and creat has none.
+                assert_eq!(opened("open", tmpfile | read_write, true), None);
+                assert_eq!(opened("open", read_write, true), dir);
+                assert_eq!(opened("creat", tmpfile, true), dir);
+                assert_eq!(opened("openat2", tmpfile | read_write, true), dir);
+            }
+        }
     }
 
     #[test]

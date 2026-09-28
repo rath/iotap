@@ -331,7 +331,7 @@ impl FdTable {
         let since = done.start_ts().unwrap_or(ts);
         match done.call.role {
             Role::Io { .. } => {}
-            Role::Open { dirfd_arg } => {
+            Role::Open { dirfd_arg, .. } => {
                 let fd = done.ret_i32();
                 match &done.lookup {
                     Some(lookup) => {

@@ -460,6 +460,9 @@ up to about there, and says that it ends abruptly.
   wrong after a link with a relative target other than `/etc`, `/tmp` and `/var`, and a truncated
   path is shown as `…` followed by its end. A name that is not valid UTF-8 is shown with U+FFFD
   in place of the invalid bytes, so two files whose names differ only in those bytes count as one.
+  On Linux, a file made by `open` or `openat` with `O_TMPFILE` has no name for the trace to give,
+  so iotap takes it from `/proc`, as `/tmp/#7301`, when it looks the descriptor up; one made by
+  `openat2` shows as the directory it was made in.
 - **32-bit processes, on Linux.** iotap knows the call numbers of 64-bit processes. A 32-bit
   program numbers its calls differently, so its trace is misread; do not trace one.
 - **Exits, on Linux before 6.16.** Only from Linux 6.16 does the kernel tell the program when a

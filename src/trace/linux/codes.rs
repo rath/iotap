@@ -71,9 +71,36 @@ const fn new_fd(number: u16, name: &'static str) -> Entry {
     call(number, name, Role::NewFd(NewFd::Unknown))
 }
 
-const OPENAT: Role = Role::Open { dirfd_arg: Some(0) };
-const OPEN: Role = Role::Open { dirfd_arg: None };
+const OPENAT: Role = Role::Open {
+    dirfd_arg: Some(0),
+    flags_arg: Some(2),
+};
+const OPEN: Role = Role::Open {
+    dirfd_arg: None,
+    flags_arg: Some(1),
+};
+/// `creat` has no flags to read: it always creates. `openat2` keeps its flags in a structure the
+/// program does not read.
+const CREAT: Role = Role::Open {
+    dirfd_arg: None,
+    flags_arg: None,
+};
+const OPENAT2: Role = Role::Open {
+    dirfd_arg: Some(0),
+    flags_arg: None,
+};
 const CONNECT: Capture = Capture::Sockaddr { addr: 1, len: 2 };
+
+/// The flag `O_TMPFILE` of `system`, which makes an open create a file with no name in the
+/// directory it is given. It is `O_DIRECTORY` and one flag more, and `O_DIRECTORY` differs from
+/// one processor to another. `None` for a system that has no such flag.
+pub const fn o_tmpfile(system: System) -> Option<u32> {
+    match system {
+        System::LinuxX86_64 => Some(0x41_0000),
+        System::LinuxAarch64 => Some(0x40_4000),
+        System::Macos => None,
+    }
+}
 
 /// Linux on 64-bit Arm, which numbers its calls as `asm-generic/unistd.h` does. It has none of
 /// the old calls that newer ones replaced, such as `open` and `pipe`.
@@ -123,7 +150,7 @@ pub const AARCH64: &[Entry] = &[
     new_fd(425, "io_uring_setup"),
     new_fd(434, "pidfd_open"),
     call(436, "close_range", Role::CloseRange),
-    entry(437, "openat2", OPENAT, Capture::Path(1)),
+    entry(437, "openat2", OPENAT2, Capture::Path(1)),
     new_fd(438, "pidfd_getfd"),
 ];
 
@@ -154,7 +181,7 @@ pub const X86_64: &[Entry] = &[
     io(78, "getdents", Op::Getdirentries, Some(2)),
     entry(80, "chdir", Role::Chdir, Capture::Path(0)),
     call(81, "fchdir", Role::Fchdir),
-    entry(85, "creat", OPEN, Capture::Path(0)),
+    entry(85, "creat", CREAT, Capture::Path(0)),
     new_fd(213, "epoll_create"),
     io(217, "getdents64", Op::Getdirentries, Some(2)),
     new_fd(253, "inotify_init"),
@@ -183,7 +210,7 @@ pub const X86_64: &[Entry] = &[
     new_fd(425, "io_uring_setup"),
     new_fd(434, "pidfd_open"),
     call(436, "close_range", Role::CloseRange),
-    entry(437, "openat2", OPENAT, Capture::Path(1)),
+    entry(437, "openat2", OPENAT2, Capture::Path(1)),
     new_fd(438, "pidfd_getfd"),
 ];
 
@@ -217,6 +244,27 @@ mod tests {
             let names: HashSet<&str> = table.iter().map(|e| e.syscall.name).collect();
             assert_eq!((numbers.len(), names.len()), (table.len(), table.len()));
         }
+    }
+
+    #[test]
+    fn the_flag_for_files_with_no_name_is_the_kernels() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(o_tmpfile(System::HOST), Some(libc::O_TMPFILE.cast_unsigned()));
+        assert_eq!(o_tmpfile(System::Macos), None);
+        // What the opens that take flags say about where they are.
+        let flags_arg = |table: &[Entry], name: &str| {
+            let entry = table.iter().find(|entry| entry.syscall.name == name).unwrap();
+            match entry.syscall.role {
+                Role::Open { flags_arg, .. } => flags_arg,
+                role => panic!("{name} plays {role:?}"),
+            }
+        };
+        assert_eq!(flags_arg(AARCH64, "openat"), Some(2));
+        assert_eq!(flags_arg(X86_64, "openat"), Some(2));
+        assert_eq!(flags_arg(X86_64, "open"), Some(1));
+        assert_eq!(flags_arg(X86_64, "creat"), None);
+        assert_eq!(flags_arg(X86_64, "openat2"), None);
+        assert_eq!(flags_arg(AARCH64, "openat2"), None);
     }
 
     #[test]
