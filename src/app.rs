@@ -25,7 +25,7 @@ use crate::sys::time::{self, ClockAnchor, Timebase};
 use crate::sys::{self, Facility, FacilityError};
 use crate::target::{self, Spec, Tracked};
 use crate::trace::System;
-use crate::trace::procs::{Live, ProcSource};
+use crate::trace::procs::{Live, ProcSource, Snapshot};
 use crate::tui::state::{App, Tab};
 use crate::tui::{self, Feed};
 
@@ -678,14 +678,20 @@ fn dump_fds(pid: i32) -> Result<ExitCode> {
     let snapshot = Live
         .snapshot(pid)
         .with_context(|| format!("cannot read the descriptors of pid {pid}"))?;
-    let mut out = io::stdout().lock();
+    write_snapshot(&mut io::stdout().lock(), &snapshot)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Writes the working directory and descriptors of `snapshot`, one to a line. The process names
+/// them all, so control characters are written as `?`.
+fn write_snapshot(out: &mut dyn Write, snapshot: &Snapshot) -> io::Result<()> {
     if let Some(cwd) = &snapshot.cwd {
-        writeln!(out, " cwd  {cwd}")?;
+        writeln!(out, " cwd  {}", printable(cwd))?;
     }
     for (fd, target) in &snapshot.fds {
         writeln!(out, "{fd:>4}  {}", printable(&target.to_string()))?;
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -814,5 +820,24 @@ mod tests {
         let stop = AtomicBool::new(false);
         drop(StopOnDrop(&stop));
         assert!(stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dumped_descriptors_cannot_act_on_the_terminal_or_forge_a_line() {
+        // A directory and a file named by the process: each escapes the terminal's title and
+        // starts a line that looks like one of the dump's.
+        let hostile = "/tmp/a\x1b]0;pwned\x07\n   9  /etc/shadow";
+        let snapshot = Snapshot {
+            fds: vec![(3, crate::model::Target::File { path: hostile.into() })],
+            cwd: Some(hostile.into()),
+            netns: None,
+        };
+        let mut out = Vec::new();
+        write_snapshot(&mut out, &snapshot).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text,
+            " cwd  /tmp/a?]0;pwned??   9  /etc/shadow\n   3  /tmp/a?]0;pwned??   9  /etc/shadow\n"
+        );
     }
 }
