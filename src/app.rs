@@ -230,6 +230,7 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
                 reader::run(facility_ref, targets.tracked, config_ref, &tx, stop_ref)
             })
             .context("cannot start the kernel reader")?;
+        let _stops_reader = StopOnDrop(stop_ref);
         let mut input = LiveInput {
             rx: &rx,
             src: &mut src,
@@ -604,6 +605,17 @@ impl Targets {
     }
 }
 
+/// Sets a flag when dropped. A panic in the thread that consumes the reader's input unwinds
+/// through the thread scope, which waits for the reader before it goes on; this stops the
+/// reader, so that the process ends instead of tracing on with nobody to hear it.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// How long the terminal UI has to leave once iotap is asked to stop.
 const UI_GRACE: Duration = Duration::from_secs(2);
 
@@ -773,5 +785,20 @@ mod tests {
             interface_warnings(&wanted(&["eth9"]), &empty, true),
             ["the recording lists no network interfaces, so --interface matches no I/O"]
         );
+    }
+
+    #[test]
+    fn a_panic_in_the_consumer_stops_the_reader() {
+        let stop = AtomicBool::new(false);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _stops_reader = StopOnDrop(&stop);
+            panic!("the consumer failed");
+        }));
+        assert!(unwound.is_err());
+        assert!(stop.load(Ordering::SeqCst));
+        // And a normal end of the scope stops it just the same.
+        let stop = AtomicBool::new(false);
+        drop(StopOnDrop(&stop));
+        assert!(stop.load(Ordering::SeqCst));
     }
 }
