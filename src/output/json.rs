@@ -109,7 +109,9 @@ impl<W: Write> JsonSink<W> {
     }
 
     fn line<T: Serialize>(&mut self, value: &T) -> io::Result<()> {
-        serde_json::to_writer(&mut self.out, value).map_err(io::Error::other)?;
+        // `From` keeps the kind of the I/O error the writer failed with, which `other` would
+        // turn into `Other`, and a closed pipe would no longer be told from a real failure.
+        serde_json::to_writer(&mut self.out, value).map_err(io::Error::from)?;
         self.out.write_all(b"\n")
     }
 }
@@ -182,6 +184,38 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    /// A writer that took `room` bytes before its reader went away.
+    struct Closed {
+        room: usize,
+    }
+
+    impl Write for Closed {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room == 0 {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            let taken = buf.len().min(self.room);
+            self.room -= taken;
+            Ok(taken)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_pipe_is_still_a_broken_pipe() {
+        // The reader goes away in the middle of a value, as `| head -1` does, not between two.
+        // The caller ends quietly on a broken pipe, as the text output does, and only then.
+        let mut sink = JsonSink::new(Closed { room: 10 }, false);
+        let err = sink.notice(&crate::session::Notice::Exited(crate::session::Process {
+            pid: 7,
+            name: "demo".into(),
+        }));
+        assert_eq!(err.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[test]
