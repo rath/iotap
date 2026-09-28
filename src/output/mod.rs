@@ -1,7 +1,25 @@
 //! Output formats and the formatting helpers they share.
 
+use std::borrow::Cow;
+
 pub mod json;
 pub mod text;
+
+/// `text` with each control character written as `?`. Names and paths come from the traced
+/// programs, which choose them freely, and are printed on a terminal, where an escape sequence
+/// in one would act on it and a line feed would forge a line of output. JSON keeps them whole:
+/// it escapes them.
+pub fn printable(text: &str) -> Cow<'_, str> {
+    if text.chars().any(char::is_control) {
+        Cow::Owned(
+            text.chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
 
 /// Human-readable size with binary units rounded to one decimal, e.g. `4.0 MiB`.
 pub fn bytes(n: u64) -> String {
@@ -46,6 +64,20 @@ pub fn count(n: u64, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_are_written_as_question_marks() {
+        assert!(matches!(
+            printable("/tmp/page.html"),
+            Cow::Borrowed("/tmp/page.html")
+        ));
+        assert!(matches!(printable("Übersicht 한글 ❤️"), Cow::Borrowed(_)));
+        assert_eq!(printable("/tmp/a\nFORGED"), "/tmp/a?FORGED");
+        assert_eq!(printable("x\x1b[31m\x1b]0;title\x07y"), "x?[31m?]0;title?y");
+        // Both ends of the C0 range, DEL, and the C1 range, where 0x9b is CSI.
+        assert_eq!(printable("\0\x1f\x7f\u{80}\u{9b}\u{9f}"), "??????");
+        assert_eq!(printable("tab\there\r"), "tab?here?");
+    }
 
     #[test]
     fn formats_sizes_and_times() {

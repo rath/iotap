@@ -16,6 +16,7 @@ use crate::cli::Cli;
 use crate::hosts::Hosts;
 use crate::interfaces::Table;
 use crate::output::json::JsonSink;
+use crate::output::printable;
 use crate::output::text::{self, TextSink};
 use crate::reader::{self, ReaderConfig};
 use crate::record::{self, Answers, Recorder, Recording};
@@ -460,7 +461,7 @@ fn replay(cli: &Cli, path: &Path) -> Result<ExitCode> {
         .info
         .processes
         .iter()
-        .map(|p| format!("{} ({})", p.pid, p.name))
+        .map(|p| format!("{} ({})", p.pid, printable(&p.name)))
         .collect();
     let _ = writeln!(
         io::stderr(),
@@ -562,7 +563,7 @@ impl Targets {
         let (targets, running) = self.tracked.split_at(self.named);
         let list: Vec<String> = targets
             .iter()
-            .map(|t| format!("{} ({})", t.pid, t.name))
+            .map(|t| format!("{} ({})", t.pid, printable(&t.name)))
             .collect();
         let mut what = vec![match list.len() {
             1 => list[0].clone(),
@@ -682,7 +683,7 @@ fn dump_fds(pid: i32) -> Result<ExitCode> {
         writeln!(out, " cwd  {cwd}")?;
     }
     for (fd, target) in &snapshot.fds {
-        writeln!(out, "{fd:>4}  {target}")?;
+        writeln!(out, "{fd:>4}  {}", printable(&target.to_string()))?;
     }
     Ok(ExitCode::SUCCESS)
 }

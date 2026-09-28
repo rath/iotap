@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::output::printable;
 use crate::session::Process;
 use crate::sys::proc::{self, ProcInfo};
 
@@ -82,7 +83,6 @@ impl Tracked {
     }
 }
 
-/// The part of `path` after its last slash.
 /// True when `a` and `b` are the same in lower case, which is how `similar` compares names too.
 fn same_name(a: &str, b: &str) -> bool {
     a.chars()
@@ -90,6 +90,7 @@ fn same_name(a: &str, b: &str) -> bool {
         .eq(b.chars().flat_map(char::to_lowercase))
 }
 
+/// The part of `path` after its last slash.
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -215,14 +216,6 @@ fn similar(all: &[Tracked], wanted: &str) -> String {
     format!("; similar: {}{tail}", close.join(", "))
 }
 
-/// `name` with each control character written as `?`: a process can give itself any first
-/// argument, and this one is shown on a terminal.
-fn printable(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,10 +236,6 @@ mod tests {
     fn parses_specs() {
         assert_eq!(Spec::parse("123", false), Spec::Pid(123));
         assert_eq!(Spec::parse("123", true), Spec::Name("123".into()));
-        // Not only ASCII: the hint of `similar` offers names this must match too.
-        assert!(process("Übersicht", None, None).is_named("übersicht"));
-        assert!(process("übersicht", None, None).is_named("ÜBERSICHT"));
-        assert!(!process("Übersicht", None, None).is_named("ubersicht"));
         assert_eq!(Spec::parse("-4", false), Spec::Name("-4".into()));
         assert_eq!(Spec::parse("Safari", false), Spec::Name("Safari".into()));
     }
@@ -254,6 +243,10 @@ mod tests {
     #[test]
     fn matches_names_ignoring_case() {
         assert!(process("Safari", None, None).is_named("safari"));
+        // Not only ASCII: the hint of `similar` offers names this must match too.
+        assert!(process("Übersicht", None, None).is_named("übersicht"));
+        assert!(process("übersicht", None, None).is_named("ÜBERSICHT"));
+        assert!(!process("Übersicht", None, None).is_named("ubersicht"));
         let helper = process(
             "Google Chrome He",
             Some("/Applications/x/Google Chrome Helper"),

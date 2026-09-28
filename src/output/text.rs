@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{bytes, count, duration, latency};
+use super::{bytes, count, duration, latency, printable};
 use crate::hosts::Hosts;
 use crate::model::{IoEvent, errno_name};
 use crate::session::{Filter, Notice, Sink, Summary, UntracedReason};
@@ -65,7 +65,7 @@ pub fn event_fields(event: &IoEvent, clock: &mut LocalClock) -> [String; 8] {
         requested,
         result,
         latency,
-        event.target.to_string(),
+        printable(&event.target.to_string()).into_owned(),
     ]
 }
 
@@ -93,13 +93,14 @@ pub fn notice_text(notice: &Notice, clock: &mut LocalClock) -> String {
         Notice::Attached {
             process,
             parent: None,
-        } => format!("now tracing {} ({})", process.pid, process.name),
+        } => format!("now tracing {} ({})", process.pid, printable(&process.name)),
         Notice::Attached {
             process,
             parent: Some(parent),
         } => format!(
             "now tracing {} ({}), a child of {parent}",
-            process.pid, process.name
+            process.pid,
+            printable(&process.name)
         ),
         Notice::Untraced { pid, parent, reason } => {
             let child = match parent {
@@ -113,8 +114,10 @@ pub fn notice_text(notice: &Notice, clock: &mut LocalClock) -> String {
                 }
             }
         }
-        Notice::Exec { pid, path } => format!("{pid} is now running {path}"),
-        Notice::Exited(process) => format!("{} ({}) exited", process.pid, process.name),
+        Notice::Exec { pid, path } => format!("{pid} is now running {}", printable(path)),
+        Notice::Exited(process) => {
+            format!("{} ({}) exited", process.pid, printable(&process.name))
+        }
     }
 }
 
@@ -168,7 +171,7 @@ pub fn write_summary(
         .processes
         .iter()
         .take(SUMMARY_PROCESSES)
-        .map(|p| format!("{} ({})", p.pid, p.name))
+        .map(|p| format!("{} ({})", p.pid, printable(&p.name)))
         .collect();
     if summary.processes.len() > SUMMARY_PROCESSES {
         let more = summary.processes.len() - SUMMARY_PROCESSES;
@@ -338,6 +341,7 @@ fn table(
             (Some(addr), Some(hosts)) => Cow::Owned(row.key.named(hosts.name(addr.ip())).to_string()),
             _ => Cow::Borrowed(row.target.as_str()),
         };
+        let target = printable(&target);
         writeln!(
             out,
             "  {:>10} {:>8}  {:>10} {:>8}  {:>6}  {target}{notes}",
@@ -362,7 +366,7 @@ mod tests {
     use crate::hosts::HostName;
     use crate::model::{Category, Endpoint, Op, Proto, Provenance, Target, Via};
     use crate::session::{Process, UntracedChildren};
-    use crate::stats::{InterfaceTotals, Stats};
+    use crate::stats::{InterfaceTotals, Key, Stats};
 
     /// A summary of reads from three servers: two with names, one without.
     fn summary() -> Summary {
@@ -417,6 +421,81 @@ mod tests {
         let mut out = Vec::new();
         write_summary(&mut out, summary, top, &Filter::ALL, hosts).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// A file path, or a socket's path, that the traced program chose: it ends the line it is
+    /// on, escapes the terminal's title, and starts another line that looks like an event.
+    const HOSTILE: &str = "/tmp/a\x1b]0;pwned\x07\n12:00:00.000000    9999  write 4 1 1 0.001 ms /etc/shadow";
+
+    #[test]
+    fn what_a_program_names_cannot_act_on_the_terminal_or_forge_a_line() {
+        let mut clock = LocalClock::default();
+        let event = IoEvent {
+            time_ns: 5,
+            pid: 7,
+            tid: 1,
+            op: Op::Write,
+            syscall: "write",
+            fd: Some(4),
+            requested: Some(1),
+            bytes: Some(1),
+            messages: None,
+            errno: 0,
+            latency_ns: Some(1_000),
+            target: Arc::new(Target::File { path: HOSTILE.into() }),
+            provenance: Provenance::Traced,
+            interface: Via::NoInterface,
+        };
+        let line = event_line(&event, &mut clock);
+        assert!(!line.contains(|c: char| c.is_control()), "{line:?}");
+        assert!(
+            line.ends_with("/tmp/a?]0;pwned??12:00:00.000000    9999  write 4 1 1 0.001 ms /etc/shadow"),
+            "{line:?}"
+        );
+
+        let hostile = || Process {
+            pid: 9,
+            name: "cc\x1b[31m\nforged".into(),
+        };
+        for notice in [
+            Notice::Attached {
+                process: hostile(),
+                parent: None,
+            },
+            Notice::Attached {
+                process: hostile(),
+                parent: Some(7),
+            },
+            Notice::Exited(hostile()),
+            Notice::Exec {
+                pid: 9,
+                path: HOSTILE.into(),
+            },
+        ] {
+            let text = notice_text(&notice, &mut clock);
+            assert!(!text.contains(|c: char| c.is_control()), "{text:?}");
+        }
+
+        let mut summary = summary();
+        summary.processes = vec![hostile()];
+        summary.files = vec![SummaryRow {
+            target: HOSTILE.to_owned(),
+            key: Key::File(HOSTILE.into()),
+            read_bytes: 0,
+            read_calls: 0,
+            write_bytes: 1,
+            write_calls: 1,
+            errors: 0,
+            messages: 0,
+            unsized_calls: 0,
+            connections: None,
+        }];
+        let text = written(&summary, 30, None);
+        assert!(
+            !text.replace('\n', "").contains(|c: char| c.is_control()),
+            "only the summary's own line feeds remain: {text:?}"
+        );
+        assert!(text.contains("/tmp/a?]0;pwned??12:00:00"), "{text}");
     }
 
     #[test]
