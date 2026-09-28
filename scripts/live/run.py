@@ -61,6 +61,14 @@ def output(argv):
     return subprocess.run(argv, capture_output=True, text=True, check=False).stdout.strip()
 
 
+def modified(path):
+    """When `path` was modified; 0 if it cannot be looked at, as a link to nothing cannot."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def newest_source():
     """The modification time of the newest file the binary is built from."""
     newest = 0.0
@@ -71,7 +79,7 @@ def newest_source():
             if os.path.isfile(path)
             else [os.path.join(d, f) for d, _, files in os.walk(path) for f in files]
         )
-        newest = max([newest] + [os.path.getmtime(p) for p in paths])
+        newest = max([newest] + [modified(p) for p in paths])
     return newest
 
 
