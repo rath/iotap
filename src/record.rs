@@ -370,14 +370,12 @@ pub fn read(path: &Path) -> Result<Replay, ReplayError> {
 
 pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
     let mut magic = [0u8; 8];
-    input.read_exact(&mut magic).map_err(|_| ReplayError::BadMagic)?;
+    input.read_exact(&mut magic).map_err(not_a_recording)?;
     if &magic != MAGIC {
         return Err(ReplayError::BadMagic);
     }
     let mut version = [0u8; 4];
-    input
-        .read_exact(&mut version)
-        .map_err(|_| ReplayError::BadMagic)?;
+    input.read_exact(&mut version).map_err(not_a_recording)?;
     let version = u32::from_le_bytes(version);
     if !(1..=VERSION).contains(&version) {
         return Err(ReplayError::Version(version));
@@ -433,6 +431,17 @@ pub fn parse(mut input: impl Read) -> Result<Replay, ReplayError> {
         answers,
         truncated,
     })
+}
+
+/// What it means that a file could not be read as far as its magic and version: one that ends
+/// there is no recording, and one that cannot be read at all, such as a directory, is not called
+/// one that is not.
+fn not_a_recording(err: io::Error) -> ReplayError {
+    if err.kind() == io::ErrorKind::UnexpectedEof {
+        ReplayError::BadMagic
+    } else {
+        err.into()
+    }
 }
 
 /// The reader input a frame of `tag` holds; `None` for a tag of no input, such as one a newer
@@ -870,5 +879,27 @@ mod tests {
         let mut empty = MAGIC.to_vec();
         empty.extend_from_slice(&VERSION.to_le_bytes());
         assert!(matches!(parse(empty.as_slice()), Err(ReplayError::NoHeader)));
+        // A file too short to hold the magic is not a recording either.
+        assert!(matches!(parse(&MAGIC[..5]), Err(ReplayError::BadMagic)));
+    }
+
+    /// A reader that cannot read, as a directory or a file without permission is.
+    struct Unreadable;
+
+    impl Read for Unreadable {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_called_a_foreign_one() {
+        let Err(ReplayError::Io(err)) = parse(Unreadable) else {
+            panic!("an error of reading is not one of the magic");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        // Nor is one that fails after the magic.
+        let magic = MAGIC.chain(Unreadable);
+        assert!(matches!(parse(magic), Err(ReplayError::Io(_))));
     }
 }
