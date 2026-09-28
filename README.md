@@ -367,7 +367,9 @@ the screen is short, the last row sums the interfaces that did not fit.
 and when it gave it, and each list of the host's network interfaces, and `--replay FILE` feeds them through the same processing, so a replay
 reproduces the output of the live run in any output mode. A recording holds paths and addresses
 but no transferred data. It replays on the operating system it was made on, since its calls use
-that system's numbers for errors, address families and flags.
+that system's numbers for errors, address families and flags. iotap writes the file out each time
+it has read the trace up to a new point, so the recording of a run that was killed replays up to
+about there, and says that it ends abruptly.
 
 ## How it works
 

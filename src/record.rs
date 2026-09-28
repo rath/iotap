@@ -128,6 +128,8 @@ impl<W: Write> Recorder<W> {
             created_by: format!("iotap {}", env!("CARGO_PKG_VERSION")),
         };
         recorder.json(TAG_HEADER, &header)?;
+        // A recording of a run that ends before it is flushed still says what it was.
+        recorder.out.flush()?;
         Ok(recorder)
     }
 
@@ -178,7 +180,12 @@ impl<W: Write> Recorder<W> {
                 },
             ),
             Input::Stopped { ticks } => self.json(TAG_STOPPED, &StoppedFrame { ticks: *ticks }),
-            Input::Watermark { ticks } => self.json(TAG_WATERMARK, &WatermarkFrame { ticks: *ticks }),
+            Input::Watermark { ticks } => {
+                self.json(TAG_WATERMARK, &WatermarkFrame { ticks: *ticks })?;
+                // iotap can end without running the destructors that flush the buffer, as on a
+                // second signal, so the file is brought up to the point the trace was read to.
+                self.out.flush()
+            }
         }
     }
 
@@ -901,5 +908,40 @@ mod tests {
         // Nor is one that fails after the magic.
         let magic = MAGIC.chain(Unreadable);
         assert!(matches!(parse(magic), Err(ReplayError::Io(_))));
+    }
+
+    /// A writer whose bytes can be looked at while a `BufWriter` holds it.
+    #[derive(Clone, Default)]
+    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_recording_that_is_cut_short_keeps_everything_before_the_last_watermark() {
+        let (info, _, _) = fixture();
+        let file = Shared::default();
+        let mut recorder = Recorder::new(BufWriter::with_capacity(1 << 20, file.clone()), &info).unwrap();
+        let replayed = || parse(file.0.borrow().as_slice()).map(|replay| replay.inputs.len());
+        // iotap can be killed, or leave without running the destructors that flush the buffer,
+        // so a recording that has just begun is already one that can be replayed...
+        assert_eq!(replayed().unwrap(), 0);
+        let exec = Input::Exec {
+            pid: 300,
+            path: "/bin/cc".into(),
+        };
+        recorder.input(&exec).unwrap();
+        assert_eq!(replayed().unwrap(), 0);
+        // ...and what came before each mark of how far the trace has been read is in the file.
+        recorder.input(&Input::Watermark { ticks: 9 }).unwrap();
+        assert_eq!(replayed().unwrap(), 2);
     }
 }
