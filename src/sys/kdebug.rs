@@ -92,6 +92,8 @@ pub enum KdebugError {
     NoSuchProcess(i32),
     #[error("a kdebug session is already active in this process")]
     AlreadyActive,
+    #[error("the kernel trace facility was released")]
+    Released,
     #[error("{op} failed")]
     Sysctl {
         op: &'static str,
@@ -270,6 +272,7 @@ impl Tracer for Kdebug {
 
     /// Blocks until the kernel buffer is half full or `timeout` elapses.
     fn wait(&mut self, timeout: Duration) -> Result<(), KdebugError> {
+        owned()?;
         let millis = usize::try_from(timeout.as_millis()).unwrap_or(usize::MAX).max(1);
         wait(millis).map_err(|e| KdebugError::from_os("KERN_KDBUFWAIT", e))
     }
@@ -277,6 +280,7 @@ impl Tracer for Kdebug {
     /// A read that finds no records has seen every record stamped before it began. The
     /// children a read shows are flagged at once, and so are traced processes that ran exec.
     fn read(&mut self) -> Result<Read, KdebugError> {
+        owned()?;
         if self.buf.len() != self.capacity {
             self.buf.resize(self.capacity, KdBuf::default());
         }
@@ -303,6 +307,7 @@ impl Tracer for Kdebug {
     /// Flags `pid` for tracing. Calling it again for a flagged process is harmless, which is
     /// how a process that replaced its image with `exec` is picked up again.
     fn add_pid(&mut self, pid: i32) -> Result<(), KdebugError> {
+        owned()?;
         set_pid(pid, true).map_err(|e| match e.raw_os_error() {
             Some(libc::ESRCH | libc::EINVAL) => KdebugError::NoSuchProcess(pid),
             _ => KdebugError::from_os("KERN_KDPIDTR", e),
@@ -321,6 +326,17 @@ impl Tracer for Kdebug {
 impl Drop for Kdebug {
     fn drop(&mut self) {
         release();
+    }
+}
+
+/// Fails once the facility was released, as a panic hook or a second signal may do while the
+/// reader still runs. The reader's next call would otherwise make this process the owner of the
+/// trace facility again, and leave it owned by a process that is about to exit.
+fn owned() -> Result<(), KdebugError> {
+    if OWNED.load(Ordering::SeqCst) {
+        Ok(())
+    } else {
+        Err(KdebugError::Released)
     }
 }
 
@@ -485,6 +501,12 @@ mod tests {
             flag_all(&[1, 3, 2], refused),
             Err(KdebugError::NotPermitted)
         ));
+    }
+
+    #[test]
+    fn a_released_session_cannot_be_used_again() {
+        // No test starts a session, which needs root, so the facility is not owned here.
+        assert!(matches!(owned(), Err(KdebugError::Released)));
     }
 
     #[test]
