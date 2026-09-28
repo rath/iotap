@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use super::state::{Drawn, Shown, Tab, View};
 use super::{details, fit};
 use crate::hosts::Hosts;
-use crate::model::{Endpoint, Target};
+use crate::model::{Endpoint, IoEvent, Target};
 use crate::output::{bytes, count, text};
 use crate::stats::{self, Key, Peer, Second, SortBy, Traffic};
 
@@ -428,15 +428,11 @@ fn draw_targets(
     }
     let rows = stats.page(|category| tab.lists(category), view.sort, offset, page);
 
-    let widths = [
-        Constraint::Length(10),
-        Constraint::Length(7),
-        Constraint::Length(10),
-        Constraint::Length(7),
-        Constraint::Length(6),
-        Constraint::Length(4),
-        Constraint::Fill(1),
-    ];
+    let numbers: Vec<[String; 6]> = rows
+        .iter()
+        .map(|(_, row)| row_numbers(row, shown.now_ns))
+        .collect();
+    let widths = target_columns(&numbers);
     let spacing = spacing(area.width);
     let target_width = usize::from(area.width).saturating_sub(fixed_width(&widths, spacing));
     let sort = view.sort;
@@ -457,18 +453,22 @@ fn draw_targets(
         Cell::from("TARGET"),
     ])
     .style(BOLD);
-    let body = rows.iter().enumerate().map(|(i, (key, row))| {
-        let host = match key.remote() {
-            Some(addr) if names => hosts.name(addr.ip()),
-            _ => None,
-        };
-        let drawn = target_row(key, row, shown.now_ns, target_width, home, host);
-        if selected == Some(offset + i) {
-            drawn.style(SELECTED_ROW)
-        } else {
-            drawn
-        }
-    });
+    let body = rows
+        .iter()
+        .zip(&numbers)
+        .enumerate()
+        .map(|(i, ((key, row), numbers))| {
+            let host = match key.remote() {
+                Some(addr) if names => hosts.name(addr.ip()),
+                _ => None,
+            };
+            let drawn = target_row(key, row, numbers, target_width, home, host);
+            if selected == Some(offset + i) {
+                drawn.style(SELECTED_ROW)
+            } else {
+                drawn
+            }
+        });
     frame.render_widget(
         Table::new(body, widths).header(header).column_spacing(spacing),
         area,
@@ -496,12 +496,47 @@ fn draw_targets(
     }
 }
 
-/// One row of the Files or Network table; a socket's remote address shows as `host`, when
-/// given.
+/// The columns of the Files and Network tables for rows with these `numbers`: the numbers
+/// take what they need, which is normally what they have, and the target the rest.
+fn target_columns(numbers: &[[String; 6]]) -> [Constraint; 7] {
+    let least = [10, 7, 10, 7, 6, 4];
+    let [read, read_calls, written, written_calls, failed, idle] = std::array::from_fn(|i| {
+        Constraint::Length(column_width(
+            least[i],
+            numbers.iter().map(|cells| cells[i].as_str()),
+        ))
+    });
+    [
+        read,
+        read_calls,
+        written,
+        written_calls,
+        failed,
+        idle,
+        Constraint::Fill(1),
+    ]
+}
+
+/// The numbers of a row of the Files or Network table, as its columns show them: what was
+/// read, the calls that read it, what was written, the calls that wrote it, the calls that
+/// failed, and how long ago the target was last used.
+fn row_numbers(row: &stats::Row, now_ns: u64) -> [String; 6] {
+    [
+        bytes(row.read.bytes),
+        row.read.calls.to_string(),
+        bytes(row.write.bytes),
+        row.write.calls.to_string(),
+        row.errors.to_string(),
+        idle(now_ns.saturating_sub(row.last_ns)),
+    ]
+}
+
+/// One row of the Files or Network table, with its `numbers`; a socket's remote address shows
+/// as `host`, when given.
 fn target_row(
     key: &Key,
     row: &stats::Row,
-    now_ns: u64,
+    numbers: &[String; 6],
     width: usize,
     home: Option<&str>,
     host: Option<&str>,
@@ -529,18 +564,18 @@ fn target_row(
         };
         vec![Span::raw(fitted)]
     };
-    let failed = right(row.errors.to_string());
+    let [read, read_calls, written, written_calls, failed, idle] = numbers.clone().map(right);
     Row::new([
-        right(bytes(row.read.bytes)),
-        right(row.read.calls.to_string()),
-        right(bytes(row.write.bytes)),
-        right(row.write.calls.to_string()),
+        read,
+        read_calls,
+        written,
+        written_calls,
         if row.errors > 0 {
             failed.style(FAILED)
         } else {
             failed
         },
-        right(idle(now_ns.saturating_sub(row.last_ns))),
+        idle,
         Cell::from(Line::from(target)),
     ])
 }
@@ -569,26 +604,36 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
     // some room.
     let narrow = area.width < NARROW;
     let wide = area.width >= WIDE;
+    let home = view.home.as_deref();
+    let names = view.names;
+    let hosts = &mut view.hosts;
+    let clock = &mut view.clock;
+    let fields: Vec<(&IoEvent, [String; 8])> = ring
+        .range(start, end)
+        .map(|event| (event, text::event_fields(event, clock)))
+        .collect();
+    // The numbers take what they need: macOS pids have at most five digits, and Linux ones seven,
+    // descriptors and requested sizes are open ended, and an errno name can be longer than 11.
+    let column =
+        |index: usize, least: u16| column_width(least, fields.iter().map(|(_, cells)| cells[index].as_str()));
     let mut labels = vec!["TIME", "PID", "OP"];
     let mut widths = vec![
         Constraint::Length(12),
-        // macOS pids have at most five digits.
-        Constraint::Length(5),
+        Constraint::Length(column(1, 5)),
         // Only `getdirentries` needs more than 9 columns.
         Constraint::Length(if narrow { 9 } else { 13 }),
     ];
     if !narrow {
         labels.push("FD");
-        widths.push(Constraint::Length(4));
+        widths.push(Constraint::Length(column(3, 4)));
     }
     if wide {
         labels.push("REQUESTED");
-        widths.push(Constraint::Length(10));
+        widths.push(Constraint::Length(column(4, 10)));
     }
     labels.extend(["RESULT", "LATENCY", "TARGET"]);
     widths.extend([
-        // Fits every errno name but EJUSTRETURN, which never reaches user space.
-        Constraint::Length(if narrow { 10 } else { 11 }),
+        Constraint::Length(column(5, if narrow { 10 } else { 11 })),
         Constraint::Length(8),
         Constraint::Fill(1),
     ]);
@@ -604,14 +649,10 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, view: &mut View, shown: &Shown
     }))
     .style(BOLD);
 
-    let home = view.home.as_deref();
-    let names = view.names;
-    let hosts = &mut view.hosts;
-    let clock = &mut view.clock;
-    let body: Vec<Row<'static>> = ring
-        .range(start, end)
-        .map(|event| {
-            let [mut time, pid, op, fd, requested, result, _, target] = text::event_fields(event, clock);
+    let body: Vec<Row<'static>> = fields
+        .into_iter()
+        .map(|(event, cells)| {
+            let [mut time, pid, op, fd, requested, result, _, target] = cells;
             // Milliseconds are enough on screen.
             time.truncate(12);
             let mut cells = vec![Cell::from(time), right(pid), Cell::from(op)];
@@ -725,6 +766,13 @@ fn fixed_width(widths: &[Constraint], spacing: u16) -> usize {
 
 fn width(text: &str) -> u16 {
     u16::try_from(text.width()).unwrap_or(u16::MAX)
+}
+
+/// The width of a column of numbers: `least`, or more where a cell needs it. A right-aligned
+/// cell wider than its column loses its leading digits, and a number with the front cut off
+/// is another number.
+fn column_width<'a>(least: u16, cells: impl IntoIterator<Item = &'a str>) -> u16 {
+    cells.into_iter().map(width).fold(least, u16::max)
 }
 
 fn width_of_line(line: &Line<'_>) -> u16 {
@@ -973,6 +1021,103 @@ mod tests {
     fn press(app: &mut App, session: &Session, code: ratatui::crossterm::event::KeyCode) {
         use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
         app.key(KeyEvent::new(code, KeyModifiers::NONE), session, 0);
+    }
+
+    /// A process with a pid of seven digits, as Linux gives, that writes to a descriptor of six
+    /// digits, asks for the most a `size_t` holds, and fails with long errno names.
+    fn traced_with_big_numbers() -> (Session, App) {
+        const BIG_PID: i32 = 4_194_304;
+        let info = SessionInfo {
+            timebase: Timebase { numer: 1, denom: 1 },
+            anchor: ClockAnchor {
+                ticks: 1_000,
+                unix_nanos: START_NS,
+            },
+            processes: vec![Process {
+                pid: BIG_PID,
+                name: "busy".into(),
+            }],
+            path_records: PathRecords::Whole,
+            system: System::Macos,
+        };
+        let mut src = Fixed::default();
+        let mut session = Session::new(info, Filter::ALL, &mut src);
+        let mut app = App::default();
+        let mut synth = Synth::new(1_000 + 1_000_000_000, 1_000);
+        let mut records = synth.io(1, BIG_PID, 4, 123_456, u64::MAX, 4_096);
+        records.extend(synth.call(Call {
+            errno: libc::ECONNREFUSED,
+            ..Call::new(2, BIG_PID, 29, [123_456, 0, 16_384, 0])
+        }));
+        records.extend(synth.call(Call {
+            errno: libc::EADDRNOTAVAIL,
+            ..Call::new(2, BIG_PID, 133, [123_456, 0, 16, 0])
+        }));
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
+            .unwrap();
+        (session, app)
+    }
+
+    #[test]
+    fn numbers_and_errno_names_are_not_cut_short_in_the_events_tab() {
+        let (session, mut app) = traced_with_big_numbers();
+        press(&mut app, &session, ratatui::crossterm::event::KeyCode::Char('3'));
+        let now = START_NS + 2_500_000_000;
+        for width in [120, 140, 200] {
+            let lines = render(&session, &mut app, width, 10, now);
+            let text = lines.join("\n");
+            for whole in [
+                "4194304",
+                "123456",
+                "18446744073709551615",
+                "ECONNREFUSED",
+                "EADDRNOTAVAIL",
+            ] {
+                assert!(
+                    text.contains(&format!(" {whole} ")) || text.contains(&format!(" {whole}\n")),
+                    "{whole} is whole at {width} columns:\n{text}"
+                );
+            }
+            // The columns keep their headers: each value ends where its header does.
+            let header = find(&lines, "PID");
+            let row = find(&lines, "recvfrom");
+            assert_eq!(
+                header.find("PID").unwrap() + 3,
+                row.find("4194304").unwrap() + 7,
+                "the pid ends under its header at {width} columns:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sum_of_bytes_at_the_top_of_a_u64_is_whole_in_the_files_tab() {
+        let (mut session, mut app) = traced_with_big_numbers();
+        let mut src = Fixed::default();
+        let mut synth = Synth::new(1_000 + 2_000_000_000, 1_000);
+        let records = synth.io(1, 4_194_304, 4, 123_456, 100, u64::MAX);
+        session
+            .handle(&Input::Records(Records::Kdebug(records)), &mut src, &mut app)
+            .unwrap();
+        let lines = render(&session, &mut app, 100, 12, START_NS + 3_500_000_000);
+        let row = find(&lines, "<unknown>");
+        assert!(row.contains(" 16384.0 PiB "), "not cut to 6384.0 PiB: {row}");
+        let header = find(&lines, "CALLS");
+        assert_eq!(
+            header.find("WRITTEN").unwrap() + 7,
+            row.find("16384.0 PiB").unwrap() + 11,
+            "the sum ends under its header:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_columns_grow_only_when_a_value_needs_it() {
+        assert_eq!(column_width(5, ["1", "42", "4242"]), 5);
+        assert_eq!(column_width(5, ["1", "4194304"]), 7);
+        assert_eq!(column_width(4, []), 4);
+        // A sum of bytes at the top of what a u64 counts, in the Files table.
+        assert_eq!(column_width(10, ["0 B", "16384.0 PiB"]), 11);
     }
 
     #[test]
