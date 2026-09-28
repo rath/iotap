@@ -504,6 +504,12 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        // Ctrl and Alt make other keys of the letters, ones that habits of the shell and the
+        // terminal reach for: Ctrl-S, Ctrl-R, Ctrl-P, Ctrl-N, Ctrl-Q. Only Ctrl-C is iotap's.
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if (ctrl || key.modifiers.contains(KeyModifiers::ALT)) && !(ctrl && key.code == KeyCode::Char('c')) {
+            return;
+        }
         let page = self.view.drawn.page.max(1);
         let view = &mut self.view;
         let table = view.tab != Tab::Events;
@@ -1015,6 +1021,37 @@ mod tests {
             status(&app).as_deref(),
             Some("asked the terminal to copy /b/long")
         );
+    }
+
+    #[test]
+    fn keys_held_with_ctrl_or_alt_are_not_the_plain_keys() {
+        let (session, _) = session();
+        let mut app = App::default();
+        app.event(&write("/a", 10, 0)).unwrap();
+        for held in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            // Habits of the shell and the terminal: Ctrl-S, Ctrl-R, Ctrl-P, Ctrl-N and so on.
+            for code in "qspnriy2".chars() {
+                app.key(KeyEvent::new(KeyCode::Char(code), held), &session, 0);
+            }
+            app.key(KeyEvent::new(KeyCode::Tab, held), &session, 0);
+        }
+        assert!(!app.wants_quit());
+        assert!(!app.model.shown(&session, 0).paused);
+        assert_eq!(app.view.sort, SortBy::default());
+        assert_eq!(app.view.tab, Tab::Files);
+        assert!(!app.view.interfaces && !app.view.names);
+        assert_eq!(
+            app.view.tab.rows(app.model.stats()),
+            1,
+            "Ctrl-R did not reset the view"
+        );
+        // Ctrl-C still ends iotap, as it does when the terminal sends no SIGINT.
+        app.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &session,
+            0,
+        );
+        assert!(app.wants_quit());
     }
 
     #[test]
