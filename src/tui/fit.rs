@@ -13,17 +13,23 @@ pub(super) fn start(text: &str, width: usize) -> Cow<'_, str> {
     if width == 0 {
         return Cow::Borrowed("");
     }
-    let mut kept = 0;
+    // The widths of the characters do not add up to the text's, for a variation selector makes
+    // the character before it wider, so what is kept is measured as a whole. Names are free to
+    // be all characters of no width, so how far back to look is bounded.
     let mut start = text.len();
-    for (index, c) in text.char_indices().rev() {
-        let w = c.width().unwrap_or(0);
-        if kept + w > width - 1 {
+    for (index, _) in text
+        .char_indices()
+        .rev()
+        .take(width.saturating_mul(4).saturating_add(64))
+    {
+        if text[index..].width() >= width {
             break;
         }
-        kept += w;
         start = index;
     }
-    Cow::Owned(format!("…{}", &text[start..]))
+    // A mark whose character was cut off has nothing to attach to.
+    let kept = text[start..].trim_start_matches(|c: char| c.width() == Some(0));
+    Cow::Owned(format!("…{kept}"))
 }
 
 /// `path` with the home directory `home` written as `~`.
@@ -55,12 +61,16 @@ pub(super) fn path(path: &str, width: usize) -> Cow<'_, str> {
         if used <= width {
             break;
         }
+        // A letter can be wider alone than in the name, when a variation selector follows it.
         let cut = initial(name);
-        used -= name.width() - cut.width();
+        if cut.width() >= name.width() {
+            continue;
+        }
+        used = used.saturating_sub(name.width() - cut.width());
         *name = cut;
     }
     let shortened = names.join("/");
-    if used <= width {
+    if shortened.width() <= width {
         Cow::Owned(shortened)
     } else {
         Cow::Owned(start(&shortened, width).into_owned())
@@ -86,6 +96,31 @@ mod tests {
         assert_eq!(start("/Users/me/page.html", 10), "…page.html");
         assert_eq!(start("/데이터/파일", 7), "…/파일");
         assert_eq!(start("abc", 0), "");
+    }
+
+    #[test]
+    fn fits_what_a_variation_selector_makes_wider() {
+        // U+FE0F asks for the emoji form of a character, which takes two columns where the
+        // character alone takes one, so widths of the characters do not add up to the text's.
+        let hearts = "/tmp/\u{2764}\u{fe0f}\u{2764}\u{fe0f}\u{2764}\u{fe0f}\u{2764}\u{fe0f}";
+        assert_eq!(hearts.width(), 13);
+        for width in 1..=13 {
+            assert!(start(hearts, width).width() <= width, "start to {width}");
+            assert!(path(hearts, width).width() <= width, "path to {width}");
+        }
+        assert_eq!(start(hearts, 5), "…\u{2764}\u{fe0f}\u{2764}\u{fe0f}");
+    }
+
+    #[test]
+    fn a_name_that_is_wider_alone_than_cut_short_does_not_break_the_sum() {
+        // U+231A is wide, and U+FE0E asks for the text form, which is narrow: the name is one
+        // column wide, and its first letter alone two.
+        let watch = "\u{231a}\u{fe0e}";
+        assert_eq!((watch.width(), initial(watch).width()), (1, 2));
+        let long = format!("/{watch}/some/long/names/here/file.txt");
+        for width in 1..=long.width() {
+            assert!(path(&long, width).width() <= width, "path to {width}");
+        }
     }
 
     #[test]
