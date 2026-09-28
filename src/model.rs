@@ -215,6 +215,9 @@ impl Endpoint {
             Proto::Tcp => self.remote.is_none() || self.local.is_none(),
             // These have no address that a lookup could add.
             Proto::Route | Proto::System | Proto::Netlink | Proto::Packet => false,
+            // These have no port to wait for: a raw socket has none, and neither has an ICMP one
+            // that is raw, while a `ping` socket has its identifier there from when it is bound.
+            Proto::Raw | Proto::Icmp => self.local.is_none() || self.remote.is_none(),
             _ => self.local.is_none_or(|addr| addr.port() == 0) || self.remote.is_none(),
         }
     }
@@ -596,6 +599,24 @@ mod tests {
         ] {
             assert!(Endpoint::unresolved(proto).is_incomplete(), "{proto:?}");
         }
+        // Raw sockets, and ICMP ones that are raw, never have a port: both addresses are all
+        // there is to learn. A ping socket's identifier stands where the port would.
+        let both = |proto, local: &str, remote: &str| Endpoint {
+            local: Some(local.parse().unwrap()),
+            remote: Some(remote.parse().unwrap()),
+            ..Endpoint::unresolved(proto)
+        };
+        assert!(!both(Proto::Raw, "192.0.2.1:0", "192.0.2.2:0").is_incomplete());
+        assert!(!both(Proto::Icmp, "[2001:db8::1]:0", "[2001:db8::2]:0").is_incomplete());
+        assert!(!both(Proto::Icmp, "0.0.0.0:4660", "192.0.2.2:0").is_incomplete());
+        // A bind, which the trace does not see, or a connect can still give one the address it
+        // lacks, as either can a UDP socket, whose port 0 means that it is not bound yet.
+        let unconnected = Endpoint {
+            remote: None,
+            ..both(Proto::Raw, "192.0.2.1:0", "192.0.2.2:0")
+        };
+        assert!(unconnected.is_incomplete());
+        assert!(both(Proto::Udp, "192.0.2.1:0", "192.0.2.2:53").is_incomplete());
     }
 
     #[test]

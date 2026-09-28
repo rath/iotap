@@ -1794,6 +1794,23 @@ mod tests {
     }
 
     #[test]
+    fn a_raw_socket_with_both_addresses_is_described_once() {
+        let mut src = Fake::default();
+        let mut table = FdTable::new(1_000);
+        // Raw sockets have no ports, so a port of 0 does not mean that one is still to come.
+        let raw = Target::Socket(Endpoint {
+            local: Some("192.0.2.1:0".parse().unwrap()),
+            remote: Some("192.0.2.2:0".parse().unwrap()),
+            ..Endpoint::unresolved(Proto::Raw)
+        });
+        src.live.insert((PID, 7), raw.clone());
+        for ts in [1, 2_000, 4_000, 6_000] {
+            assert_eq!(target_of(&mut table, 7, ts, &mut src).0, raw);
+        }
+        assert_eq!(src.describes, 1);
+    }
+
+    #[test]
     fn the_address_a_connect_named_outlasts_its_socket() {
         let mut src = Fake {
             answered_at: 100,
