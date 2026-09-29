@@ -2,21 +2,22 @@
 # requires-python = ">=3.9"
 # dependencies = ["fonttools[woff]==4.63.0"]
 # ///
-"""Cuts the fonts of the Korean and Chinese pages down to the characters those pages use.
+"""Cuts the fonts of the Korean, Chinese and Japanese pages down to the characters those pages use.
 
-The site's Latin faces ship as Latin subsets. Pretendard and Noto Sans SC hold thousands of Hangul
-syllables and Hanzi, megabytes each, of which a page uses a few hundred, so the face of each page
+The site's Latin faces ship as Latin subsets. Pretendard, Noto Sans SC and Pretendard JP hold
+thousands of Hangul syllables, Hanzi and kanji, megabytes each, of which a page uses a few hundred,
+so the face of each page
 holds only the characters its pages show, plus printable ASCII so that its Latin matches. That
 means the fonts must be cut again whenever the text of those pages changes, from the full fonts,
 which the repository does not keep:
 
-    uv run scripts/site/subset_fonts.py \\
-        --pretendard PretendardVariable.ttf --noto-sans-sc NotoSansSC-VF.ttf
+    uv run scripts/site/subset_fonts.py --pretendard PretendardVariable.ttf \\
+        --noto-sans-sc NotoSansSC-VF.ttf --pretendard-jp PretendardJPVariable.ttf
 
-PretendardVariable.ttf is public/variable/PretendardVariable.ttf in the Pretendard release zip
-(https://github.com/orioncactus/pretendard/releases, v1.3.9 when this was written) and
-NotoSansSC-VF.ttf is Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf in the noto-cjk repository
-(https://github.com/notofonts/noto-cjk). Either option alone cuts that font only.
+PretendardVariable.ttf and PretendardJPVariable.ttf are public/variable/*.ttf in the Pretendard and
+PretendardJP release zips (https://github.com/orioncactus/pretendard/releases, v1.3.9 when this
+was written) and NotoSansSC-VF.ttf is Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf in the noto-cjk
+repository (https://github.com/notofonts/noto-cjk). Each option alone cuts that font only.
 
 A character a page gains that its font lacks falls back to a system font, which is easy to miss,
 so this fails when a font cannot supply a character of its pages.
@@ -47,6 +48,10 @@ FACES = {
     "noto_sans_sc": {
         "pages": [DOCS / "zh" / "index.html", DOCS / "assets" / "og-card-zh.html"],
         "out": FONTS / "noto-sans-sc-zh-wght.woff2",
+    },
+    "pretendard_jp": {
+        "pages": [DOCS / "ja" / "index.html", DOCS / "assets" / "og-card-ja.html"],
+        "out": FONTS / "pretendard-jp-ja-wght.woff2",
     },
 }
 
@@ -121,6 +126,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--pretendard", type=Path, help="the full PretendardVariable.ttf")
     parser.add_argument("--noto-sans-sc", type=Path, help="the full NotoSansSC-VF.ttf")
+    parser.add_argument("--pretendard-jp", type=Path, help="the full PretendardJPVariable.ttf")
     args = parser.parse_args()
     sources = {name: getattr(args, name) for name in FACES if getattr(args, name)}
     if not sources:

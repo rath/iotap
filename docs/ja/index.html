@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iotap：プロセスのファイル・ネットワーク I/O をそのまま見る</title>
+  <meta name="description" content="macOS と Linux 向けのコマンドラインツール。プロセスが行うすべての読み書きを、ファイルやアドレス、バイト数、レイテンシとともに表示し、ファイルごと・エンドポイントごとに集計します。">
+  <meta name="robots" content="max-image-preview:large">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1418">
+  <link rel="canonical" href="https://iotap.told.me/ja/">
+  <link rel="alternate" hreflang="en" href="https://iotap.told.me/">
+  <link rel="alternate" hreflang="ko" href="https://iotap.told.me/ko/">
+  <link rel="alternate" hreflang="zh-Hans" href="https://iotap.told.me/zh/">
+  <link rel="alternate" hreflang="ja" href="https://iotap.told.me/ja/">
+  <link rel="alternate" hreflang="x-default" href="https://iotap.told.me/">
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="iotap">
+  <meta property="og:locale" content="ja_JP">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="og:locale:alternate" content="ko_KR">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta property="og:title" content="iotap：プロセスのファイル・ネットワーク I/O をそのまま見る">
+  <meta property="og:description" content="プロセスが行うすべての読み書きを、ファイルやアドレス、バイト数、レイテンシとともに。macOS と Linux 向け。">
+  <meta property="og:url" content="https://iotap.told.me/ja/">
+  <meta property="og:image" content="https://iotap.told.me/assets/og-ja.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="iotap のサイトの見出しと、その下に数行の iotap の出力：sendto が 1 回と recvfrom が 2 回、それぞれのサイズとレイテンシ。">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image:alt" content="iotap のサイトの見出しと、その下に数行の iotap の出力：sendto が 1 回と recvfrom が 2 回、それぞれのサイズとレイテンシ。">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebPage",
+        "@id": "https://iotap.told.me/ja/#webpage",
+        "url": "https://iotap.told.me/ja/",
+        "name": "iotap：プロセスのファイル・ネットワーク I/O をそのまま見る",
+        "inLanguage": "ja",
+        "isPartOf": { "@id": "https://iotap.told.me/#website" },
+        "about": { "@id": "https://iotap.told.me/#software" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://iotap.told.me/#software",
+        "name": "iotap",
+        "url": "https://iotap.told.me/",
+        "description": "macOS と Linux 向けのコマンドラインツール。プロセスが行うすべての読み書きを、ファイルやアドレス、バイト数、レイテンシとともに表示し、ファイルごと・エンドポイントごとに集計します。",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "installUrl": "https://iotap.told.me/ja/#install",
+        "image": "https://iotap.told.me/assets/og-ja.jpg",
+        "license": "https://spdx.org/licenses/MIT.html",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "sameAs": "https://github.com/rath/iotap",
+        "author": { "@type": "Person", "name": "Jang-Ho Hwang", "url": "https://xrath.com" }
+      }
+    ]
+  }
+  </script>
+  <link rel="preload" href="../assets/fonts/pretendard-jp-ja-wght.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/fonts/hubot-sans-latin-wdth.woff2" as="font" type="font/woff2" crossorigin>
+  <script>document.documentElement.classList.add("js")</script>
+  <link rel="stylesheet" href="../assets/site.css">
+  <script src="../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">本文へ移動</a>
+
+  <header class="wrap top">
+    <a class="mark" href="./" aria-label="iotap、ホーム">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <path d="M2 21h28" stroke="#8aa0a8" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <path d="M16 4v17" stroke="#5fd4ea" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <circle cx="16" cy="21" r="4.2" fill="#5fd4ea"/>
+      </svg>
+      iotap
+    </a>
+    <div class="menus">
+      <nav aria-label="セクション">
+        <a class="opt" href="#why">なぜ必要か</a>
+        <a href="#usage">使い方</a>
+        <a href="#output">出力</a>
+        <a class="opt" href="#how">仕組み</a>
+        <a href="#install">インストール</a>
+        <a href="https://github.com/rath/iotap">GitHub</a>
+      </nav>
+      <nav class="lang" aria-label="言語">
+        <a href="../" hreflang="en" lang="en">English</a>
+        <a href="../ko/" hreflang="ko" lang="ko">한국어</a>
+        <a href="../zh/" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+        <a href="./" hreflang="ja" lang="ja" aria-current="page">日本語</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="wrap hero" aria-labelledby="title">
+      <h1 id="title"><span class="phrase">そのプロセス、</span><span class="phrase">ファイルと</span><span class="phrase">ネットワークで</span><span class="phrase">本当は</span><span class="phrase">何を</span><span class="phrase">しているのか。</span></h1>
+      <p class="lede">iotap は macOS と Linux で使えるコマンドラインツールです。プロセス ID か名前を渡すと、そのプロセスの読み書きをひとつ残らず、起きたその場で表示します。どのファイルやリモートアドレスか、何バイト要求して実際に何バイト動いたか、呼び出しにどれだけかかったか、失敗したかどうかまで。止めると、ファイルごと・エンドポイントごとに集計します。</p>
+      <div class="actions">
+        <a class="btn" href="#install">ソースからビルドする</a>
+        <a class="textlink" href="https://github.com/rath/iotap">GitHub で見る</a>
+      </div>
+
+      <figure class="trace" id="trace">
+        <div class="trace-bar">
+          <span class="prompt"><span data-typed="sudo iotap curl">sudo iotap curl</span></span>
+          <button class="ghost replay" id="replay" type="button">もう一度再生</button>
+        </div>
+        <div class="term" role="group" aria-label="sudo iotap curl の出力例" tabindex="0">
+        <div class="ln dm" data-pause="420">iotap: tracing 4242 (curl); press Ctrl-C to stop</div>
+        <div class="ln dm" data-pause="260">TIME                PID  OP               FD   REQUESTED      RESULT     LATENCY  TARGET</div>
+        <div class="ln" data-pause="700" data-call="1">14:13:20.004541    4242  sendto            5         517         517    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="2">14:13:20.104625    4242  recvfrom          5       16384        4096    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="3">14:13:20.104708    4242  recvfrom          5       16384      EAGAIN    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="4">14:13:20.104791    4242  write             4        4096        4096    0.041 ms  /Users/me/page.html</div>
+        <div class="ln" data-pause="520" data-call="5">14:13:20.104875    4242  write             1          20          20    0.041 ms  /dev/ttys004</div>
+        <div class="ln dm" data-pause="0">iotap: 4242 (curl) exited</div>
+        </div>
+      </figure>
+
+      <p class="story-lead">上から順に読めば、これが <code>curl</code> 一回の一部始終です：</p>
+      <ol class="story">
+        <li tabindex="0" data-call="1">93.184.216.34 のポート 443 に 517 バイトのリクエストを送る。</li>
+        <li tabindex="0" data-call="2">16 KiB を要求して、4 KiB を受け取る。</li>
+        <li tabindex="0" data-call="3">もう一度要求するが、まだ何も届いていない：<code>EAGAIN</code>。</li>
+        <li tabindex="0" data-call="4">その 4 KiB を <code>page.html</code> に書く。</li>
+        <li tabindex="0" data-call="5">進捗 20 バイトを端末に書いて、終了。</li>
+      </ol>
+    </section>
+
+    <section class="sec" id="why" aria-labelledby="why-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="why-title">よくあるツールは、それぞれ一部分しか見せてくれない</h2>
+          <p>マシンの何かが忙しそうで、何のせいか知りたい。あるプロセスがディスクを読み書きし続けている、入れたばかりのアプリが頼んでもいないどこかと通信している、ビルドのある工程が遅くて I/O が怪しい、あるいはプログラムが何度も失敗するので、どのファイルや接続でつまずいているのか見たい。そんなときがあります。</p>
+          <p>iotap はその断片をひとつにまとめます。動いたバイト、それを動かしたプロセス、そして行き先のファイルやエンドポイントを。</p>
+        </div>
+        <table class="tools">
+          <caption class="vh">各ツールが見せるものと、見せないもの</caption>
+          <thead>
+            <tr><th scope="col">ツール</th><th scope="col">見せるもの</th><th scope="col">見せないもの</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">lsof, netstat</th><td data-label="見せるもの">いま開いているもの</td><td data-label="見せないもの">そこを通っているもの</td></tr>
+            <tr><th scope="row">アクティビティモニタ, top</th><td data-label="見せるもの">バイト数</td><td data-label="見せないもの">その行き先</td></tr>
+            <tr><th scope="row">パケットキャプチャ</th><td data-label="見せるもの">マシン全体のトラフィック</td><td data-label="見せないもの">どのプロセスのものか</td></tr>
+            <tr><th scope="row">strace, fs_usage</th><td data-label="見せるもの">プロセスの呼び出し一つひとつ</td><td data-label="見せないもの">ファイルごと・エンドポイントごとの集計</td></tr>
+            <tr class="us"><th scope="row">iotap</th><td data-label="見せるもの">指定したプロセスの読み書き一つひとつを、バイト数、レイテンシ、対象とともに。さらにファイルごと・エンドポイントごとの集計</td><td data-label="見せないもの">メモリマップ I/O。Linux では io_uring と libaio も</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" id="usage" aria-labelledby="usage-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="usage-title">何を見るかを選ぶ</h2>
+          <p>対象はプロセス ID か名前です。名前を渡すと、プロセス名、実行ファイル名、最初の引数のいずれかが（大文字小文字を区別せず）一致する実行中のプロセスをすべて対象にし、あとからその名前で起動したプロセスも続けて追跡します。</p>
+          <p><code>-f</code> を付けると、追跡中のプロセスが起動したプロセスも追跡します。開始時にすでに動いていたものも、あとから起動したものも。</p>
+        </div>
+        <div class="cmd">
+          <pre><code>sudo iotap 1234                <span class="c"># プロセスを 1 つ</span>
+sudo iotap Safari              <span class="c"># Safari のプロセスすべて、新しいものも</span>
+sudo iotap -f make             <span class="c"># make と、make が起動するすべてのプロセス</span>
+sudo iotap -i wlan0 firefox    <span class="c"># wlan0 を通るネットワーク I/O だけ</span>
+sudo iotap -q -d 10 Finder     <span class="c"># 10 秒後に集計だけ</span></code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="output" aria-labelledby="output-title">
+      <div class="wrap grid stack">
+        <div class="say">
+          <h2 id="output-title">ひとつのトレース、四つの読み方</h2>
+          <p>イベントストリームは上で見たとおりです。追跡が終わると iotap が集計します。長く動くプロセスなら、ターミナル UI で同じ表をリアルタイムに見られます。JSON Lines にすれば <code>jq</code> に流したりログとして残したりでき、記録しておけば、あとから root なしで、どの形式でも再生できます。</p>
+        </div>
+        <div class="tabs">
+          <div class="tablist" role="tablist" aria-label="トレースの読み方">
+            <button class="tab" role="tab" type="button" id="tab-summary" aria-controls="panel-summary" aria-selected="true">集計</button>
+            <button class="tab" role="tab" type="button" id="tab-tui" aria-controls="panel-tui" aria-selected="false" tabindex="-1">ターミナル UI</button>
+            <button class="tab" role="tab" type="button" id="tab-json" aria-controls="panel-json" aria-selected="false" tabindex="-1">JSON Lines</button>
+            <button class="tab" role="tab" type="button" id="tab-record" aria-controls="panel-record" aria-selected="false" tabindex="-1">記録</button>
+          </div>
+
+          <section class="panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
+            <h3>集計</h3>
+            <p>Ctrl-C を押すか、プロセスが終了すると、iotap がファイルごと・エンドポイントごとに集計します。この例では、ネットワークトラフィックは 192.168.1.20 を持つインターフェース en0 を通っています。</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="集計の例" tabindex="0">
+        <div class="ln dm">iotap summary: 4242 (curl) traced for 0.1 s</div>
+        <div class="ln"> </div>
+        <div class="ln">Files (2 targets)</div>
+        <div class="ln">        READ    CALLS     WRITTEN    CALLS  FAILED  TARGET</div>
+        <div class="ln">         0 B        0     4.0 KiB        1       0  /Users/me/page.html</div>
+        <div class="ln">         0 B        0        20 B        1       0  /dev/ttys004</div>
+        <div class="ln"> </div>
+        <div class="ln">Network (1 target)</div>
+        <div class="ln">    RECEIVED    CALLS        SENT    CALLS  FAILED  TARGET</div>
+        <div class="ln">     4.0 KiB        2       517 B        1       1  tcp 93.184.216.34:443</div>
+        <div class="ln"> </div>
+        <div class="ln">Totals</div>
+        <div class="ln">  files    read 0 B (0 calls), written 4.0 KiB (2 calls)</div>
+        <div class="ln">  network  received 4.0 KiB (2 calls), sent 517 B (1 call)</div>
+        <div class="ln">    en0    received 4.0 KiB (2 calls), sent 517 B (1 call)</div>
+        <div class="ln">  5 calls, 1 failed</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-tui" role="tabpanel" aria-labelledby="tab-tui" data-later>
+            <h3>ターミナル UI</h3>
+            <p><code>--tui</code> は直近 1 秒と累計のスループットを上に表示し、その下にファイル、ネットワークエンドポイント、直近 10,000 件のイベントの三つのタブを並べます。下は、記録したダウンロードを再生したあとの Files タブです。</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="ターミナル UI、Files タブ" tabindex="0">
+        <div class="ln"><span class="rev"> iotap </span> <span class="dm">4242 curl (exited)</span>                                                               0:00:12</div>
+        <div class="ln">                FILE READ  FILE WRITTEN  NET RECEIVED      NET SENT</div>
+        <div class="ln"> per second           0 B       1.2 MiB       1.2 MiB           0 B</div>
+        <div class="ln"> total                0 B      14.1 MiB      14.1 MiB         517 B</div>
+        <div class="ln ban"> End of the recording. Press q for the summary.</div>
+        <div class="ln"><span class="rev"> 1 Files (2) </span>  2 Network (1)   3 Events (7,205)                                     sort: bytes</div>
+        <div class="ln">       READ   CALLS    WRITTEN   CALLS FAILED IDLE TARGET</div>
+        <div class="ln">        0 B       0   14.1 MiB    3601      0  &lt;1s /Users/me/big.iso</div>
+        <div class="ln">        0 B       0       20 B       1      0  &lt;1s /dev/ttys004</div>
+        <div class="ln"> </div>
+        <div class="ln dm"> 4242 (curl) exited    q quit  s sort  p pause  i interfaces  r reset  ↑↓ select  enter details</div>
+              </div>
+            </div>
+            <ul class="keys">
+              <li><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> タブを切り替え</li>
+              <li><kbd>s</kbd> バイト数、読み、書き、呼び出し回数、新しい順で並べ替え</li>
+              <li><kbd>Enter</kbd> 選択した行の詳細</li>
+              <li><kbd>p</kbd> 表示だけ止める。追跡は続く</li>
+              <li><kbd>y</kbd> 選択したパスやアドレスをコピー</li>
+              <li><kbd>i</kbd> ネットワークインターフェースごとのトラフィック</li>
+              <li><kbd>q</kbd> 終了して集計を表示</li>
+            </ul>
+          </section>
+
+          <section class="panel" id="panel-json" role="tabpanel" aria-labelledby="tab-json" data-later>
+            <h3>JSON Lines</h3>
+            <p><code>--json</code> はイベントを 1 行ずつ書き出します。時刻は Unix エポックからのナノ秒、対象は小さなオブジェクトです。<code>jq</code> にパイプするか、そのままログとして残せます。下は 1 件のイベントを複数行に展開したものです。</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="JSON のイベント 1 件" tabindex="0">
+        <div class="ln">{</div>
+        <div class="ln">  <span class="k">"type"</span>: <span class="s">"event"</span>,</div>
+        <div class="ln">  <span class="k">"time_ns"</span>: <span class="n">1790259200104708333</span>,</div>
+        <div class="ln">  <span class="k">"pid"</span>: <span class="n">4242</span>,</div>
+        <div class="ln">  <span class="k">"tid"</span>: <span class="n">2</span>,</div>
+        <div class="ln">  <span class="k">"op"</span>: <span class="s">"recvfrom"</span>,</div>
+        <div class="ln">  <span class="k">"dir"</span>: <span class="s">"read"</span>,</div>
+        <div class="ln">  <span class="k">"syscall"</span>: <span class="s">"recvfrom"</span>,</div>
+        <div class="ln">  <span class="k">"fd"</span>: <span class="n">5</span>,</div>
+        <div class="ln">  <span class="k">"requested"</span>: <span class="n">16384</span>,</div>
+        <div class="ln">  <span class="k">"bytes"</span>: <span class="z">null</span>,</div>
+        <div class="ln">  <span class="k">"messages"</span>: <span class="z">null</span>,</div>
+        <div class="ln">  <span class="k">"errno"</span>: <span class="n">35</span>,</div>
+        <div class="ln">  <span class="k">"error"</span>: <span class="s">"EAGAIN"</span>,</div>
+        <div class="ln">  <span class="k">"latency_ns"</span>: <span class="n">41666</span>,</div>
+        <div class="ln">  <span class="k">"target"</span>: {</div>
+        <div class="ln">    <span class="k">"kind"</span>: <span class="s">"socket"</span>,</div>
+        <div class="ln">    <span class="k">"proto"</span>: <span class="s">"tcp"</span>,</div>
+        <div class="ln">    <span class="k">"local"</span>: <span class="s">"192.168.1.20:61000"</span>,</div>
+        <div class="ln">    <span class="k">"remote"</span>: <span class="s">"93.184.216.34:443"</span></div>
+        <div class="ln">  },</div>
+        <div class="ln">  <span class="k">"interface"</span>: <span class="s">"en0"</span>,</div>
+        <div class="ln">  <span class="k">"resolved"</span>: <span class="s">"traced"</span></div>
+        <div class="ln">}</div>
+              </div>
+            </div>
+            <div class="cmd has-copy" style="margin-top: 1rem">
+              <pre id="json-cmd"><code>sudo iotap --json curl | jq -c 'select(.type == "event")'</code></pre>
+              <button class="ghost" type="button" data-copy="json-cmd" data-copied="コピーしました">コピー</button>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" data-later>
+            <h3>記録</h3>
+            <p><code>--record FILE</code> でトレースをファイルに保存し、<code>--replay FILE</code> でそのファイルを同じ処理に通します。そのため、どの出力モードで再生しても、ライブ実行のときと同じ出力になります。記録にはパスとアドレスだけが含まれ、転送されたデータは含まれません。再生は記録した OS 上で行います。</p>
+            <div class="cmd has-copy">
+              <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
+iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう一度、root なしで</span></code></pre>
+              <button class="ghost" type="button" data-copy="record-cmd" data-copied="コピーしました">コピー</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="how" aria-labelledby="how-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="how-title">カーネルがすでに記録しているものを読むだけ</h2>
+          <p>プログラムが行う read、write、open、connect はすべてシステムコールで、カーネルは頼めばそれを起きた順にひとつずつ記録してくれます。どのプロセスからの呼び出しか、引数と結果は何かまで。iotap はその記録を読みます。</p>
+          <p>デバッガを付けることも、コードを注入することも、見ているプログラムに手を触れることもありません。</p>
+        </div>
+        <dl class="facts">
+          <div>
+            <dt>macOS では</dt>
+            <dd>その記録がカーネルのトレース機能 kdebug です。Apple の <code>fs_usage</code> が読んでいるのと同じもので、カーネルに組み込まれているので、何もインストールする必要はありません。</dd>
+          </div>
+          <div>
+            <dt>Linux では</dt>
+            <dd>iotap 自前の小さな eBPF プログラムをカーネルのシステムコールトレースポイントに取り付けます。カーネルは実行前にそれを検証し、iotap が終了すると取り外します。</dd>
+          </div>
+          <div>
+            <dt>sudo が必要な理由</dt>
+            <dd>どちらもマシン上のすべてのプロセスを覗ける窓なので、カーネルは root にしか開きません。root でなければ、iotap はそう告げて、何にも触れる前に止まります。記録の再生に root は要りません。</dd>
+          </div>
+          <div>
+            <dt>メタデータだけ</dt>
+            <dd>iotap が記録するのは、呼び出し、ディスクリプタ、バイト数、レイテンシ、パス、ソケットのエンドポイントだけです。転送されるデータそのものは読みも保存もしません。あるプロセスが SSH 鍵を読んでも、そのファイルを何バイト読んだかが見えるだけで、中身は決して見えません。</dd>
+          </div>
+          <div>
+            <dt>指定したものだけ</dt>
+            <dd>カーネルに記録を頼むのは、指定したプロセスと、<code>-f</code> を付けたならそれが起動したプロセスの呼び出しだけです。ほかのプロセスには触れません。</dd>
+          </div>
+          <div>
+            <dt>何も残さない</dt>
+            <dd>macOS では kdebug を持てるプログラムは同時にひとつだけなので、iotap はエラー、シグナル、パニックを含むすべての終了経路で必ず解放します。Linux では iotap が終了した瞬間にカーネルが eBPF プログラムを外します。ターミナル UI も同じように、どんな場合でも端末を元に戻します。</dd>
+          </div>
+          <div>
+            <dt>バイナリひとつ、デーモンなし</dt>
+            <dd>iotap は実行している間だけ動き、自分から接続を張ることはありません。オプションのホスト名解決（<code>--resolve</code>）もシステムのリゾルバを通します。</dd>
+          </div>
+          <div>
+            <dt>見えないもの</dt>
+            <dd>メモリマップされたファイル I/O と、ページキャッシュの書き戻しのようにカーネルがプロセスの代わりに行う I/O。Linux では io_uring や libaio 経由の I/O も。残りは README の <a href="https://github.com/rath/iotap#limitations">Limitations</a> にあります。</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="sec" id="install" aria-labelledby="install-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="install-title">ビルドして、sudo で実行する</h2>
+          <p>iotap は Cargo でソースからビルドします。macOS と、64 ビット Arm または x86-64 の Linux 5.8 以降で動きます。Linux カーネルには BPF とシステムコールトレースポイントが必要ですが、ディストリビューションのカーネルなら揃っています。</p>
+          <p>ビルドには Rust 1.98.1 が必要で、<code>rust-toolchain.toml</code> がそのバージョンを選びます。macOS では Xcode Command Line Tools、Linux では clang、make、pkg-config、C コンパイラ、それに libelf と zlib の開発パッケージも必要です。</p>
+        </div>
+        <div>
+          <p class="note">Debian や Ubuntu では、まずビルドに必要なパッケージを入れます：</p>
+          <div class="cmd has-copy">
+            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+  libelf-dev zlib1g-dev</code></pre>
+            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="コピーしました">コピー</button>
+          </div>
+          <p class="note">続いてビルドし、プロセスを追跡してみます：</p>
+          <div class="cmd has-copy">
+            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+cd iotap
+cargo build --release
+sudo ./target/release/iotap curl</code></pre>
+            <button class="ghost" type="button" data-copy="build-cmd" data-copied="コピーしました">コピー</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <p>iotap は MIT ライセンスのオープンソースです。作者は <a rel="author" href="https://xrath.com">Jang-Ho Hwang</a>。</p>
+      <nav aria-label="プロジェクトのリンク">
+        <a href="https://github.com/rath/iotap">GitHub</a>
+        <a href="https://github.com/rath/iotap#readme">README</a>
+        <a href="https://github.com/rath/iotap/issues">Issues</a>
+      </nav>
+    </div>
+  </footer>
+
+  <p class="vh" id="status" role="status" aria-live="polite" data-copied="クリップボードにコピーしました"></p>
+</body>
+</html>
