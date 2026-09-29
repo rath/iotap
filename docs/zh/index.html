@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>iotap：查看任意进程的文件与网络 I/O</title>
-  <meta name="description" content="面向 macOS 和 Linux 的命令行工具，报告进程的每一次读写：文件或地址、字节数、延迟，并按文件和端点汇总。">
+  <meta name="description" content="面向 macOS 和 Linux 的命令行工具，实时报告进程的每一次读写：文件或地址、字节数、延迟，并按文件和端点汇总。">
   <meta name="robots" content="max-image-preview:large">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0b1418">
@@ -24,7 +24,7 @@
   <meta property="og:locale:alternate" content="ko_KR">
   <meta property="og:locale:alternate" content="ja_JP">
   <meta property="og:title" content="iotap：查看任意进程的文件与网络 I/O">
-  <meta property="og:description" content="进程的每一次读写，连同文件或地址、字节数和延迟。支持 macOS 和 Linux。">
+  <meta property="og:description" content="进程的每一次读写，以及文件或地址、字节数和延迟。支持 macOS 和 Linux。">
   <meta property="og:url" content="https://iotap.told.me/zh/">
   <meta property="og:image" content="https://iotap.told.me/assets/og-zh.jpg">
   <meta property="og:image:type" content="image/jpeg">
@@ -51,7 +51,7 @@
         "@id": "https://iotap.told.me/#software",
         "name": "iotap",
         "url": "https://iotap.told.me/",
-        "description": "面向 macOS 和 Linux 的命令行工具，报告进程的每一次读写：文件或地址、字节数、延迟，并按文件和端点汇总。",
+        "description": "面向 macOS 和 Linux 的命令行工具，实时报告进程的每一次读写：文件或地址、字节数、延迟，并按文件和端点汇总。",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS, Linux",
         "installUrl": "https://iotap.told.me/zh/#install",
@@ -104,7 +104,7 @@
   <main id="main">
     <section class="wrap hero" aria-labelledby="title">
       <h1 id="title">看清一个进程到底在对你的文件和网络做什么。</h1>
-      <p class="lede">iotap 是一个面向 macOS 和 Linux 的命令行工具。告诉它一个进程 ID 或名称，它就会把该进程的每一次读写在发生的当下报告出来：是哪个文件或远程地址，请求了多少字节、实际传了多少，这次调用花了多久，有没有失败。停下来时，它会按文件和端点汇总整个跟踪。</p>
+      <p class="lede">iotap 是一个面向 macOS 和 Linux 的命令行工具。给它一个进程 ID 或名称，它就会实时报告该进程的每一次读写：是哪个文件或远程地址，请求了多少字节、实际传了多少，这次调用花了多久，是否失败。当你停止跟踪时，它会按文件和端点汇总整段跟踪记录。</p>
       <div class="actions">
         <a class="btn" href="#install">从源码构建</a>
         <a class="textlink" href="https://github.com/rath/iotap">在 GitHub 上查看</a>
@@ -127,10 +127,10 @@
         </div>
       </figure>
 
-      <p class="story-lead">从上到下读，这就是一次 <code>curl</code> 的完整一生：</p>
+      <p class="story-lead">从上往下读，这就是一次 <code>curl</code> 的完整一生：</p>
       <ol class="story">
         <li tabindex="0" data-call="1">向 93.184.216.34 的 443 端口发送一个 517 字节的请求。</li>
-        <li tabindex="0" data-call="2">请求读回 16 KiB，实际收到 4 KiB。</li>
+        <li tabindex="0" data-call="2">请求读取 16 KiB，实际收到 4 KiB。</li>
         <li tabindex="0" data-call="3">再次请求，却发现还没有数据到达：<code>EAGAIN</code>。</li>
         <li tabindex="0" data-call="4">把这 4 KiB 写入 <code>page.html</code>。</li>
         <li tabindex="0" data-call="5">向终端写入 20 字节的进度信息，然后退出。</li>
@@ -140,21 +140,21 @@
     <section class="sec" id="why" aria-labelledby="why-title">
       <div class="wrap grid">
         <div class="say">
-          <h2 id="why-title">常用工具各自只能看到一角</h2>
-          <p>机器上有东西在忙，你想知道到底在忙什么：某个进程正在狂啃磁盘；刚装的应用在跟一个你从没听说过的地方通信；构建慢得可疑，你怀疑是 I/O；或者某个程序总是失败，你想看看它究竟栽在哪个文件或哪条连接上。</p>
-          <p>iotap 把这些碎片拼在一起：字节数、它们属于哪个进程，以及它们去往哪个文件或端点。</p>
+          <h2 id="why-title">常用工具各自只能看到一部分</h2>
+          <p>机器上有东西在忙，你想知道到底在忙什么：某个进程正在狂啃磁盘；刚装的应用在跟一个你根本没让它连的地方通信；构建慢得可疑，你怀疑是 I/O；或者某个程序老是出错，你想看看它究竟栽在哪个文件或哪条连接上。</p>
+          <p>iotap 把这些碎片拼在一起：字节数、这些字节属于哪个进程，以及去往哪个文件或端点。</p>
         </div>
         <table class="tools">
-          <caption class="vh">各工具能看到什么、漏掉什么</caption>
+          <caption class="vh">各工具能看到什么、看不到什么</caption>
           <thead>
-            <tr><th scope="col">工具</th><th scope="col">能看到</th><th scope="col">漏掉</th></tr>
+            <tr><th scope="col">工具</th><th scope="col">能看到</th><th scope="col">看不到</th></tr>
           </thead>
           <tbody>
-            <tr><th scope="row">lsof, netstat</th><td data-label="能看到">现在打开了什么</td><td data-label="漏掉">经过它们的是什么</td></tr>
-            <tr><th scope="row">活动监视器, top</th><td data-label="能看到">多少字节</td><td data-label="漏掉">去了哪里</td></tr>
-            <tr><th scope="row">抓包</th><td data-label="能看到">整台机器的流量</td><td data-label="漏掉">属于哪个进程</td></tr>
-            <tr><th scope="row">strace, fs_usage</th><td data-label="能看到">进程的每一次调用</td><td data-label="漏掉">按文件和端点的汇总</td></tr>
-            <tr class="us"><th scope="row">iotap</th><td data-label="能看到">你指定的进程的每一次读写，连同字节数、延迟和目标，并按文件和端点汇总</td><td data-label="漏掉">内存映射 I/O，以及 Linux 上的 io_uring 和 libaio</td></tr>
+            <tr><th scope="row">lsof, netstat</th><td data-label="能看到">现在打开了什么</td><td data-label="看不到">流经它们的字节数</td></tr>
+            <tr><th scope="row">活动监视器, top</th><td data-label="能看到">多少字节</td><td data-label="看不到">去了哪里</td></tr>
+            <tr><th scope="row">抓包</th><td data-label="能看到">整台机器的流量</td><td data-label="看不到">属于哪个进程</td></tr>
+            <tr><th scope="row">strace, fs_usage</th><td data-label="能看到">进程的每一次调用</td><td data-label="看不到">按文件和端点的汇总</td></tr>
+            <tr class="us"><th scope="row">iotap</th><td data-label="能看到">你所指定进程的每一次读写，以及字节数、延迟和目标，并按文件和端点汇总</td><td data-label="看不到">内存映射 I/O，以及 Linux 上的 io_uring 和 libaio</td></tr>
           </tbody>
         </table>
       </div>
@@ -164,8 +164,8 @@
       <div class="wrap grid">
         <div class="say">
           <h2 id="usage-title">选择要监视的对象</h2>
-          <p>目标可以是进程 ID，也可以是名称。给名称时，凡是进程名、可执行文件名或第一个参数与之相同（不区分大小写）的运行中进程都会被选中，之后以该名称启动的进程也会被一并跟踪。</p>
-          <p>加上 <code>-f</code>，被跟踪进程启动的每一个进程也会被跟踪，不管是开始时就已在运行的，还是之后才启动的。</p>
+          <p>目标可以是进程 ID，也可以是名称。给名称时，凡是进程名、可执行文件名或第一个参数与之相同（不区分大小写）的正在运行的进程，都在跟踪之列；之后以该名称启动的进程也会一并跟踪。</p>
+          <p>加上 <code>-f</code>，被跟踪进程启动的每一个进程也一并跟踪，无论是开始时就已在运行的，还是之后才启动的。</p>
         </div>
         <div class="cmd">
           <pre><code>sudo iotap 1234                <span class="c"># 单个进程</span>
@@ -181,7 +181,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒后只输出汇总</span>
       <div class="wrap grid stack">
         <div class="say">
           <h2 id="output-title">一次跟踪，四种读法</h2>
-          <p>事件流就是你在上面看到的那样。跟踪结束时，iotap 会做汇总。对于运行较久的进程，终端界面会实时显示同样的表格；JSON Lines 可以喂给 <code>jq</code> 或存成日志；录制下来的跟踪则可以稍后以上述任一形式回放，而且不需要 root。</p>
+          <p>事件流就是你在上面看到的那样。跟踪结束时，iotap 会给出汇总。对于运行较久的进程，终端界面会实时显示同样的表格；JSON Lines 可以交给 <code>jq</code> 处理，或存成日志；录制下来的跟踪记录则可以稍后以上述任一形式回放，而且不需要 root。</p>
         </div>
         <div class="tabs">
           <div class="tablist" role="tablist" aria-label="读取跟踪的方式">
@@ -193,7 +193,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒后只输出汇总</span>
 
           <section class="panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
             <h3>汇总</h3>
-            <p>按下 Ctrl-C 或进程退出时，iotap 会按文件和端点汇总整个跟踪。这里的网络流量走的是 en0，也就是持有 192.168.1.20 的那个接口。</p>
+            <p>按下 Ctrl-C 或进程退出时，iotap 会按文件和端点汇总整段跟踪记录。这里的网络流量走的是 en0，也就是带有 192.168.1.20 地址的那个接口。</p>
             <div class="trace">
               <div class="term" role="group" aria-label="汇总示例" tabindex="0">
         <div class="ln dm">iotap summary: 4242 (curl) traced for 0.1 s</div>
@@ -218,7 +218,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒后只输出汇总</span>
 
           <section class="panel" id="panel-tui" role="tabpanel" aria-labelledby="tab-tui" data-later>
             <h3>终端界面</h3>
-            <p><code>--tui</code> 显示最近一整秒和总计的吞吐量，下面是三个标签页：文件、网络端点，以及最新的 10,000 条事件。下面是回放一段下载录制后的 Files 标签页。</p>
+            <p><code>--tui</code> 显示最近一个完整秒和总计的吞吐量，下面是三个标签页：文件、网络端点，以及最新的 10,000 条事件。图为回放一段下载录制后的 Files 标签页。</p>
             <div class="trace">
               <div class="term" role="group" aria-label="终端界面，Files 标签页" tabindex="0">
         <div class="ln"><span class="rev"> iotap </span> <span class="dm">4242 curl (exited)</span>                                                               0:00:12</div>
@@ -236,18 +236,18 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒后只输出汇总</span>
             </div>
             <ul class="keys">
               <li><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> 切换标签页</li>
-              <li><kbd>s</kbd> 按字节、读、写、调用次数或最近活动排序</li>
-              <li><kbd>Enter</kbd> 所选行的详情</li>
-              <li><kbd>p</kbd> 暂停画面，跟踪继续</li>
-              <li><kbd>y</kbd> 复制所选路径或地址</li>
-              <li><kbd>i</kbd> 各网络接口的流量</li>
+              <li><kbd>s</kbd> 按字节、读、写、调用次数或最近使用排序</li>
+              <li><kbd>Enter</kbd> 查看所选行的详情</li>
+              <li><kbd>p</kbd> 暂停画面，跟踪仍在继续</li>
+              <li><kbd>y</kbd> 复制所选行的路径或地址</li>
+              <li><kbd>i</kbd> 查看各网络接口的流量</li>
               <li><kbd>q</kbd> 退出并打印汇总</li>
             </ul>
           </section>
 
           <section class="panel" id="panel-json" role="tabpanel" aria-labelledby="tab-json" data-later>
             <h3>JSON Lines</h3>
-            <p><code>--json</code> 把每条事件写成一行，时间是自 Unix 纪元起的纳秒数，目标是一个小对象。可以用管道交给 <code>jq</code>，或存成日志。下面是一条事件，展开成了多行。</p>
+            <p><code>--json</code> 把每个事件写成一行，时间是 Unix 纪元以来的纳秒数，目标是一个小对象。可以管道传给 <code>jq</code>，或存成日志。下面是一条事件，展开成了多行。</p>
             <div class="trace">
               <div class="term" role="group" aria-label="一条 JSON 事件" tabindex="0">
         <div class="ln">{</div>
@@ -284,7 +284,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒后只输出汇总</span>
 
           <section class="panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" data-later>
             <h3>录制</h3>
-            <p><code>--record FILE</code> 保存跟踪，<code>--replay FILE</code> 把它送回同一套处理流程，因此无论用哪种输出模式回放，得到的都和实时运行时一模一样。录制文件只含路径和地址，不含传输的数据，并且要在录制它的那个操作系统上回放。</p>
+            <p><code>--record FILE</code> 保存跟踪记录，<code>--replay FILE</code> 让它经过同一套处理流程，因此无论用哪种输出模式回放，得到的都和实时运行时一模一样。录制文件只含路径和地址，不含传输的数据，并且只能在录制它的那个操作系统上回放。</p>
             <div class="cmd has-copy">
               <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
 iotap --replay t.iotaprec              <span class="c"># 同样的输出，无需 root</span></code></pre>
@@ -299,21 +299,21 @@ iotap --replay t.iotaprec              <span class="c"># 同样的输出，无�
       <div class="wrap grid">
         <div class="say">
           <h2 id="how-title">它只是读取内核本来就在记录的东西</h2>
-          <p>程序的每一次 read、write、open 和 connect 都是系统调用，而内核可以按要求把每一次调用随发生记录下来，连同发起调用的进程、参数和结果。iotap 读的就是这份记录。</p>
-          <p>它不附加调试器，不注入代码，也不改动被监视程序的任何东西。</p>
+          <p>程序的每一次 read、write、open 和 connect 都是系统调用，而内核可以按要求在每一次调用发生时把它记录下来，并附上发起调用的进程、参数和结果。iotap 读的就是这份记录。</p>
+          <p>它不挂调试器，不注入代码，也不改动所监视的程序。</p>
         </div>
         <dl class="facts">
           <div>
             <dt>在 macOS 上</dt>
-            <dd>这份记录来自内核跟踪设施 kdebug，也就是 Apple 的 <code>fs_usage</code> 所读取的同一来源。它内置于内核，无需安装任何东西。</dd>
+            <dd>这份记录来自内核跟踪机制 kdebug，与 Apple 的 <code>fs_usage</code> 读取的是同一来源。它内置于内核，无需安装任何组件。</dd>
           </div>
           <div>
             <dt>在 Linux 上</dt>
-            <dd>iotap 把一个自带的小型 eBPF 程序挂到内核的系统调用跟踪点上。内核在运行前会校验它，并在 iotap 退出时将其卸载。</dd>
+            <dd>iotap 把自己的一个小型 eBPF 程序挂到内核的系统调用跟踪点上。内核在运行前会校验它，并在 iotap 退出时将其卸载。</dd>
           </div>
           <div>
             <dt>为什么需要 sudo</dt>
-            <dd>两者都是通往机器上每一个进程的窗口，所以内核只把它们交给 root。没有 root 时，iotap 会直说，并在碰任何东西之前就停下。回放录制不需要 root。</dd>
+            <dd>两者都能看到机器上每一个进程的活动，所以内核只把它们交给 root。没有 root 时，iotap 会直接说明，并在触碰任何东西之前就停下。回放录制不需要 root。</dd>
           </div>
           <div>
             <dt>只记元数据</dt>
@@ -321,11 +321,11 @@ iotap --replay t.iotaprec              <span class="c"># 同样的输出，无�
           </div>
           <div>
             <dt>只看你指定的</dt>
-            <dd>内核只被要求记录你指定的进程的调用，加上 <code>-f</code> 时还包括它们启动的进程。其他的一概不记。</dd>
+            <dd>iotap 只要求内核记录你所指定进程的调用，加上 <code>-f</code> 时还包括它们启动的进程。其他的一概不记。</dd>
           </div>
           <div>
             <dt>不留痕迹</dt>
-            <dd>在 macOS 上，同一时间只能有一个程序拥有 kdebug，所以 iotap 会在每一条退出路径上释放它，包括出错、收到信号和 panic。在 Linux 上，iotap 一退出，内核就会丢弃 eBPF 程序。终端界面也以同样的方式恢复终端。</dd>
+            <dd>在 macOS 上，同一时间只能有一个程序占用 kdebug，所以无论以哪种方式退出，iotap 都会释放它，包括出错、收到信号和 panic。在 Linux 上，iotap 一退出，内核就会卸载 eBPF 程序。终端界面退出时同样会恢复终端。</dd>
           </div>
           <div>
             <dt>一个二进制，没有守护进程</dt>
@@ -333,7 +333,7 @@ iotap --replay t.iotaprec              <span class="c"># 同样的输出，无�
           </div>
           <div>
             <dt>它看不到的</dt>
-            <dd>内存映射的文件 I/O，以及内核代进程完成的 I/O，例如页缓存回写。在 Linux 上还有通过 io_uring 或 libaio 提交的 I/O。其余的列在 README 的 <a href="https://github.com/rath/iotap#limitations">Limitations</a> 一节。</dd>
+            <dd>内存映射的文件 I/O，以及内核替进程执行的 I/O，例如页缓存回写。在 Linux 上还有通过 io_uring 或 libaio 提交的 I/O。其余的列在 README 的 <a href="https://github.com/rath/iotap#limitations">Limitations</a> 一节。</dd>
           </div>
         </dl>
       </div>
@@ -343,7 +343,7 @@ iotap --replay t.iotaprec              <span class="c"># 同样的输出，无�
       <div class="wrap grid">
         <div class="say">
           <h2 id="install-title">构建它，然后用 sudo 运行</h2>
-          <p>iotap 用 Cargo 从源码构建。它可以在 macOS 上运行，也可以在 64 位 Arm 或 x86-64 上的 Linux 5.8 及更高版本上运行，前提是内核启用了 BPF 和系统调用跟踪点，发行版内核都满足。</p>
+          <p>iotap 用 Cargo 从源码构建。它可以在 macOS 上运行，也可以在 64 位 Arm 或 x86-64 上的 Linux 5.8 及更高版本上运行，前提是内核支持 BPF 和系统调用跟踪点（发行版内核都满足）。</p>
           <p>构建需要 Rust 1.98.1，由 <code>rust-toolchain.toml</code> 指定。macOS 上还需要 Xcode Command Line Tools；Linux 上还需要 clang、make、pkg-config、一个 C 编译器，以及 libelf 和 zlib 的开发文件。</p>
         </div>
         <div>
@@ -368,7 +368,7 @@ sudo ./target/release/iotap curl</code></pre>
 
   <footer class="foot">
     <div class="wrap">
-      <p>iotap 以 MIT 许可证开源，由 <a rel="author" href="https://xrath.com">Jang-Ho Hwang</a> 制作。</p>
+      <p>iotap 以 MIT 许可证开源，由 <a rel="author" href="https://xrath.com">Jang-Ho Hwang</a> 开发。</p>
       <nav aria-label="项目链接">
         <a href="https://github.com/rath/iotap">GitHub</a>
         <a href="https://github.com/rath/iotap#readme">README</a>
