@@ -30,9 +30,9 @@
   <meta property="og:image:type" content="image/jpeg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="iotap 웹사이트의 표제와 그 아래 iotap 출력 몇 줄: sendto 한 번과 recvfrom 두 번의 호출, 각각의 크기와 지연 시간.">
+  <meta property="og:image:alt" content="iotap 사이트의 제목과 그 아래에 몇 줄의 iotap 출력: sendto 한 번과 recvfrom 두 번의 호출, 각각의 크기와 지연 시간.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:image:alt" content="iotap 웹사이트의 표제와 그 아래 iotap 출력 몇 줄: sendto 한 번과 recvfrom 두 번의 호출, 각각의 크기와 지연 시간.">
+  <meta name="twitter:image:alt" content="iotap 사이트의 제목과 그 아래에 몇 줄의 iotap 출력: sendto 한 번과 recvfrom 두 번의 호출, 각각의 크기와 지연 시간.">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -127,13 +127,13 @@
         </div>
       </figure>
 
-      <p class="story-lead">위에서 아래로 읽으면 <code>curl</code> 한 번의 시작과 끝이 그대로 보입니다:</p>
+      <p class="story-lead">위에서 아래로 읽으면 <code>curl</code> 한 번의 처음부터 끝까지가 그대로 보입니다:</p>
       <ol class="story">
         <li tabindex="0" data-call="1">93.184.216.34의 443 포트로 517바이트짜리 요청을 보냅니다.</li>
         <li tabindex="0" data-call="2">16 KiB를 요청하고 4 KiB를 받습니다.</li>
         <li tabindex="0" data-call="3">다시 요청하지만 아직 도착한 게 없습니다: <code>EAGAIN</code>.</li>
         <li tabindex="0" data-call="4">그 4 KiB를 <code>page.html</code>에 씁니다.</li>
-        <li tabindex="0" data-call="5">진행 상황 20바이트를 터미널에 쓰고 종료합니다.</li>
+        <li tabindex="0" data-call="5">진행 표시 20바이트를 터미널에 쓰고 종료합니다.</li>
       </ol>
     </section>
 
@@ -142,19 +142,19 @@
         <div class="say">
           <h2 id="why-title">익숙한 도구들은 저마다 한 조각씩만 보여줍니다</h2>
           <p>컴퓨터가 뭔가로 바쁜데, 뭐 때문인지 알고 싶을 때가 있습니다. 어떤 프로세스가 디스크를 긁어대거나, 방금 설치한 앱이 시킨 적 없는 어딘가와 통신하거나, 빌드가 느린데 아무래도 I/O 탓 같거나, 프로그램이 자꾸 죽는데 어느 파일이나 연결에서 넘어지는지 보고 싶을 때요.</p>
-          <p>iotap은 그 조각을 한데 모읍니다. 오간 바이트, 그 바이트의 주인인 프로세스, 그리고 목적지였던 파일이나 엔드포인트까지.</p>
+          <p>iotap은 그 조각을 한데 모읍니다. 오간 바이트, 그 바이트가 속한 프로세스, 그리고 목적지였던 파일이나 엔드포인트까지.</p>
         </div>
         <table class="tools">
-          <caption class="vh">각 도구가 보여주는 것과 빠뜨리는 것</caption>
+          <caption class="vh">각 도구가 보여주는 것과 놓치는 것</caption>
           <thead>
-            <tr><th scope="col">도구</th><th scope="col">보여주는 것</th><th scope="col">빠뜨리는 것</th></tr>
+            <tr><th scope="col">도구</th><th scope="col">보여주는 것</th><th scope="col">놓치는 것</th></tr>
           </thead>
           <tbody>
-            <tr><th scope="row">lsof, netstat</th><td data-label="보여주는 것">지금 무엇이 열려 있는지</td><td data-label="빠뜨리는 것">그 안으로 무엇이 오가는지</td></tr>
-            <tr><th scope="row">활성 상태 보기, top</th><td data-label="보여주는 것">몇 바이트인지</td><td data-label="빠뜨리는 것">어디로 갔는지</td></tr>
-            <tr><th scope="row">패킷 캡처</th><td data-label="보여주는 것">컴퓨터 전체의 트래픽</td><td data-label="빠뜨리는 것">어느 프로세스의 것인지</td></tr>
-            <tr><th scope="row">strace, fs_usage</th><td data-label="보여주는 것">프로세스가 하는 호출 하나하나</td><td data-label="빠뜨리는 것">파일별, 엔드포인트별 합계</td></tr>
-            <tr class="us"><th scope="row">iotap</th><td data-label="보여주는 것">지정한 프로세스의 읽기와 쓰기 하나하나, 바이트 수와 지연 시간과 대상까지, 그리고 파일별·엔드포인트별 합계</td><td data-label="빠뜨리는 것">메모리 맵 I/O, 그리고 Linux에서는 io_uring과 libaio</td></tr>
+            <tr><th scope="row">lsof, netstat</th><td data-label="보여주는 것">지금 무엇이 열려 있는지</td><td data-label="놓치는 것">그 안으로 무엇이 오가는지</td></tr>
+            <tr><th scope="row">활성 상태 보기, top</th><td data-label="보여주는 것">몇 바이트인지</td><td data-label="놓치는 것">어디로 갔는지</td></tr>
+            <tr><th scope="row">패킷 캡처</th><td data-label="보여주는 것">컴퓨터 전체의 트래픽</td><td data-label="놓치는 것">어느 프로세스의 것인지</td></tr>
+            <tr><th scope="row">strace, fs_usage</th><td data-label="보여주는 것">프로세스가 하는 호출 하나하나</td><td data-label="놓치는 것">파일별, 엔드포인트별 합계</td></tr>
+            <tr class="us"><th scope="row">iotap</th><td data-label="보여주는 것">지정한 프로세스의 읽기와 쓰기 하나하나, 바이트 수, 지연 시간, 대상까지, 그리고 파일별·엔드포인트별 합계</td><td data-label="놓치는 것">메모리 맵 I/O, 그리고 Linux에서는 io_uring과 libaio</td></tr>
           </tbody>
         </table>
       </div>
@@ -164,7 +164,7 @@
       <div class="wrap grid">
         <div class="say">
           <h2 id="usage-title">무엇을 지켜볼지 고르세요</h2>
-          <p>대상은 프로세스 ID나 이름입니다. 이름을 주면 프로세스 이름, 실행 파일 이름, 첫 번째 인자 중 하나가 대소문자 상관없이 같은 프로세스를 모두 잡고, 나중에 그 이름으로 뜨는 프로세스도 이어서 추적합니다.</p>
+          <p>대상은 프로세스 ID나 이름입니다. 이름을 주면 프로세스 이름, 실행 파일 이름, 첫 번째 인자 중 하나가 대소문자를 가리지 않고 같은 프로세스를 모두 잡고, 나중에 그 이름으로 뜨는 프로세스도 이어서 추적합니다.</p>
           <p><code>-f</code>를 붙이면 추적 중인 프로세스가 띄우는 프로세스까지 따라갑니다. 시작할 때 이미 떠 있던 것도, 나중에 뜨는 것도요.</p>
         </div>
         <div class="cmd">
@@ -284,7 +284,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10초 뒤 요약만</span></cod
 
           <section class="panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" data-later>
             <h3>레코딩</h3>
-            <p><code>--record FILE</code>은 추적을 파일로 저장하고, <code>--replay FILE</code>은 그 파일을 같은 처리 과정에 다시 태웁니다. 그래서 어떤 출력 모드로 재생하든 실시간으로 실행했을 때와 똑같은 출력이 나옵니다. 레코딩에는 경로와 주소만 담기고 전송된 데이터는 담기지 않으며, 레코딩한 운영체제에서 재생합니다.</p>
+            <p><code>--record FILE</code>은 추적을 파일로 저장하고, <code>--replay FILE</code>은 그 파일을 같은 처리 과정에 다시 넣습니다. 그래서 어떤 출력 모드로 재생하든 실시간으로 실행했을 때와 똑같은 출력이 나옵니다. 레코딩에는 경로와 주소만 담기고 전송된 데이터는 담기지 않으며, 레코딩한 운영체제에서만 재생됩니다.</p>
             <div class="cmd has-copy">
               <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
 iotap --replay t.iotaprec              <span class="c"># 같은 출력을 다시, root 없이</span></code></pre>
@@ -325,7 +325,7 @@ iotap --replay t.iotaprec              <span class="c"># 같은 출력을 다시
           </div>
           <div>
             <dt>아무것도 남기지 않음</dt>
-            <dd>macOS에서 kdebug는 한 번에 한 프로그램만 쓸 수 있어서, iotap은 오류, 시그널, 패닉을 포함한 모든 종료 경로에서 반드시 반납합니다. Linux에서는 iotap이 끝나는 순간 커널이 eBPF 프로그램을 떼어냅니다. 터미널 UI도 마찬가지로 어떤 경우든 터미널을 원래대로 돌려놓습니다.</dd>
+            <dd>macOS에서 kdebug는 한 번에 한 프로그램만 쓸 수 있어서, iotap은 오류, 시그널, 패닉을 포함해 어떻게 끝나든 반드시 반납합니다. Linux에서는 iotap이 끝나는 순간 커널이 eBPF 프로그램을 떼어냅니다. 터미널 UI도 마찬가지로 어떤 경우든 터미널을 원래대로 돌려놓습니다.</dd>
           </div>
           <div>
             <dt>바이너리 하나, 데몬 없음</dt>
