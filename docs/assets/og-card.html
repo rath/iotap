@@ -1,0 +1,54 @@
+<!doctype html>
+<!--
+  The source of assets/og.jpg, the card that link previews show. To render it, from the root of the
+  repository, with a Chrome of its own profile, which leaves one that is already running alone. Chrome
+  does not quit after the screenshot, so the last command of the first block stops the one it started:
+
+    rm -f og.png
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+      --user-data-dir="$(mktemp -d)" --hide-scrollbars --force-device-scale-factor=1 \
+      --window-size=1200,630 --screenshot=og.png "file://$PWD/docs/assets/og-card.html" &
+    until [ -s og.png ]; do sleep 1; done; sleep 1; kill $!
+    sips -s format jpeg -s formatOptions 85 og.png --out docs/assets/og.jpg
+
+  Scrapers cache a card under its URL, so save a changed card under a new name and point the og:image
+  of index.html and the image of its JSON-LD at it.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex">
+  <title>iotap link preview card</title>
+  <style>
+    @font-face { font-family: "Hubot Sans"; src: url(fonts/hubot-sans-latin-wdth.woff2) format("woff2"); font-weight: 200 900; font-stretch: 75% 125%; }
+    @font-face { font-family: "JetBrains Mono"; src: url(fonts/jetbrains-mono-latin-wght.woff2) format("woff2"); font-weight: 100 800; }
+    html, body { margin: 0; background: #0b1418; }
+    .card, .trace { font-feature-settings: "liga" 0, "calt" 0; }
+    .card { position: relative; width: 1200px; height: 630px; overflow: hidden; background: #0b1418; color: #dbe7ea; font-variant-ligatures: none; }
+    .mark { position: absolute; left: 64px; top: 52px; display: flex; align-items: center; gap: 14px; font: 800 38px/1 "Hubot Sans"; font-stretch: 80%; }
+    .mark svg { width: 40px; height: 40px; }
+    h1 { position: absolute; left: 64px; top: 128px; margin: 0; width: 1000px; font: 800 88px/0.97 "Hubot Sans"; font-stretch: 76%; letter-spacing: -.02em; }
+    .trace { position: absolute; left: 64px; right: 64px; bottom: 52px; padding: 18px 22px; background: #111d22; border: 1px solid #1f3038; border-radius: 6px; font: 400 13.6px/1.62 "JetBrains Mono"; }
+    .l { white-space: pre; }
+    .h { color: #8aa0a8; }
+    .url { position: absolute; right: 64px; top: 64px; color: #8aa0a8; font: 500 22px/1 "JetBrains Mono"; }
+    .card, .card * { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="mark">
+      <svg viewBox="0 0 32 32"><path d="M2 21h28" stroke="#8aa0a8" stroke-width="2.5" stroke-linecap="round" fill="none"/><path d="M16 4v17" stroke="#5fd4ea" stroke-width="2.5" stroke-linecap="round" fill="none"/><circle cx="16" cy="21" r="4.2" fill="#5fd4ea"/></svg>
+      iotap
+    </div>
+    <div class="url">iotap.told.me</div>
+    <h1>See what a process is really doing with your files and your network.</h1>
+    <div class="trace">
+      <div class="l h">TIME                PID  OP               FD   REQUESTED      RESULT     LATENCY  TARGET</div>
+      <div class="l">14:13:20.004541    4242  sendto            5         517         517    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+      <div class="l">14:13:20.104625    4242  recvfrom          5       16384        4096    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+      <div class="l">14:13:20.104708    4242  recvfrom          5       16384      EAGAIN    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+    </div>
+  </div>
+</body>
+</html>
