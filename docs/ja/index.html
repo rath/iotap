@@ -30,9 +30,9 @@
   <meta property="og:image:type" content="image/jpeg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="iotap のサイトの見出しと、その下に数行の iotap の出力：sendto が 1 回と recvfrom が 2 回、それぞれのサイズとレイテンシ。">
+  <meta property="og:image:alt" content="iotap の見出しと、その下に並ぶ数行の iotap 出力：sendto が 1 回と recvfrom が 2 回、それぞれのサイズとレイテンシ。">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:image:alt" content="iotap のサイトの見出しと、その下に数行の iotap の出力：sendto が 1 回と recvfrom が 2 回、それぞれのサイズとレイテンシ。">
+  <meta name="twitter:image:alt" content="iotap の見出しと、その下に並ぶ数行の iotap 出力：sendto が 1 回と recvfrom が 2 回、それぞれのサイズとレイテンシ。">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -104,7 +104,7 @@
   <main id="main">
     <section class="wrap hero" aria-labelledby="title">
       <h1 id="title"><span class="phrase">そのプロセス、</span><span class="phrase">ファイルと</span><span class="phrase">ネットワークで</span><span class="phrase">本当は</span><span class="phrase">何を</span><span class="phrase">しているのか。</span></h1>
-      <p class="lede">iotap は macOS と Linux で使えるコマンドラインツールです。プロセス ID か名前を渡すと、そのプロセスの読み書きをひとつ残らず、起きたその場で表示します。どのファイルやリモートアドレスか、何バイト要求して実際に何バイト動いたか、呼び出しにどれだけかかったか、失敗したかどうかまで。止めると、ファイルごと・エンドポイントごとに集計します。</p>
+      <p class="lede">iotap は macOS と Linux で使えるコマンドラインツールです。プロセス ID か名前を渡すと、そのプロセスの読み書きをひとつ残らず、リアルタイムで表示します。どのファイルやリモートアドレスか、何バイトを要求して実際に何バイト行き来したか、呼び出しにどれだけかかったか、失敗したかどうかまで。止めると、ファイルごと・エンドポイントごとに集計します。</p>
       <div class="actions">
         <a class="btn" href="#install">ソースからビルドする</a>
         <a class="textlink" href="https://github.com/rath/iotap">GitHub で見る</a>
@@ -141,8 +141,8 @@
       <div class="wrap grid">
         <div class="say">
           <h2 id="why-title">よくあるツールは、それぞれ一部分しか見せてくれない</h2>
-          <p>マシンの何かが忙しそうで、何のせいか知りたい。あるプロセスがディスクを読み書きし続けている、入れたばかりのアプリが頼んでもいないどこかと通信している、ビルドのある工程が遅くて I/O が怪しい、あるいはプログラムが何度も失敗するので、どのファイルや接続でつまずいているのか見たい。そんなときがあります。</p>
-          <p>iotap はその断片をひとつにまとめます。動いたバイト、それを動かしたプロセス、そして行き先のファイルやエンドポイントを。</p>
+          <p>マシンの何かが忙しそうで、何のせいか知りたい。あるプロセスがディスクを読み書きし続けている、入れたばかりのアプリが頼んでもいないどこかと通信している、ビルドのある工程が遅くて I/O が怪しい、あるいはプログラムが何度もエラーになるので、どのファイルや接続でつまずいているのか見たい。そんなときがあります。</p>
+          <p>iotap はその断片をひとつにまとめます。行き来したバイト、そのバイトの持ち主であるプロセス、そして行き先のファイルやエンドポイントを。</p>
         </div>
         <table class="tools">
           <caption class="vh">各ツールが見せるものと、見せないもの</caption>
@@ -154,7 +154,7 @@
             <tr><th scope="row">アクティビティモニタ, top</th><td data-label="見せるもの">バイト数</td><td data-label="見せないもの">その行き先</td></tr>
             <tr><th scope="row">パケットキャプチャ</th><td data-label="見せるもの">マシン全体のトラフィック</td><td data-label="見せないもの">どのプロセスのものか</td></tr>
             <tr><th scope="row">strace, fs_usage</th><td data-label="見せるもの">プロセスの呼び出し一つひとつ</td><td data-label="見せないもの">ファイルごと・エンドポイントごとの集計</td></tr>
-            <tr class="us"><th scope="row">iotap</th><td data-label="見せるもの">指定したプロセスの読み書き一つひとつを、バイト数、レイテンシ、対象とともに。さらにファイルごと・エンドポイントごとの集計</td><td data-label="見せないもの">メモリマップ I/O。Linux では io_uring と libaio も</td></tr>
+            <tr class="us"><th scope="row">iotap</th><td data-label="見せるもの">指定したプロセスの読み書き一つひとつを、バイト数、レイテンシ、対象とともに。さらにファイルごと・エンドポイントごとの集計</td><td data-label="見せないもの">メモリマップド I/O。Linux では io_uring と libaio も</td></tr>
           </tbody>
         </table>
       </div>
@@ -193,7 +193,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒後に集計だけ</span>
 
           <section class="panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
             <h3>集計</h3>
-            <p>Ctrl-C を押すか、プロセスが終了すると、iotap がファイルごと・エンドポイントごとに集計します。この例では、ネットワークトラフィックは 192.168.1.20 を持つインターフェース en0 を通っています。</p>
+            <p>Ctrl-C を押すか、プロセスが終了すると、iotap がファイルごと・エンドポイントごとに集計します。この例では、ネットワークトラフィックは 192.168.1.20 というアドレスを持つインターフェース en0 を通っています。</p>
             <div class="trace">
               <div class="term" role="group" aria-label="集計の例" tabindex="0">
         <div class="ln dm">iotap summary: 4242 (curl) traced for 0.1 s</div>
@@ -247,7 +247,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒後に集計だけ</span>
 
           <section class="panel" id="panel-json" role="tabpanel" aria-labelledby="tab-json" data-later>
             <h3>JSON Lines</h3>
-            <p><code>--json</code> はイベントを 1 行ずつ書き出します。時刻は Unix エポックからのナノ秒、対象は小さなオブジェクトです。<code>jq</code> にパイプするか、そのままログとして残せます。下は 1 件のイベントを複数行に展開したものです。</p>
+            <p><code>--json</code> はイベントを 1 行ずつ書き出します。時刻は Unix エポック基準のナノ秒、対象は小さなオブジェクトです。<code>jq</code> にパイプするか、そのままログとして残せます。下は 1 件のイベントを複数行に展開したものです。</p>
             <div class="trace">
               <div class="term" role="group" aria-label="JSON のイベント 1 件" tabindex="0">
         <div class="ln">{</div>
@@ -284,7 +284,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># 10 秒後に集計だけ</span>
 
           <section class="panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" data-later>
             <h3>記録</h3>
-            <p><code>--record FILE</code> でトレースをファイルに保存し、<code>--replay FILE</code> でそのファイルを同じ処理に通します。そのため、どの出力モードで再生しても、ライブ実行のときと同じ出力になります。記録にはパスとアドレスだけが含まれ、転送されたデータは含まれません。再生は記録した OS 上で行います。</p>
+            <p><code>--record FILE</code> でトレースをファイルに保存し、<code>--replay FILE</code> でそのファイルを同じ処理に通します。そのため、どの出力モードで再生しても、ライブ実行のときと同じ出力になります。記録にはパスとアドレスだけが含まれ、転送されたデータは含まれません。再生できるのは、記録したときと同じ OS だけです。</p>
             <div class="cmd has-copy">
               <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
 iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう一度、root なしで</span></code></pre>
@@ -299,8 +299,8 @@ iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう�
       <div class="wrap grid">
         <div class="say">
           <h2 id="how-title">カーネルがすでに記録しているものを読むだけ</h2>
-          <p>プログラムが行う read、write、open、connect はすべてシステムコールで、カーネルは頼めばそれを起きた順にひとつずつ記録してくれます。どのプロセスからの呼び出しか、引数と結果は何かまで。iotap はその記録を読みます。</p>
-          <p>デバッガを付けることも、コードを注入することも、見ているプログラムに手を触れることもありません。</p>
+          <p>プログラムが行う read、write、open、connect はすべてシステムコールで、カーネルは頼めば、呼び出しが起きたその都度ひとつずつ記録してくれます。どのプロセスからの呼び出しか、引数と結果がどうだったかまで。iotap はその記録を読みます。</p>
+          <p>デバッガを付けることも、コードを注入することも、見ているプログラムに手を加えることもありません。</p>
         </div>
         <dl class="facts">
           <div>
@@ -309,11 +309,11 @@ iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう�
           </div>
           <div>
             <dt>Linux では</dt>
-            <dd>iotap 自前の小さな eBPF プログラムをカーネルのシステムコールトレースポイントに取り付けます。カーネルは実行前にそれを検証し、iotap が終了すると取り外します。</dd>
+            <dd>iotap 自身の小さな eBPF プログラムをカーネルのシステムコールトレースポイントに取り付けます。カーネルは実行前にそれを検証し、iotap が終了すると取り外します。</dd>
           </div>
           <div>
             <dt>sudo が必要な理由</dt>
-            <dd>どちらもマシン上のすべてのプロセスを覗ける窓なので、カーネルは root にしか開きません。root でなければ、iotap はそう告げて、何にも触れる前に止まります。記録の再生に root は要りません。</dd>
+            <dd>どちらもマシン上のすべてのプロセスを覗ける手段なので、カーネルがそれを許すのは root だけです。root でなければ、iotap はそう告げて、何も触らないうちに止まります。記録の再生に root は要りません。</dd>
           </div>
           <div>
             <dt>メタデータだけ</dt>
@@ -325,7 +325,7 @@ iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう�
           </div>
           <div>
             <dt>何も残さない</dt>
-            <dd>macOS では kdebug を持てるプログラムは同時にひとつだけなので、iotap はエラー、シグナル、パニックを含むすべての終了経路で必ず解放します。Linux では iotap が終了した瞬間にカーネルが eBPF プログラムを外します。ターミナル UI も同じように、どんな場合でも端末を元に戻します。</dd>
+            <dd>macOS では kdebug を使えるプログラムは同時にひとつだけなので、iotap はエラー、シグナル、パニックを含め、終わり方にかかわらず必ず解放します。Linux では iotap が終了した瞬間にカーネルが eBPF プログラムを外します。ターミナル UI も同じように、どんな場合でも端末を元に戻します。</dd>
           </div>
           <div>
             <dt>バイナリひとつ、デーモンなし</dt>
@@ -333,7 +333,7 @@ iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう�
           </div>
           <div>
             <dt>見えないもの</dt>
-            <dd>メモリマップされたファイル I/O と、ページキャッシュの書き戻しのようにカーネルがプロセスの代わりに行う I/O。Linux では io_uring や libaio 経由の I/O も。残りは README の <a href="https://github.com/rath/iotap#limitations">Limitations</a> にあります。</dd>
+            <dd>メモリマップドファイル I/O と、ページキャッシュの書き戻しのようにカーネルがプロセスの代わりに行う I/O。Linux では io_uring や libaio 経由の I/O も同様です。残りは README の <a href="https://github.com/rath/iotap#limitations">Limitations</a> にあります。</dd>
           </div>
         </dl>
       </div>
