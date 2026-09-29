@@ -142,4 +142,20 @@
       if (status) status.textContent = "";
     });
   }
+
+  // The language list is a <details>, which opens and closes on its own, the keyboard included.
+  // What it does not do is close when the reader clicks somewhere else, or presses Escape, and a
+  // menu that stays open behind a click is in the way. Nothing here is needed to switch languages.
+  const lang = document.querySelector("details.lang");
+  if (lang) {
+    const summary = lang.querySelector("summary");
+    document.addEventListener("pointerdown", (event) => {
+      if (lang.open && !lang.contains(event.target)) lang.open = false;
+    });
+    lang.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !lang.open) return;
+      lang.open = false;
+      summary.focus();
+    });
+  }
 })();

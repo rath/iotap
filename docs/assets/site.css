@@ -242,16 +242,97 @@ td code {
   color: var(--ink);
 }
 
-/* The languages, set apart from the sections by a rule; the page's own is marked. */
+/* The languages, set apart from the sections by a rule. The one in hand is named on the button and
+   the rest wait behind it; cyan marks it, as cyan marks what is selected everywhere here. */
 .top .lang {
-  gap: 0.25rem 1rem;
+  position: relative;
   padding-left: 1.75rem;
   border-left: 1px solid var(--rule);
   font-size: 0.875rem;
 }
 
-.top .lang a[aria-current] {
+.top .lang > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--dim);
+  cursor: pointer;
+  list-style: none;
+}
+
+.top .lang > summary::-webkit-details-marker {
+  display: none;
+}
+
+.top .lang > summary:hover {
   color: var(--ink);
+  background: var(--bench);
+}
+
+.top .lang[open] > summary {
+  color: var(--ink);
+  background: var(--bench);
+  border-color: var(--rule);
+}
+
+.top .lang .globe {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
+
+.top .lang .caret {
+  width: 0.55rem;
+  height: 0.4rem;
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.top .lang[open] .caret {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .top .lang .caret {
+    transition: none;
+  }
+}
+
+.top .lang-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  gap: 1px;
+  min-width: 8.5rem;
+  padding: 0.25rem;
+  font-size: 0.875rem;
+  background: var(--bench);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 45%);
+}
+
+.top .lang-menu a {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  color: var(--soft);
+  text-decoration: none;
+}
+
+.top .lang-menu a:hover {
+  background: var(--bench-hi);
+  color: var(--ink);
+}
+
+.top .lang-menu a[aria-current] {
+  color: var(--tap);
 }
 
 @media (max-width: 34rem) {
@@ -260,6 +341,10 @@ td code {
   }
 
   .top .lang {
+    /* The sections take a row of their own at this width, so the languages keep to the right of
+       theirs: the menu is anchored to the button's right edge, and a button at the left of the
+       row would hang the menu off the page. */
+    margin-left: auto;
     padding-left: 0;
     border-left: 0;
   }
