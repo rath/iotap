@@ -4,13 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>iotap: see the file and network I/O of any process</title>
-  <meta name="description" content="A command-line tool for macOS and Linux that reports every read and write a process makes: the file or address, the bytes, the latency. Summed up per file and per endpoint.">
+  <meta name="description" content="A command-line tool for macOS and Linux that reports every read and write a process makes: file or address, bytes, latency. Summed up per file and per endpoint.">
+  <meta name="robots" content="max-image-preview:large">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0b1418">
   <link rel="canonical" href="https://iotap.told.me/">
+  <link rel="icon" href="favicon.ico" sizes="48x48">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="iotap">
+  <meta property="og:locale" content="en_US">
   <meta property="og:title" content="iotap: see the file and network I/O of any process">
   <meta property="og:description" content="Every read and write a process makes, with the file or address, the bytes and the latency. For macOS and Linux.">
   <meta property="og:url" content="https://iotap.told.me/">
@@ -20,6 +24,37 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="The headline of the iotap website above a few lines of iotap output: a sendto and two recvfrom calls with their sizes and latencies.">
   <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image:alt" content="The headline of the iotap website above a few lines of iotap output: a sendto and two recvfrom calls with their sizes and latencies.">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "https://iotap.told.me/#website",
+        "url": "https://iotap.told.me/",
+        "name": "iotap",
+        "inLanguage": "en"
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://iotap.told.me/#software",
+        "name": "iotap",
+        "url": "https://iotap.told.me/",
+        "description": "A command-line tool for macOS and Linux that reports every read and write a process makes: file or address, bytes, latency. Summed up per file and per endpoint.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "installUrl": "https://iotap.told.me/#install",
+        "image": "https://iotap.told.me/assets/og.jpg",
+        "license": "https://spdx.org/licenses/MIT.html",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "sameAs": "https://github.com/rath/iotap",
+        "author": { "@type": "Person", "name": "Jang-Ho Hwang", "url": "https://xrath.com" }
+      }
+    ]
+  }
+  </script>
   <link rel="preload" href="assets/fonts/hubot-sans-latin-wdth.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="assets/fonts/mona-sans-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
   <script>document.documentElement.classList.add("js")</script>
