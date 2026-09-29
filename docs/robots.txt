@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://iotap.told.me/sitemap.xml
