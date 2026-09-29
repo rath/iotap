@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iotap：查看任意进程的文件与网络 I/O</title>
+  <meta name="description" content="面向 macOS 和 Linux 的命令行工具，报告进程的每一次读写：文件或地址、字节数、延迟，并按文件和端点汇总。">
+  <meta name="robots" content="max-image-preview:large">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1418">
+  <link rel="canonical" href="https://iotap.told.me/zh/">
+  <link rel="alternate" hreflang="en" href="https://iotap.told.me/">
+  <link rel="alternate" hreflang="ko" href="https://iotap.told.me/ko/">
+  <link rel="alternate" hreflang="zh-Hans" href="https://iotap.told.me/zh/">
+  <link rel="alternate" hreflang="x-default" href="https://iotap.told.me/">
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="iotap">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="og:locale:alternate" content="ko_KR">
+  <meta property="og:title" content="iotap：查看任意进程的文件与网络 I/O">
+  <meta property="og:description" content="进程的每一次读写，连同文件或地址、字节数和延迟。支持 macOS 和 Linux。">
+  <meta property="og:url" content="https://iotap.told.me/zh/">
+  <meta property="og:image" content="https://iotap.told.me/assets/og-zh.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="iotap 网站的标题，下方是几行 iotap 输出：一次 sendto 和两次 recvfrom 调用，以及各自的大小和延迟。">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image:alt" content="iotap 网站的标题，下方是几行 iotap 输出：一次 sendto 和两次 recvfrom 调用，以及各自的大小和延迟。">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebPage",
+        "@id": "https://iotap.told.me/zh/#webpage",
+        "url": "https://iotap.told.me/zh/",
+        "name": "iotap：查看任意进程的文件与网络 I/O",
+        "inLanguage": "zh-Hans",
+        "isPartOf": { "@id": "https://iotap.told.me/#website" },
+        "about": { "@id": "https://iotap.told.me/#software" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://iotap.told.me/#software",
+        "name": "iotap",
+        "url": "https://iotap.told.me/",
+        "description": "面向 macOS 和 Linux 的命令行工具，报告进程的每一次读写：文件或地址、字节数、延迟，并按文件和端点汇总。",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "installUrl": "https://iotap.told.me/zh/#install",
+        "image": "https://iotap.told.me/assets/og-zh.jpg",
+        "license": "https://spdx.org/licenses/MIT.html",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "sameAs": "https://github.com/rath/iotap",
+        "author": { "@type": "Person", "name": "Jang-Ho Hwang", "url": "https://xrath.com" }
+      }
+    ]
+  }
+  </script>
+  <link rel="preload" href="../assets/fonts/noto-sans-sc-zh-wght.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/fonts/hubot-sans-latin-wdth.woff2" as="font" type="font/woff2" crossorigin>
+  <script>document.documentElement.classList.add("js")</script>
+  <link rel="stylesheet" href="../assets/site.css">
+  <script src="../assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+
+  <header class="wrap top">
+    <a class="mark" href="./" aria-label="iotap，首页">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <path d="M2 21h28" stroke="#8aa0a8" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <path d="M16 4v17" stroke="#5fd4ea" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <circle cx="16" cy="21" r="4.2" fill="#5fd4ea"/>
+      </svg>
+      iotap
+    </a>
+    <div class="menus">
+      <nav aria-label="章节">
+        <a class="opt" href="#why">为什么</a>
+        <a href="#usage">用法</a>
+        <a href="#output">输出</a>
+        <a class="opt" href="#how">工作原理</a>
+        <a href="#install">安装</a>
+        <a href="https://github.com/rath/iotap">GitHub</a>
+      </nav>
+      <nav class="lang" aria-label="语言">
+        <a href="../" hreflang="en" lang="en">English</a>
+        <a href="../ko/" hreflang="ko" lang="ko">한국어</a>
+        <a href="./" hreflang="zh-Hans" lang="zh-Hans" aria-current="page">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="wrap hero" aria-labelledby="title">
+      <h1 id="title">看清一个进程到底在对你的文件和网络做什么。</h1>
+      <p class="lede">iotap 是一个面向 macOS 和 Linux 的命令行工具。给它一个进程 ID 或名称，它就会在每一次读写发生时报告出来：是哪个文件或远程地址，请求了多少字节、实际传输了多少，这次调用花了多久，以及是否失败。停止时，它会按文件和端点汇总整个跟踪。</p>
+      <div class="actions">
+        <a class="btn" href="#install">从源码构建</a>
+        <a class="textlink" href="https://github.com/rath/iotap">在 GitHub 上查看</a>
+      </div>
+
+      <figure class="trace" id="trace">
+        <div class="trace-bar">
+          <span class="prompt"><span data-typed="sudo iotap curl">sudo iotap curl</span></span>
+          <button class="ghost replay" id="replay" type="button">重放</button>
+        </div>
+        <div class="term" role="group" aria-label="sudo iotap curl 的输出示例" tabindex="0">
+        <div class="ln dm" data-pause="420">iotap: tracing 4242 (curl); press Ctrl-C to stop</div>
+        <div class="ln dm" data-pause="260">TIME                PID  OP               FD   REQUESTED      RESULT     LATENCY  TARGET</div>
+        <div class="ln" data-pause="700" data-call="1">14:13:20.004541    4242  sendto            5         517         517    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="2">14:13:20.104625    4242  recvfrom          5       16384        4096    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="3">14:13:20.104708    4242  recvfrom          5       16384      EAGAIN    0.041 ms  tcp 192.168.1.20:61000 -&gt; 93.184.216.34:443</div>
+        <div class="ln" data-pause="130" data-call="4">14:13:20.104791    4242  write             4        4096        4096    0.041 ms  /Users/me/page.html</div>
+        <div class="ln" data-pause="520" data-call="5">14:13:20.104875    4242  write             1          20          20    0.041 ms  /dev/ttys004</div>
+        <div class="ln dm" data-pause="0">iotap: 4242 (curl) exited</div>
+        </div>
+      </figure>
+
+      <p class="story-lead">从上到下读，这就是一次 <code>curl</code> 的完整一生：</p>
+      <ol class="story">
+        <li tabindex="0" data-call="1">向 93.184.216.34 的 443 端口发送一个 517 字节的请求。</li>
+        <li tabindex="0" data-call="2">请求读回 16 KiB，实际收到 4 KiB。</li>
+        <li tabindex="0" data-call="3">再次请求，却发现还没有数据到达：<code>EAGAIN</code>。</li>
+        <li tabindex="0" data-call="4">把这 4 KiB 写入 <code>page.html</code>。</li>
+        <li tabindex="0" data-call="5">向终端写入 20 字节的进度信息，然后退出。</li>
+      </ol>
+    </section>
+
+    <section class="sec" id="why" aria-labelledby="why-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="why-title">常用工具各自只能看到一角</h2>
+          <p>机器上有什么东西在忙，你想知道它在忙什么。某个进程正在狂啃磁盘，刚装的应用在跟你从未授意的某处通信，某个构建步骤很慢而你怀疑是 I/O，或者某个程序总是失败，你想看看它到底栽在哪个文件或哪条连接上。</p>
+          <p>iotap 把这些碎片拼在一起：字节数、它们属于哪个进程，以及它们去往哪个文件或端点。</p>
+        </div>
+        <table class="tools">
+          <caption class="vh">各工具能看到什么、漏掉什么</caption>
+          <thead>
+            <tr><th scope="col">工具</th><th scope="col">能看到</th><th scope="col">漏掉</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">lsof, netstat</th><td data-label="能看到">现在打开了什么</td><td data-label="漏掉">经过它的是什么</td></tr>
+            <tr><th scope="row">活动监视器, top</th><td data-label="能看到">多少字节</td><td data-label="漏掉">去了哪里</td></tr>
+            <tr><th scope="row">抓包</th><td data-label="能看到">整台机器的流量</td><td data-label="漏掉">属于哪个进程</td></tr>
+            <tr><th scope="row">strace, fs_usage</th><td data-label="能看到">进程的每一次调用</td><td data-label="漏掉">按文件和端点的汇总</td></tr>
+            <tr class="us"><th scope="row">iotap</th><td data-label="能看到">你指定的进程的每一次读写，连同字节数、延迟和目标，并按文件和端点汇总</td><td data-label="漏掉">内存映射 I/O，以及 Linux 上的 io_uring 和 libaio</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" id="usage" aria-labelledby="usage-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="usage-title">选择要监视的对象</h2>
+          <p>目标是一个进程 ID 或名称。名称会匹配所有正在运行、且进程名、可执行文件或第一个参数与之相同（不区分大小写）的进程；之后以该名称启动的进程，iotap 也会一并跟踪。</p>
+          <p>加上 <code>-f</code>，它还会跟踪被跟踪进程启动的每一个进程，无论是开始时已在运行的，还是之后启动的。</p>
+        </div>
+        <div class="cmd">
+          <pre><code>sudo iotap 1234                <span class="c"># 单个进程</span>
+sudo iotap Safari              <span class="c"># 所有 Safari 进程，包括新启动的</span>
+sudo iotap -f make             <span class="c"># make 及其启动的每个进程</span>
+sudo iotap -i wlan0 firefox    <span class="c"># 只看经过 wlan0 的网络 I/O</span>
+sudo iotap -q -d 10 Finder     <span class="c"># 10 秒后只输出汇总</span></code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="output" aria-labelledby="output-title">
+      <div class="wrap grid stack">
+        <div class="say">
+          <h2 id="output-title">一次跟踪，四种读法</h2>
+          <p>事件流就是你在上面看到的那样。跟踪结束时，iotap 会做汇总。对于运行较久的进程，终端界面会实时显示同样的表格；JSON Lines 可以喂给 <code>jq</code> 或存成日志；录制下来的跟踪则可以稍后以上述任一形式回放，而且不需要 root。</p>
+        </div>
+        <div class="tabs">
+          <div class="tablist" role="tablist" aria-label="读取跟踪的方式">
+            <button class="tab" role="tab" type="button" id="tab-summary" aria-controls="panel-summary" aria-selected="true">汇总</button>
+            <button class="tab" role="tab" type="button" id="tab-tui" aria-controls="panel-tui" aria-selected="false" tabindex="-1">终端界面</button>
+            <button class="tab" role="tab" type="button" id="tab-json" aria-controls="panel-json" aria-selected="false" tabindex="-1">JSON Lines</button>
+            <button class="tab" role="tab" type="button" id="tab-record" aria-controls="panel-record" aria-selected="false" tabindex="-1">录制</button>
+          </div>
+
+          <section class="panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
+            <h3>汇总</h3>
+            <p>按下 Ctrl-C 或进程退出时，iotap 会按文件和端点汇总整个跟踪。这里的网络流量走的是 en0，也就是持有 192.168.1.20 的那个接口。</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="汇总示例" tabindex="0">
+        <div class="ln dm">iotap summary: 4242 (curl) traced for 0.1 s</div>
+        <div class="ln"> </div>
+        <div class="ln">Files (2 targets)</div>
+        <div class="ln">        READ    CALLS     WRITTEN    CALLS  FAILED  TARGET</div>
+        <div class="ln">         0 B        0     4.0 KiB        1       0  /Users/me/page.html</div>
+        <div class="ln">         0 B        0        20 B        1       0  /dev/ttys004</div>
+        <div class="ln"> </div>
+        <div class="ln">Network (1 target)</div>
+        <div class="ln">    RECEIVED    CALLS        SENT    CALLS  FAILED  TARGET</div>
+        <div class="ln">     4.0 KiB        2       517 B        1       1  tcp 93.184.216.34:443</div>
+        <div class="ln"> </div>
+        <div class="ln">Totals</div>
+        <div class="ln">  files    read 0 B (0 calls), written 4.0 KiB (2 calls)</div>
+        <div class="ln">  network  received 4.0 KiB (2 calls), sent 517 B (1 call)</div>
+        <div class="ln">    en0    received 4.0 KiB (2 calls), sent 517 B (1 call)</div>
+        <div class="ln">  5 calls, 1 failed</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-tui" role="tabpanel" aria-labelledby="tab-tui" data-later>
+            <h3>终端界面</h3>
+            <p><code>--tui</code> 显示最近一整秒和总计的吞吐量，下面是三个标签页：文件、网络端点，以及最新的 10,000 条事件。下图是回放一次录制的下载后的 Files 标签页。</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="终端界面，Files 标签页" tabindex="0">
+        <div class="ln"><span class="rev"> iotap </span> <span class="dm">4242 curl (exited)</span>                                                               0:00:12</div>
+        <div class="ln">                FILE READ  FILE WRITTEN  NET RECEIVED      NET SENT</div>
+        <div class="ln"> per second           0 B       1.2 MiB       1.2 MiB           0 B</div>
+        <div class="ln"> total                0 B      14.1 MiB      14.1 MiB         517 B</div>
+        <div class="ln ban"> End of the recording. Press q for the summary.</div>
+        <div class="ln"><span class="rev"> 1 Files (2) </span>  2 Network (1)   3 Events (7,205)                                     sort: bytes</div>
+        <div class="ln">       READ   CALLS    WRITTEN   CALLS FAILED IDLE TARGET</div>
+        <div class="ln">        0 B       0   14.1 MiB    3601      0  &lt;1s /Users/me/big.iso</div>
+        <div class="ln">        0 B       0       20 B       1      0  &lt;1s /dev/ttys004</div>
+        <div class="ln"> </div>
+        <div class="ln dm"> 4242 (curl) exited    q quit  s sort  p pause  i interfaces  r reset  ↑↓ select  enter details</div>
+              </div>
+            </div>
+            <ul class="keys">
+              <li><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> 切换标签页</li>
+              <li><kbd>s</kbd> 按字节、读、写、调用次数或最近活动排序</li>
+              <li><kbd>Enter</kbd> 所选行的详情</li>
+              <li><kbd>p</kbd> 暂停画面，跟踪继续</li>
+              <li><kbd>y</kbd> 复制所选路径或地址</li>
+              <li><kbd>i</kbd> 各网络接口的流量</li>
+              <li><kbd>q</kbd> 退出并打印汇总</li>
+            </ul>
+          </section>
+
+          <section class="panel" id="panel-json" role="tabpanel" aria-labelledby="tab-json" data-later>
+            <h3>JSON Lines</h3>
+            <p><code>--json</code> 把每条事件写成一行，时间是自 Unix 纪元起的纳秒数，目标是一个小对象。可以用管道交给 <code>jq</code>，或存成日志。下面是一条事件，展开成了多行。</p>
+            <div class="trace">
+              <div class="term" role="group" aria-label="一条 JSON 事件" tabindex="0">
+        <div class="ln">{</div>
+        <div class="ln">  <span class="k">"type"</span>: <span class="s">"event"</span>,</div>
+        <div class="ln">  <span class="k">"time_ns"</span>: <span class="n">1790259200104708333</span>,</div>
+        <div class="ln">  <span class="k">"pid"</span>: <span class="n">4242</span>,</div>
+        <div class="ln">  <span class="k">"tid"</span>: <span class="n">2</span>,</div>
+        <div class="ln">  <span class="k">"op"</span>: <span class="s">"recvfrom"</span>,</div>
+        <div class="ln">  <span class="k">"dir"</span>: <span class="s">"read"</span>,</div>
+        <div class="ln">  <span class="k">"syscall"</span>: <span class="s">"recvfrom"</span>,</div>
+        <div class="ln">  <span class="k">"fd"</span>: <span class="n">5</span>,</div>
+        <div class="ln">  <span class="k">"requested"</span>: <span class="n">16384</span>,</div>
+        <div class="ln">  <span class="k">"bytes"</span>: <span class="z">null</span>,</div>
+        <div class="ln">  <span class="k">"messages"</span>: <span class="z">null</span>,</div>
+        <div class="ln">  <span class="k">"errno"</span>: <span class="n">35</span>,</div>
+        <div class="ln">  <span class="k">"error"</span>: <span class="s">"EAGAIN"</span>,</div>
+        <div class="ln">  <span class="k">"latency_ns"</span>: <span class="n">41666</span>,</div>
+        <div class="ln">  <span class="k">"target"</span>: {</div>
+        <div class="ln">    <span class="k">"kind"</span>: <span class="s">"socket"</span>,</div>
+        <div class="ln">    <span class="k">"proto"</span>: <span class="s">"tcp"</span>,</div>
+        <div class="ln">    <span class="k">"local"</span>: <span class="s">"192.168.1.20:61000"</span>,</div>
+        <div class="ln">    <span class="k">"remote"</span>: <span class="s">"93.184.216.34:443"</span></div>
+        <div class="ln">  },</div>
+        <div class="ln">  <span class="k">"interface"</span>: <span class="s">"en0"</span>,</div>
+        <div class="ln">  <span class="k">"resolved"</span>: <span class="s">"traced"</span></div>
+        <div class="ln">}</div>
+              </div>
+            </div>
+            <div class="cmd has-copy" style="margin-top: 1rem">
+              <pre id="json-cmd"><code>sudo iotap --json curl | jq -c 'select(.type == "event")'</code></pre>
+              <button class="ghost" type="button" data-copy="json-cmd" data-copied="已复制">复制</button>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-record" role="tabpanel" aria-labelledby="tab-record" data-later>
+            <h3>录制</h3>
+            <p><code>--record FILE</code> 保存跟踪，<code>--replay FILE</code> 把它送回同一套处理流程，因此回放会在任一输出模式下重现实时运行时的输出。录制文件只包含路径和地址，不含传输的数据，并且要在录制它的操作系统上回放。</p>
+            <div class="cmd has-copy">
+              <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
+iotap --replay t.iotaprec              <span class="c"># 同样的输出，无需 root</span></code></pre>
+              <button class="ghost" type="button" data-copy="record-cmd" data-copied="已复制">复制</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="how" aria-labelledby="how-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="how-title">它只是读取内核本来就在记录的东西</h2>
+          <p>程序的每一次 read、write、open 和 connect 都是系统调用，而内核可以被要求在每次调用发生时记录下来，连同发起它的进程、参数和结果。iotap 读的就是这份记录。</p>
+          <p>它不附加调试器，不注入代码，也不改动被监视程序的任何东西。</p>
+        </div>
+        <dl class="facts">
+          <div>
+            <dt>在 macOS 上</dt>
+            <dd>这份记录来自内核跟踪设施 kdebug，也就是 Apple 的 <code>fs_usage</code> 所读取的同一来源。它内置于内核，无需安装任何东西。</dd>
+          </div>
+          <div>
+            <dt>在 Linux 上</dt>
+            <dd>iotap 把一个自带的小型 eBPF 程序挂到内核的系统调用跟踪点上。内核在运行前会校验它，并在 iotap 退出时将其卸载。</dd>
+          </div>
+          <div>
+            <dt>为什么需要 sudo</dt>
+            <dd>两者都能窥见机器上的每一个进程，所以内核只把它们交给 root。没有 root 时，iotap 会如实说明，并在触碰任何东西之前停下。回放录制不需要 root。</dd>
+          </div>
+          <div>
+            <dt>只记元数据</dt>
+            <dd>iotap 记录调用、描述符、字节数、延迟、路径和套接字端点。它从不读取或保存正在传输的数据：某个进程读取你的 SSH 密钥时，显示的只是对该文件的一次读取及其大小，绝不会是内容。</dd>
+          </div>
+          <div>
+            <dt>只看你指定的</dt>
+            <dd>内核只被要求记录你指定的进程的调用，加上 <code>-f</code> 时还包括它们启动的进程。其他的一概不记。</dd>
+          </div>
+          <div>
+            <dt>不留痕迹</dt>
+            <dd>在 macOS 上，同一时间只能有一个程序拥有 kdebug，所以 iotap 会在每一条退出路径上释放它，包括出错、收到信号和 panic。在 Linux 上，iotap 一退出，内核就会丢弃 eBPF 程序。终端界面也以同样的方式恢复终端。</dd>
+          </div>
+          <div>
+            <dt>一个二进制，没有守护进程</dt>
+            <dd>iotap 只在你运行它时运行，自己不会建立任何连接。可选的主机名解析（<code>--resolve</code>）走系统的解析器。</dd>
+          </div>
+          <div>
+            <dt>它看不到的</dt>
+            <dd>内存映射的文件 I/O，以及内核代进程完成的 I/O，例如页缓存回写。在 Linux 上还有通过 io_uring 或 libaio 提交的 I/O。其余的列在 README 的 <a href="https://github.com/rath/iotap#limitations">Limitations</a> 一节。</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="sec" id="install" aria-labelledby="install-title">
+      <div class="wrap grid">
+        <div class="say">
+          <h2 id="install-title">构建它，然后用 sudo 运行</h2>
+          <p>iotap 用 Cargo 从源码构建。它可以在 macOS 上运行，也可以在 64 位 Arm 或 x86-64 的 Linux 5.8 及更高版本上运行，只要内核带有 BPF 和系统调用跟踪点，发行版内核都有。</p>
+          <p>构建需要 Rust 1.98.1，由 <code>rust-toolchain.toml</code> 指定。macOS 上还需要 Xcode Command Line Tools；Linux 上还需要 clang、make、pkg-config、一个 C 编译器，以及 libelf 和 zlib 的开发文件。</p>
+        </div>
+        <div>
+          <p class="note">在 Debian 和 Ubuntu 上，先安装 Linux 构建所需的东西：</p>
+          <div class="cmd has-copy">
+            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+  libelf-dev zlib1g-dev</code></pre>
+            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="已复制">复制</button>
+          </div>
+          <p class="note">然后构建并跟踪一个进程：</p>
+          <div class="cmd has-copy">
+            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+cd iotap
+cargo build --release
+sudo ./target/release/iotap curl</code></pre>
+            <button class="ghost" type="button" data-copy="build-cmd" data-copied="已复制">复制</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <p>iotap 以 MIT 许可证开源，由 <a rel="author" href="https://xrath.com">Jang-Ho Hwang</a> 制作。</p>
+      <nav aria-label="项目链接">
+        <a href="https://github.com/rath/iotap">GitHub</a>
+        <a href="https://github.com/rath/iotap#readme">README</a>
+        <a href="https://github.com/rath/iotap/issues">Issues</a>
+      </nav>
+    </div>
+  </footer>
+
+  <p class="vh" id="status" role="status" aria-live="polite" data-copied="已复制到剪贴板"></p>
+</body>
+</html>

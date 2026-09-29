@@ -1,5 +1,9 @@
 /* The iotap website. Static, no build step. Colors follow the terminal UI's own: cyan marks what is
-   selected, yellow a notice, red a failure; everything else is grey on dark glass. */
+   selected, yellow a notice, red a failure; everything else is grey on dark glass.
+
+   The Latin fonts are subsets of the Latin script. The Korean and Chinese pages set their text in
+   Pretendard and Noto Sans SC, each cut down to the characters those pages use by
+   scripts/site/subset_fonts.py, which its comment says how to run again after the text changes. */
 
 @font-face {
   font-family: "Hubot Sans";
@@ -26,6 +30,22 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Pretendard";
+  src: url("fonts/pretendard-ko-wght.woff2") format("woff2");
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("fonts/noto-sans-sc-zh-wght.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
 
@@ -46,6 +66,21 @@
 
   --measure: 62ch;
   --gutter: clamp(1.25rem, 4.5vw, 3rem);
+}
+
+/* The Korean and Chinese pages set everything but the wordmark and the terminals in one family:
+   its Latin was drawn to sit beside its Hangul or Hanzi, where the condensed display face was not.
+   The pseudo-class is on the root only, so a language link on another page does not fetch the font. */
+:root:lang(ko) {
+  --sans: "Pretendard", "Mona Sans", ui-sans-serif, system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --display: var(--sans);
+  --mono: "JetBrains Mono", "Pretendard", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+:root:lang(zh) {
+  --sans: "Noto Sans SC", "Mona Sans", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --display: var(--sans);
+  --mono: "JetBrains Mono", "Noto Sans SC", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 *,
@@ -156,7 +191,7 @@ td code {
   display: inline-flex;
   align-items: center;
   gap: 0.6rem;
-  font: 800 1.5rem / 1 var(--display);
+  font: 800 1.5rem / 1 "Hubot Sans", var(--sans);
   font-stretch: 80%;
   letter-spacing: -0.005em;
   text-decoration: none;
@@ -166,6 +201,13 @@ td code {
   width: 1.7rem;
   height: 1.7rem;
   flex: none;
+}
+
+.menus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.75rem;
 }
 
 .top nav {
@@ -185,9 +227,26 @@ td code {
   color: var(--ink);
 }
 
+/* The languages, set apart from the sections by a rule; the page's own is marked. */
+.top .lang {
+  gap: 0.25rem 1rem;
+  padding-left: 1.75rem;
+  border-left: 1px solid var(--rule);
+  font-size: 0.875rem;
+}
+
+.top .lang a[aria-current] {
+  color: var(--ink);
+}
+
 @media (max-width: 34rem) {
   .top nav .opt {
     display: none;
+  }
+
+  .top .lang {
+    padding-left: 0;
+    border-left: 0;
   }
 }
 
@@ -775,6 +834,47 @@ kbd {
 
 .foot a {
   color: var(--soft);
+}
+
+/* Hangul and Hanzi stand taller and wider than condensed Latin: the headings are set smaller, on
+   taller lines, without the negative tracking, and the paragraphs on taller lines too. Korean breaks
+   lines between words only, as its readers expect; Chinese breaks anywhere. */
+
+:root:lang(ko) body,
+:root:lang(zh) body {
+  line-height: 1.72;
+}
+
+:root:lang(ko) h1,
+:root:lang(zh) h1 {
+  max-width: 17em;
+  font-size: clamp(2.2rem, 5.6vw, 4.5rem);
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+}
+
+:root:lang(ko) h2,
+:root:lang(zh) h2 {
+  font-size: clamp(1.7rem, 3.4vw, 2.5rem);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+:root:lang(ko) h3,
+:root:lang(zh) h3,
+:root:lang(ko) .facts dt,
+:root:lang(zh) .facts dt {
+  line-height: 1.4;
+}
+
+:root:lang(zh) h1,
+:root:lang(zh) h2 {
+  letter-spacing: 0;
+}
+
+:root:lang(ko) {
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 /* The 404 page */

@@ -114,6 +114,7 @@
   }
 
   // Copy buttons copy the commands of the block, without its comments, which a shell may not take.
+  // What they say once they have is written on the page, in its language.
   for (const button of document.querySelectorAll("[data-copy]")) {
     const label = button.textContent;
     const status = document.getElementById("status");
@@ -134,8 +135,8 @@
         document.execCommand("copy");
         area.remove();
       }
-      button.textContent = "Copied";
-      if (status) status.textContent = "Copied to the clipboard";
+      button.textContent = button.dataset.copied || "Copied";
+      if (status) status.textContent = status.dataset.copied || "Copied to the clipboard";
       await sleep(1800);
       button.textContent = label;
       if (status) status.textContent = "";

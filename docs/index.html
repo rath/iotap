@@ -9,12 +9,18 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0b1418">
   <link rel="canonical" href="https://iotap.told.me/">
+  <link rel="alternate" hreflang="en" href="https://iotap.told.me/">
+  <link rel="alternate" hreflang="ko" href="https://iotap.told.me/ko/">
+  <link rel="alternate" hreflang="zh-Hans" href="https://iotap.told.me/zh/">
+  <link rel="alternate" hreflang="x-default" href="https://iotap.told.me/">
   <link rel="icon" href="favicon.ico" sizes="48x48">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="iotap">
   <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="ko_KR">
+  <meta property="og:locale:alternate" content="zh_CN">
   <meta property="og:title" content="iotap: see the file and network I/O of any process">
   <meta property="og:description" content="Every read and write a process makes, with the file or address, the bytes and the latency. For macOS and Linux.">
   <meta property="og:url" content="https://iotap.told.me/">
@@ -73,14 +79,21 @@
       </svg>
       iotap
     </a>
-    <nav aria-label="Sections">
-      <a class="opt" href="#why">Why</a>
-      <a href="#usage">Usage</a>
-      <a href="#output">Output</a>
-      <a class="opt" href="#how">How it works</a>
-      <a href="#install">Install</a>
-      <a href="https://github.com/rath/iotap">GitHub</a>
-    </nav>
+    <div class="menus">
+      <nav aria-label="Sections">
+        <a class="opt" href="#why">Why</a>
+        <a href="#usage">Usage</a>
+        <a href="#output">Output</a>
+        <a class="opt" href="#how">How it works</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/rath/iotap">GitHub</a>
+      </nav>
+      <nav class="lang" aria-label="Language">
+        <a href="./" hreflang="en" lang="en" aria-current="page">English</a>
+        <a href="ko/" hreflang="ko" lang="ko">한국어</a>
+        <a href="zh/" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+      </nav>
+    </div>
   </header>
 
   <main id="main">
@@ -260,7 +273,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># summary only, after 10 seconds<
             </div>
             <div class="cmd has-copy" style="margin-top: 1rem">
               <pre id="json-cmd"><code>sudo iotap --json curl | jq -c 'select(.type == "event")'</code></pre>
-              <button class="ghost" type="button" data-copy="json-cmd">Copy</button>
+              <button class="ghost" type="button" data-copy="json-cmd" data-copied="Copied">Copy</button>
             </div>
           </section>
 
@@ -270,7 +283,7 @@ sudo iotap -q -d 10 Finder     <span class="c"># summary only, after 10 seconds<
             <div class="cmd has-copy">
               <pre id="record-cmd"><code>sudo iotap --net-only --record t.iotaprec 1234
 iotap --replay t.iotaprec              <span class="c"># the same output again, without root</span></code></pre>
-              <button class="ghost" type="button" data-copy="record-cmd">Copy</button>
+              <button class="ghost" type="button" data-copy="record-cmd" data-copied="Copied">Copy</button>
             </div>
           </section>
         </div>
@@ -333,7 +346,7 @@ iotap --replay t.iotaprec              <span class="c"># the same output again, 
           <div class="cmd has-copy">
             <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
   libelf-dev zlib1g-dev</code></pre>
-            <button class="ghost" type="button" data-copy="apt-cmd">Copy</button>
+            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="Copied">Copy</button>
           </div>
           <p class="note">Then build it and trace a process:</p>
           <div class="cmd has-copy">
@@ -341,7 +354,7 @@ iotap --replay t.iotaprec              <span class="c"># the same output again, 
 cd iotap
 cargo build --release
 sudo ./target/release/iotap curl</code></pre>
-            <button class="ghost" type="button" data-copy="build-cmd">Copy</button>
+            <button class="ghost" type="button" data-copy="build-cmd" data-copied="Copied">Copy</button>
           </div>
         </div>
       </div>
@@ -359,6 +372,6 @@ sudo ./target/release/iotap curl</code></pre>
     </div>
   </footer>
 
-  <p class="vh" id="status" role="status" aria-live="polite"></p>
+  <p class="vh" id="status" role="status" aria-live="polite" data-copied="Copied to the clipboard"></p>
 </body>
 </html>
