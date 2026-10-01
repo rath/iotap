@@ -68,7 +68,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           dnf install -y clang gcc gcc-c++ make pkgconf-pkg-config \
-            elfutils-libelf-devel zlib-devel git curl tar gzip diffutils findutils
+            elfutils-libelf-devel zlib-devel git curl tar gzip diffutils findutils shadow-utils
+          # The minimal image's multicall sleep rewrites argv[0], which prevents
+          # the process-name tests from exercising ordinary Unix executables.
+          if rpm -q coreutils-single > /dev/null 2>&1; then
+            dnf swap -y coreutils-single coreutils
+          fi
+          useradd --no-create-home --home-dir /github/home iotap-build
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
@@ -77,11 +83,11 @@ jobs:
       - name: Check, test, and build
         run: |
           test "$(rustc -vV | sed -n 's/^host: //p')" = "$RELEASE_TARGET"
-          cargo fmt --all --check
-          cargo clippy --all-targets --locked -- -D warnings
-          cargo test --locked
-          cargo test --release --locked
-          cargo build --release --locked
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            chown -R iotap-build /github/home "$GITHUB_WORKSPACE"
+            exec runuser -u iotap-build -- bash scripts/release/check.sh
+          fi
+          bash scripts/release/check.sh
       - name: Check the release binary
         run: |
           test "$(target/release/iotap --version)" = "iotap $RELEASE_VERSION"
