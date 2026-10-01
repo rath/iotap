@@ -117,10 +117,17 @@
   <main id="main">
     <section class="wrap hero" aria-labelledby="title">
       <h1 id="title">看清一个进程到底在对你的文件和网络做什么。</h1>
-      <p class="lede">iotap 是一个面向 macOS 和 Linux 的命令行工具。给它一个进程 ID 或名称，它就会实时报告该进程的每一次读写：是哪个文件或远程地址，请求了多少字节、实际传了多少，这次调用花了多久，是否失败。当你停止跟踪时，它会按文件和端点汇总整段跟踪记录。</p>
-      <div class="actions">
-        <a class="btn" href="#install">从源码构建</a>
-        <a class="textlink" href="https://github.com/rath/iotap">在 GitHub 上查看</a>
+      <p class="lede">在 macOS 和 Linux 上跟踪进程的文件与网络 I/O，实时查看路径、地址、字节数和调用耗时。</p>
+      <div class="quick-install">
+        <div class="cmd has-copy install-command">
+          <pre id="brew-hero"><code>brew install rath/tap/iotap</code></pre>
+          <button class="ghost" type="button" data-copy="brew-hero" data-copied="已复制" aria-label="复制 Homebrew 安装命令">复制</button>
+        </div>
+        <p class="install-platforms">macOS（Apple Silicon）· Linux（ARM64 / x86_64）</p>
+        <div class="install-links">
+          <a href="#install">更多安装方式</a>
+          <a class="textlink" href="https://github.com/rath/iotap">在 GitHub 上查看</a>
+        </div>
       </div>
 
       <figure class="trace" id="trace">
@@ -140,6 +147,7 @@
         </div>
       </figure>
 
+      <p class="trace-context">iotap 是一个面向 macOS 和 Linux 的命令行工具。给它一个进程 ID 或名称，它就会实时报告该进程的每一次读写：是哪个文件或远程地址，请求了多少字节、实际传了多少，这次调用花了多久，是否失败。当你停止跟踪时，它会按文件和端点汇总整段跟踪记录。</p>
       <p class="story-lead">从上往下读，这就是一次 <code>curl</code> 的完整一生：</p>
       <ol class="story">
         <li tabindex="0" data-call="1">向 93.184.216.34 的 443 端口发送一个 517 字节的请求。</li>
@@ -353,28 +361,58 @@ iotap --replay t.iotaprec              <span class="c"># 同样的输出，无�
     </section>
 
     <section class="sec" id="install" aria-labelledby="install-title">
-      <div class="wrap grid">
-        <div class="say">
-          <h2 id="install-title">构建它，然后用 sudo 运行</h2>
-          <p>iotap 用 Cargo 从源码构建。它可以在 macOS 上运行，也可以在 64 位 Arm 或 x86-64 上的 Linux 5.8 及更高版本上运行，前提是内核支持 BPF 和系统调用跟踪点（发行版内核都满足）。</p>
-          <p>构建需要 Rust 1.98.1，由 <code>rust-toolchain.toml</code> 指定。macOS 上还需要 Xcode Command Line Tools；Linux 上还需要 clang、make、pkg-config、一个 C 编译器，以及 libelf 和 zlib 的开发文件。</p>
+      <div class="wrap">
+        <div class="grid">
+          <div class="say">
+            <h2 id="install-title">用 Homebrew 安装，即可开始跟踪</h2>
+            <p>Homebrew 为 Apple Silicon Mac 和 ARM64、x86-64 Linux 安装预编译的二进制文件，无需安装 Rust 工具链。</p>
+            <p>还没有 Homebrew？请<a href="https://brew.sh/">先安装 Homebrew</a>。运行所需的库由 Homebrew 管理，同时也须满足 Homebrew 自身的操作系统要求。</p>
+            <p>跟踪需要 <code>sudo</code>。Linux 需要 5.8 或更高版本的内核，并支持 BPF 和系统调用跟踪点。回放已保存的记录不需要 root 权限。</p>
+          </div>
+          <div>
+            <p class="note">安装 iotap：</p>
+            <div class="cmd has-copy">
+              <pre id="brew-cmd"><code>brew install rath/tap/iotap</code></pre>
+              <button class="ghost" type="button" data-copy="brew-cmd" data-copied="已复制">复制</button>
+            </div>
+            <p class="note">确认已安装的版本：</p>
+            <div class="cmd has-copy">
+              <pre id="version-cmd"><code>iotap --version</code></pre>
+              <button class="ghost" type="button" data-copy="version-cmd" data-copied="已复制">复制</button>
+            </div>
+            <p class="note">跟踪一个正在运行的进程（将 1234 换成它的 PID）：</p>
+            <div class="cmd has-copy">
+              <pre id="run-cmd"><code>sudo iotap --tui 1234</code></pre>
+              <button class="ghost" type="button" data-copy="run-cmd" data-copied="已复制">复制</button>
+            </div>
+          </div>
         </div>
-        <div>
-          <p class="note">在 Debian 和 Ubuntu 上，先安装 Linux 构建所需的东西：</p>
-          <div class="cmd has-copy">
-            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+        <p class="download-note">也可以<a href="https://github.com/rath/iotap/releases/latest">直接下载发布的二进制文件</a>，并用 SHA256SUMS 校验。Linux 下载版本需要 glibc 2.28 或更高版本、libelf 和 zlib，详见<a href="https://github.com/rath/iotap#install-and-update">运行依赖</a>。</p>
+        <details class="source-install" id="source">
+          <summary>从源码构建（包括 Intel Mac）</summary>
+          <div class="grid">
+            <div class="say">
+              <p>源码构建支持 macOS，以及 64 位 Arm 或 x86-64 Linux。</p>
+              <p>构建需要 Rust 1.98.1，由 <code>rust-toolchain.toml</code> 指定。macOS 上还需要 Xcode Command Line Tools；Linux 上还需要 clang、make、pkg-config、一个 C 编译器，以及 libelf 和 zlib 的开发文件。</p>
+            </div>
+            <div>
+              <p class="note">在 Debian 和 Ubuntu 上，先安装构建依赖：</p>
+              <div class="cmd has-copy">
+                <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
   libelf-dev zlib1g-dev</code></pre>
-            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="已复制">复制</button>
-          </div>
-          <p class="note">然后构建并跟踪一个进程：</p>
-          <div class="cmd has-copy">
-            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+                <button class="ghost" type="button" data-copy="apt-cmd" data-copied="已复制">复制</button>
+              </div>
+              <p class="note">然后构建并跟踪一个正在运行的进程：</p>
+              <div class="cmd has-copy">
+                <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
 cd iotap
-cargo build --release
-sudo ./target/release/iotap curl</code></pre>
-            <button class="ghost" type="button" data-copy="build-cmd" data-copied="已复制">复制</button>
+cargo build --release --locked
+sudo ./target/release/iotap 1234</code></pre>
+                <button class="ghost" type="button" data-copy="build-cmd" data-copied="已复制">复制</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </details>
       </div>
     </section>
   </main>

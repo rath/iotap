@@ -117,10 +117,17 @@
   <main id="main">
     <section class="wrap hero" aria-labelledby="title">
       <h1 id="title">지금 이 프로세스, 파일과 네트워크에 뭘 하고 있을까요.</h1>
-      <p class="lede">iotap은 macOS와 Linux에서 쓰는 명령줄 도구입니다. 프로세스 ID나 이름을 넘기면 그 프로세스가 읽고 쓰는 모든 순간을 실시간으로 보여줍니다. 어느 파일이나 원격 주소인지, 몇 바이트를 요청해서 몇 바이트가 실제로 오갔는지, 호출에 얼마나 걸렸는지, 실패했는지까지. 추적을 멈추면 파일별, 엔드포인트별로 합계를 내줍니다.</p>
-      <div class="actions">
-        <a class="btn" href="#install">소스에서 빌드하기</a>
-        <a class="textlink" href="https://github.com/rath/iotap">GitHub에서 보기</a>
+      <p class="lede">macOS와 Linux에서 프로세스의 파일·네트워크 I/O를 추적합니다. 어디에 얼마나 읽고 쓰는지, 얼마나 걸리는지 실시간으로 확인하세요.</p>
+      <div class="quick-install">
+        <div class="cmd has-copy install-command">
+          <pre id="brew-hero"><code>brew install rath/tap/iotap</code></pre>
+          <button class="ghost" type="button" data-copy="brew-hero" data-copied="복사됨" aria-label="Homebrew 설치 명령 복사">복사</button>
+        </div>
+        <p class="install-platforms">macOS (Apple Silicon) · Linux (ARM64 / x86_64)</p>
+        <div class="install-links">
+          <a href="#install">설치 방법 더 보기</a>
+          <a class="textlink" href="https://github.com/rath/iotap">GitHub에서 보기</a>
+        </div>
       </div>
 
       <figure class="trace" id="trace">
@@ -140,6 +147,7 @@
         </div>
       </figure>
 
+      <p class="trace-context">iotap은 macOS와 Linux에서 쓰는 명령줄 도구입니다. 프로세스 ID나 이름을 넘기면 그 프로세스가 읽고 쓰는 모든 순간을 실시간으로 보여줍니다. 어느 파일이나 원격 주소인지, 몇 바이트를 요청해서 몇 바이트가 실제로 오갔는지, 호출에 얼마나 걸렸는지, 실패했는지까지. 추적을 멈추면 파일별, 엔드포인트별로 합계를 내줍니다.</p>
       <p class="story-lead">위에서 아래로 읽으면 <code>curl</code> 한 번의 처음부터 끝까지가 그대로 보입니다:</p>
       <ol class="story">
         <li tabindex="0" data-call="1">93.184.216.34의 443 포트로 517바이트짜리 요청을 보냅니다.</li>
@@ -353,28 +361,58 @@ iotap --replay t.iotaprec              <span class="c"># 같은 출력을 다시
     </section>
 
     <section class="sec" id="install" aria-labelledby="install-title">
-      <div class="wrap grid">
-        <div class="say">
-          <h2 id="install-title">빌드한 다음 sudo로 실행하세요</h2>
-          <p>iotap은 Cargo로 소스에서 빌드합니다. macOS, 그리고 64비트 Arm이나 x86-64의 Linux 5.8 이상에서 돌아갑니다. Linux 커널에 BPF와 시스템 콜 트레이스포인트가 켜져 있어야 하는데, 배포판 커널이라면 기본입니다.</p>
-          <p>빌드에는 Rust 1.98.1이 필요하고, <code>rust-toolchain.toml</code>이 그 버전을 골라 줍니다. macOS에서는 Xcode Command Line Tools가, Linux에서는 clang, make, pkg-config, C 컴파일러, libelf와 zlib 개발 패키지가 추가로 필요합니다.</p>
+      <div class="wrap">
+        <div class="grid">
+          <div class="say">
+            <h2 id="install-title">Homebrew로 설치하고, 바로 추적하세요</h2>
+            <p>Apple Silicon Mac과 ARM64·x86-64 Linux에서는 Homebrew로 빌드된 바이너리를 설치할 수 있습니다. Rust를 따로 설치할 필요는 없습니다.</p>
+            <p>Homebrew가 없다면 <a href="https://brew.sh/">먼저 설치하세요</a>. 실행에 필요한 라이브러리는 Homebrew가 관리하며, Homebrew 자체의 OS 요구 사항도 적용됩니다.</p>
+            <p>추적할 때는 <code>sudo</code>가 필요합니다. Linux는 BPF와 시스템 콜 트레이스포인트를 지원하는 커널 5.8 이상이어야 합니다. 저장된 기록을 재생할 때는 root 권한이 필요 없습니다.</p>
+          </div>
+          <div>
+            <p class="note">iotap을 설치합니다:</p>
+            <div class="cmd has-copy">
+              <pre id="brew-cmd"><code>brew install rath/tap/iotap</code></pre>
+              <button class="ghost" type="button" data-copy="brew-cmd" data-copied="복사됨">복사</button>
+            </div>
+            <p class="note">설치된 버전을 확인합니다:</p>
+            <div class="cmd has-copy">
+              <pre id="version-cmd"><code>iotap --version</code></pre>
+              <button class="ghost" type="button" data-copy="version-cmd" data-copied="복사됨">복사</button>
+            </div>
+            <p class="note">실행 중인 프로세스를 추적합니다. 1234를 실제 PID로 바꿔 주세요:</p>
+            <div class="cmd has-copy">
+              <pre id="run-cmd"><code>sudo iotap --tui 1234</code></pre>
+              <button class="ghost" type="button" data-copy="run-cmd" data-copied="복사됨">복사</button>
+            </div>
+          </div>
         </div>
-        <div>
-          <p class="note">Debian이나 Ubuntu라면 먼저 빌드에 필요한 패키지를 설치합니다:</p>
-          <div class="cmd has-copy">
-            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+        <p class="download-note"><a href="https://github.com/rath/iotap/releases/latest">릴리스 바이너리를 직접 받아서</a> SHA256SUMS로 검증할 수도 있습니다. Linux 다운로드에는 glibc 2.28 이상, libelf, zlib가 필요합니다. <a href="https://github.com/rath/iotap#install-and-update">필요한 패키지</a>를 확인하세요.</p>
+        <details class="source-install" id="source">
+          <summary>소스에서 빌드하기 — Intel Mac 포함</summary>
+          <div class="grid">
+            <div class="say">
+              <p>소스 빌드는 macOS와 64비트 Arm·x86-64 Linux를 지원합니다.</p>
+              <p>빌드에는 Rust 1.98.1이 필요하고, <code>rust-toolchain.toml</code>이 그 버전을 골라 줍니다. macOS에서는 Xcode Command Line Tools가, Linux에서는 clang, make, pkg-config, C 컴파일러, libelf와 zlib 개발 패키지가 추가로 필요합니다.</p>
+            </div>
+            <div>
+              <p class="note">Debian이나 Ubuntu라면 먼저 빌드에 필요한 패키지를 설치합니다:</p>
+              <div class="cmd has-copy">
+                <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
   libelf-dev zlib1g-dev</code></pre>
-            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="복사됨">복사</button>
-          </div>
-          <p class="note">그다음 빌드하고 프로세스를 추적해 봅니다:</p>
-          <div class="cmd has-copy">
-            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+                <button class="ghost" type="button" data-copy="apt-cmd" data-copied="복사됨">복사</button>
+              </div>
+              <p class="note">그다음 빌드하고 실행 중인 프로세스를 추적합니다:</p>
+              <div class="cmd has-copy">
+                <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
 cd iotap
-cargo build --release
-sudo ./target/release/iotap curl</code></pre>
-            <button class="ghost" type="button" data-copy="build-cmd" data-copied="복사됨">복사</button>
+cargo build --release --locked
+sudo ./target/release/iotap 1234</code></pre>
+                <button class="ghost" type="button" data-copy="build-cmd" data-copied="복사됨">복사</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </details>
       </div>
     </section>
   </main>

@@ -117,10 +117,17 @@
   <main id="main">
     <section class="wrap hero" aria-labelledby="title">
       <h1 id="title"><span class="phrase">そのプロセス、</span><span class="phrase">ファイルと</span><span class="phrase">ネットワークで</span><span class="phrase">本当は</span><span class="phrase">何を</span><span class="phrase">しているのか。</span></h1>
-      <p class="lede">iotap は macOS と Linux で使えるコマンドラインツールです。プロセス ID か名前を渡すと、そのプロセスの読み書きをひとつ残らず、リアルタイムで表示します。どのファイルやリモートアドレスか、何バイトを要求して実際に何バイト行き来したか、呼び出しにどれだけかかったか、失敗したかどうかまで。止めると、ファイルごと・エンドポイントごとに集計します。</p>
-      <div class="actions">
-        <a class="btn" href="#install">ソースからビルドする</a>
-        <a class="textlink" href="https://github.com/rath/iotap">GitHub で見る</a>
+      <p class="lede">macOS と Linux でプロセスのファイル・ネットワーク I/O を追跡。パス、アドレス、バイト数、処理時間をリアルタイムで確認できます。</p>
+      <div class="quick-install">
+        <div class="cmd has-copy install-command">
+          <pre id="brew-hero"><code>brew install rath/tap/iotap</code></pre>
+          <button class="ghost" type="button" data-copy="brew-hero" data-copied="コピーしました" aria-label="Homebrew のインストールコマンドをコピー">コピー</button>
+        </div>
+        <p class="install-platforms">macOS（Apple Silicon）· Linux（ARM64 / x86_64）</p>
+        <div class="install-links">
+          <a href="#install">インストール方法</a>
+          <a class="textlink" href="https://github.com/rath/iotap">GitHub で見る</a>
+        </div>
       </div>
 
       <figure class="trace" id="trace">
@@ -140,6 +147,7 @@
         </div>
       </figure>
 
+      <p class="trace-context">iotap は macOS と Linux で使えるコマンドラインツールです。プロセス ID か名前を渡すと、そのプロセスの読み書きをひとつ残らず、リアルタイムで表示します。どのファイルやリモートアドレスか、何バイトを要求して実際に何バイト行き来したか、呼び出しにどれだけかかったか、失敗したかどうかまで。止めると、ファイルごと・エンドポイントごとに集計します。</p>
       <p class="story-lead">上から順に読めば、これが <code>curl</code> 一回の一部始終です：</p>
       <ol class="story">
         <li tabindex="0" data-call="1">93.184.216.34 のポート 443 に 517 バイトのリクエストを送る。</li>
@@ -353,28 +361,58 @@ iotap --replay t.iotaprec              <span class="c"># 同じ出力をもう�
     </section>
 
     <section class="sec" id="install" aria-labelledby="install-title">
-      <div class="wrap grid">
-        <div class="say">
-          <h2 id="install-title">ビルドして、sudo で実行する</h2>
-          <p>iotap は Cargo でソースからビルドします。macOS と、64 ビット Arm または x86-64 の Linux 5.8 以降で動きます。Linux カーネルには BPF とシステムコールトレースポイントが必要ですが、ディストリビューションのカーネルなら揃っています。</p>
-          <p>ビルドには Rust 1.98.1 が必要で、<code>rust-toolchain.toml</code> がそのバージョンを選びます。macOS では Xcode Command Line Tools、Linux では clang、make、pkg-config、C コンパイラ、それに libelf と zlib の開発パッケージも必要です。</p>
+      <div class="wrap">
+        <div class="grid">
+          <div class="say">
+            <h2 id="install-title">Homebrew で入れて、追跡を始める</h2>
+            <p>Apple Silicon Mac と ARM64・x86-64 Linux には、Homebrew でビルド済みバイナリをインストールできます。Rust のインストールは不要です。</p>
+            <p>Homebrew がなければ、<a href="https://brew.sh/">先にインストールしてください</a>。必要なライブラリは Homebrew が管理します。Homebrew 自体の OS 要件も適用されます。</p>
+            <p>追跡には <code>sudo</code> が必要です。Linux では BPF とシステムコールトレースポイントを備えたカーネル 5.8 以降が必要です。保存した記録の再生には root 権限は要りません。</p>
+          </div>
+          <div>
+            <p class="note">iotap をインストール：</p>
+            <div class="cmd has-copy">
+              <pre id="brew-cmd"><code>brew install rath/tap/iotap</code></pre>
+              <button class="ghost" type="button" data-copy="brew-cmd" data-copied="コピーしました">コピー</button>
+            </div>
+            <p class="note">インストールされたバージョンを確認：</p>
+            <div class="cmd has-copy">
+              <pre id="version-cmd"><code>iotap --version</code></pre>
+              <button class="ghost" type="button" data-copy="version-cmd" data-copied="コピーしました">コピー</button>
+            </div>
+            <p class="note">実行中のプロセスを追跡（1234 をその PID に置き換えてください）：</p>
+            <div class="cmd has-copy">
+              <pre id="run-cmd"><code>sudo iotap --tui 1234</code></pre>
+              <button class="ghost" type="button" data-copy="run-cmd" data-copied="コピーしました">コピー</button>
+            </div>
+          </div>
         </div>
-        <div>
-          <p class="note">Debian や Ubuntu では、まずビルドに必要なパッケージを入れます：</p>
-          <div class="cmd has-copy">
-            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+        <p class="download-note"><a href="https://github.com/rath/iotap/releases/latest">リリースのバイナリを直接ダウンロード</a>し、SHA256SUMS で検証することもできます。Linux 版には glibc 2.28 以降、libelf、zlib が必要です。<a href="https://github.com/rath/iotap#install-and-update">必要なパッケージ</a>を確認してください。</p>
+        <details class="source-install" id="source">
+          <summary>ソースからビルドする（Intel Mac を含む）</summary>
+          <div class="grid">
+            <div class="say">
+              <p>ソースからは macOS と、64 ビット Arm・x86-64 Linux 向けにビルドできます。</p>
+              <p>ビルドには Rust 1.98.1 が必要で、<code>rust-toolchain.toml</code> がそのバージョンを選びます。macOS では Xcode Command Line Tools、Linux では clang、make、pkg-config、C コンパイラ、それに libelf と zlib の開発パッケージも必要です。</p>
+            </div>
+            <div>
+              <p class="note">Debian や Ubuntu では、まずビルドに必要なパッケージを入れます：</p>
+              <div class="cmd has-copy">
+                <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
   libelf-dev zlib1g-dev</code></pre>
-            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="コピーしました">コピー</button>
-          </div>
-          <p class="note">続いてビルドし、プロセスを追跡してみます：</p>
-          <div class="cmd has-copy">
-            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+                <button class="ghost" type="button" data-copy="apt-cmd" data-copied="コピーしました">コピー</button>
+              </div>
+              <p class="note">続いてビルドし、実行中のプロセスを追跡します：</p>
+              <div class="cmd has-copy">
+                <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
 cd iotap
-cargo build --release
-sudo ./target/release/iotap curl</code></pre>
-            <button class="ghost" type="button" data-copy="build-cmd" data-copied="コピーしました">コピー</button>
+cargo build --release --locked
+sudo ./target/release/iotap 1234</code></pre>
+                <button class="ghost" type="button" data-copy="build-cmd" data-copied="コピーしました">コピー</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </details>
       </div>
     </section>
   </main>

@@ -400,6 +400,53 @@ h1 {
   font-weight: 500;
 }
 
+.quick-install {
+  max-width: 36rem;
+  margin-top: 1.5rem;
+}
+
+.install-platforms {
+  margin: 0.7rem 0 0;
+  color: var(--soft);
+  font-size: 0.8125rem;
+}
+
+.install-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin-top: 0.8rem;
+  font-size: 0.9375rem;
+}
+
+.trace-context {
+  max-width: 65ch;
+  margin-top: 1.75rem;
+  color: var(--soft);
+}
+
+.download-note {
+  max-width: 75ch;
+  margin: 2.5rem 0 0;
+  color: var(--soft);
+}
+
+.source-install {
+  margin-top: 2rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+}
+
+.source-install > summary {
+  width: fit-content;
+  color: var(--tap);
+  cursor: pointer;
+}
+
+.source-install > .grid {
+  margin-top: 1.5rem;
+}
+
 /* The trace: terminal output, set directly on the page */
 
 .trace {
@@ -752,6 +799,33 @@ h3 {
     position: static;
     margin: 0 0 0.75rem 1.15rem;
   }
+}
+
+/* Keep the short installation command and its action together on small screens. */
+.install-command {
+  display: flex;
+  align-items: center;
+  border-color: var(--tap);
+}
+
+.install-command.has-copy pre {
+  flex: 1;
+  min-width: 0;
+  padding: 1rem 0.85rem;
+}
+
+.install-command .ghost {
+  position: static;
+  flex: none;
+  min-height: 2.75rem;
+  margin: 0.35rem 0.35rem 0.35rem 0;
+  padding-inline: 0.8rem;
+  color: var(--glass);
+  background: var(--tap);
+}
+
+.install-command .ghost:hover {
+  background: #8de3f3;
 }
 
 /* Tabs over the ways to read a trace */

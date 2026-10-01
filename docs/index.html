@@ -115,10 +115,17 @@
   <main id="main">
     <section class="wrap hero" aria-labelledby="title">
       <h1 id="title">See what a process is really doing with your files and your network.</h1>
-      <p class="lede">iotap is a command-line tool for macOS and Linux. Give it a process ID or a name and it reports every read and write that process makes as it happens: the file or the remote address, how many bytes were asked for and how many moved, how long the call took, and whether it failed. When you stop, it sums the trace up per file and per endpoint.</p>
-      <div class="actions">
-        <a class="btn" href="#install">Build it from source</a>
-        <a class="textlink" href="https://github.com/rath/iotap">View on GitHub</a>
+      <p class="lede">Trace a process’s file and network I/O on macOS and Linux. See the paths, addresses, bytes, and latency as it runs.</p>
+      <div class="quick-install">
+        <div class="cmd has-copy install-command">
+          <pre id="brew-hero"><code>brew install rath/tap/iotap</code></pre>
+          <button class="ghost" type="button" data-copy="brew-hero" data-copied="Copied" aria-label="Copy Homebrew install command">Copy</button>
+        </div>
+        <p class="install-platforms">macOS (Apple Silicon) · Linux (ARM64 / x86_64)</p>
+        <div class="install-links">
+          <a href="#install">Installation options</a>
+          <a class="textlink" href="https://github.com/rath/iotap">View on GitHub</a>
+        </div>
       </div>
 
       <figure class="trace" id="trace">
@@ -138,6 +145,7 @@
         </div>
       </figure>
 
+      <p class="trace-context">iotap is a command-line tool for macOS and Linux. Give it a process ID or a name and it reports every read and write that process makes as it happens: the file or the remote address, how many bytes were asked for and how many moved, how long the call took, and whether it failed. When you stop, it sums the trace up per file and per endpoint.</p>
       <p class="story-lead">Read top to bottom, this is the whole life of one <code>curl</code>:</p>
       <ol class="story">
         <li tabindex="0" data-call="1">Sends a 517-byte request to 93.184.216.34 on port 443.</li>
@@ -351,28 +359,58 @@ iotap --replay t.iotaprec              <span class="c"># the same output again, 
     </section>
 
     <section class="sec" id="install" aria-labelledby="install-title">
-      <div class="wrap grid">
-        <div class="say">
-          <h2 id="install-title">Build it, then run it with sudo</h2>
-          <p>iotap builds from source with Cargo. It runs on macOS, and on Linux 5.8 or later on 64-bit Arm or x86-64 with BPF and syscall tracepoints, as distribution kernels have them.</p>
-          <p>To build you need Rust 1.98.1, which <code>rust-toolchain.toml</code> selects. On macOS, add the Xcode Command Line Tools. On Linux, add clang, make, pkg-config, a C compiler, and the libelf and zlib development files.</p>
+      <div class="wrap">
+        <div class="grid">
+          <div class="say">
+            <h2 id="install-title">Install with Homebrew. Then trace a process.</h2>
+            <p>Homebrew installs a prebuilt binary for Apple Silicon Macs and Linux on ARM64 or x86-64. No Rust toolchain needed.</p>
+            <p>Need Homebrew? <a href="https://brew.sh/">Install it first</a>. Homebrew manages the runtime libraries and has its own OS requirements.</p>
+            <p>Tracing needs <code>sudo</code>. Linux needs kernel 5.8 or newer with BPF and syscall tracepoints. Replaying a recording needs no root.</p>
+          </div>
+          <div>
+            <p class="note">Install iotap:</p>
+            <div class="cmd has-copy">
+              <pre id="brew-cmd"><code>brew install rath/tap/iotap</code></pre>
+              <button class="ghost" type="button" data-copy="brew-cmd" data-copied="Copied">Copy</button>
+            </div>
+            <p class="note">Check the installed version:</p>
+            <div class="cmd has-copy">
+              <pre id="version-cmd"><code>iotap --version</code></pre>
+              <button class="ghost" type="button" data-copy="version-cmd" data-copied="Copied">Copy</button>
+            </div>
+            <p class="note">Trace a running process (replace 1234 with its PID):</p>
+            <div class="cmd has-copy">
+              <pre id="run-cmd"><code>sudo iotap --tui 1234</code></pre>
+              <button class="ghost" type="button" data-copy="run-cmd" data-copied="Copied">Copy</button>
+            </div>
+          </div>
         </div>
-        <div>
-          <p class="note">On Debian and Ubuntu, install what the Linux build needs first:</p>
-          <div class="cmd has-copy">
-            <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
+        <p class="download-note"><a href="https://github.com/rath/iotap/releases/latest">Download a release binary</a> and verify it with SHA256SUMS. Linux downloads need glibc 2.28 or newer, libelf, and zlib; see the <a href="https://github.com/rath/iotap#install-and-update">runtime packages</a>.</p>
+        <details class="source-install" id="source">
+          <summary>Build from source, including on Intel Macs</summary>
+          <div class="grid">
+            <div class="say">
+              <p>Source builds support macOS and Linux on 64-bit Arm or x86-64.</p>
+              <p>To build you need Rust 1.98.1, which <code>rust-toolchain.toml</code> selects. On macOS, add the Xcode Command Line Tools. On Linux, add clang, make, pkg-config, a C compiler, and the libelf and zlib development files.</p>
+            </div>
+            <div>
+              <p class="note">On Debian and Ubuntu, install the build dependencies first:</p>
+              <div class="cmd has-copy">
+                <pre id="apt-cmd"><code>sudo apt install build-essential clang pkg-config \
   libelf-dev zlib1g-dev</code></pre>
-            <button class="ghost" type="button" data-copy="apt-cmd" data-copied="Copied">Copy</button>
-          </div>
-          <p class="note">Then build it and trace a process:</p>
-          <div class="cmd has-copy">
-            <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
+                <button class="ghost" type="button" data-copy="apt-cmd" data-copied="Copied">Copy</button>
+              </div>
+              <p class="note">Then build and trace a running process:</p>
+              <div class="cmd has-copy">
+                <pre id="build-cmd"><code>git clone https://github.com/rath/iotap.git
 cd iotap
-cargo build --release
-sudo ./target/release/iotap curl</code></pre>
-            <button class="ghost" type="button" data-copy="build-cmd" data-copied="Copied">Copy</button>
+cargo build --release --locked
+sudo ./target/release/iotap 1234</code></pre>
+                <button class="ghost" type="button" data-copy="build-cmd" data-copied="Copied">Copy</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </details>
       </div>
     </section>
   </main>
