@@ -700,7 +700,10 @@ mod tests {
         let mut tracer = Scripted::new([], None);
         let (tx, rx) = mpsc::channel();
         run(&mut tracer, vec![gone()], &config(Duration::ZERO), &tx, &stop).unwrap();
-        let got = sent(&rx);
+        let mut got = sent(&rx);
+        // An idle watermark may arrive while the last per-CPU buffers drain,
+        // depending on how long this thread is descheduled on a busy host.
+        got.retain(|input| !matches!(input, Input::Watermark { .. }));
         assert!(
             matches!(
                 &got[..],
