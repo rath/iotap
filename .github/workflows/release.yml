@@ -1,0 +1,161 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Verify version and release notes
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          grep -Fq "## [$version] - " CHANGELOG.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and test (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            container: rockylinux:8.9.20231119
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            container: rockylinux:8.9.20231119
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      # Native builds in a glibc 2.28 userspace keep both Linux architectures
+      # compatible with older distributions. No kernel tracing runs in CI.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          dnf install -y clang gcc gcc-c++ make pkgconf-pkg-config \
+            elfutils-libelf-devel zlib-devel git curl tar gzip diffutils findutils
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+      - name: Check, test, and build
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$RELEASE_TARGET"
+          cargo fmt --all --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+          cargo test --release --locked
+          cargo build --release --locked
+      - name: Check the release binary
+        run: |
+          test "$(target/release/iotap --version)" = "iotap $RELEASE_VERSION"
+          target/release/iotap --help
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            readelf -h target/release/iotap
+            ldd target/release/iotap
+            highest=$(readelf --version-info target/release/iotap |
+              grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
+            test "$(printf '%s\n' GLIBC_2.28 "$highest" | sort -V | tail -n 1)" = GLIBC_2.28
+          else
+            otool -L target/release/iotap
+          fi
+      - name: Package and check the extracted binary
+        run: |
+          name="iotap-$RELEASE_TARGET"
+          mkdir -p "dist/$name" unpacked
+          cp target/release/iotap LICENSE README.md CHANGELOG.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          tar -C unpacked -xzf "dist/$name.tar.gz"
+          test "$("unpacked/$name/iotap" --version)" = "iotap $RELEASE_VERSION"
+          cd dist
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    # Manual runs only build and test; a pushed tag publishes the same pipeline.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and extract release notes
+        run: |
+          cd dist
+          test "$(find . -name '*.tar.gz' | wc -l)" -eq 3
+          cat ./*.sha256 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cd ..
+          awk -v heading="## [$RELEASE_VERSION] - " '
+            index($0, heading) == 1 { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Upload to a draft, then publish
+        run: |
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true
+          else
+            gh release create "$tag" --verify-tag --draft \
+              --title "iotap $RELEASE_VERSION" --notes-file notes.md
+          fi
+          gh release upload "$tag" dist/*.tar.gz dist/SHA256SUMS --clobber
+          gh release edit "$tag" --draft=false --latest \
+            --title "iotap $RELEASE_VERSION" --notes-file notes.md

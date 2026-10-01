@@ -24,11 +24,19 @@ iotap keeps only metadata (paths, addresses, sizes and timings) and never the da
 
 ## Quick start
 
+Install a prebuilt binary with [Homebrew](https://brew.sh):
+
+```sh
+brew install rath/tap/iotap
+iotap --version
 ```
-cargo build --release
-sudo ./target/release/iotap 1234         # one process, by ID
-sudo ./target/release/iotap curl         # by name; processes started later under it too
-sudo ./target/release/iotap --tui curl   # the same as live tables you can drill into
+
+Then trace a running process:
+
+```sh
+sudo iotap 1234         # one process, by ID; replace 1234 with a running PID
+sudo iotap curl         # by name; processes started later under it too
+sudo iotap --tui curl   # the same as live tables you can drill into
 ```
 
 Tracing needs root. [Why it needs root](#why-it-needs-root) says what iotap does with that access
@@ -36,6 +44,35 @@ and what it leaves alone. Add `-f` to follow the processes a traced one starts, 
 JSON object per line, and `--record FILE` to save a trace that `--replay FILE` shows again later,
 without root. [Requirements](#requirements) lists what a build needs, and [Usage](#usage) lists
 every option.
+
+### Install and update
+
+The [Homebrew tap](https://github.com/rath/homebrew-tap) supports Apple Silicon
+Macs and Linux on ARM64 or x86-64. Rust is not needed. Homebrew manages runtime
+dependencies; its own operating-system requirements also apply.
+
+```sh
+brew update
+brew upgrade iotap
+brew test rath/tap/iotap
+```
+
+You can also download an archive for your platform from
+[GitHub Releases](https://github.com/rath/iotap/releases/latest), verify it against
+`SHA256SUMS`, unpack it, and put the `iotap` executable on your `PATH`. Linux
+release binaries require glibc 2.28 or newer, libelf, and zlib. On Debian/Ubuntu,
+install the runtime libraries with `sudo apt install libelf1 zlib1g`; on
+RHEL/Fedora, use `sudo dnf install elfutils-libelf zlib`.
+
+To build from source, including on Intel Macs, first install the build tools in
+[Requirements](#requirements), then run:
+
+```sh
+git clone https://github.com/rath/iotap.git
+cd iotap
+cargo build --release --locked
+sudo ./target/release/iotap 1234
+```
 
 ## Example
 
