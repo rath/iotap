@@ -117,6 +117,27 @@ impl<W: Write> JsonSink<W> {
 }
 
 impl<W: Write> Sink for JsonSink<W> {
+    fn network(&mut self, update: &crate::traffic::Update) -> io::Result<()> {
+        #[derive(Serialize)]
+        struct Record<'a, T> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            #[serde(flatten)]
+            data: &'a T,
+        }
+        match update {
+            crate::traffic::Update::Sample(sample) if !self.quiet => self.line(&Record {
+                kind: "network_sample",
+                data: sample,
+            }),
+            crate::traffic::Update::Status(status) => self.line(&Record {
+                kind: "network_status",
+                data: status,
+            }),
+            crate::traffic::Update::Sample(_) => Ok(()),
+        }
+    }
+
     fn event(&mut self, event: &IoEvent) -> io::Result<()> {
         if self.quiet {
             return Ok(());

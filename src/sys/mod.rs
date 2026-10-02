@@ -11,6 +11,8 @@ pub mod ebpf;
 #[cfg(target_os = "macos")]
 pub mod kdebug;
 pub mod net;
+#[cfg(target_os = "macos")]
+pub mod network_stats;
 pub mod proc;
 pub mod time;
 pub mod user;

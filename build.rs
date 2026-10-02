@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo::rerun-if-changed=csrc/iotap_shim.c");
+    println!("cargo::rerun-if-changed=csrc/network_stats.c");
     println!("cargo::rerun-if-changed=bpf/iotap.bpf.c");
     println!("cargo::rerun-if-env-changed=CLANG");
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
@@ -15,8 +16,11 @@ fn main() {
 
 /// The C shim over the libproc structures the `libc` crate lacks.
 fn shim() {
+    println!("cargo::rustc-link-lib=framework=CoreFoundation");
     cc::Build::new()
         .file("csrc/iotap_shim.c")
+        .file("csrc/network_stats.c")
+        .flag("-fblocks")
         .flag("-Wall")
         .flag("-Wextra")
         .flag("-Werror")

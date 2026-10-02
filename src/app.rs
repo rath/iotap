@@ -181,6 +181,10 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
 
     let timebase = Timebase::host();
     let anchor = ClockAnchor::now();
+    #[cfg(target_os = "macos")]
+    let network = filter(cli)
+        .network
+        .then(|| sys::network_stats::Collector::start(&targets.tracked, anchor, timebase));
     let pids: Vec<i32> = targets.tracked.iter().map(|t| t.pid).collect();
     let mut facility = Facility::start(cli.buffer, &pids, cli.children)?;
     let info = SessionInfo {
@@ -238,6 +242,8 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
             deadline,
             expired: false,
             reported: false,
+            #[cfg(target_os = "macos")]
+            network,
         };
         let consumed = match &mut output {
             Output::Printer(printer) => consume(&mut input, &mut session, printer.sink()),
@@ -273,6 +279,8 @@ fn trace_live(cli: &Cli) -> Result<ExitCode> {
 
 /// Live input: what the reader thread sends, saved as it arrives when recording.
 struct LiveInput<'a> {
+    #[cfg(target_os = "macos")]
+    network: Option<sys::network_stats::Collector>,
     rx: &'a Receiver<Input>,
     src: &'a mut LiveSource,
     stop: &'a AtomicBool,
@@ -295,8 +303,22 @@ enum Step {
 }
 
 impl LiveInput<'_> {
+    #[cfg(target_os = "macos")]
+    fn network_step(&mut self, session: &mut Session, sink: &mut dyn Sink) -> io::Result<()> {
+        if let Some(network) = &mut self.network {
+            for data in network.drain() {
+                let input = Input::Network(data);
+                self.src.input(&input);
+                session.handle(&input, self.src, sink)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Waits up to `wait` for the next input and hands it to the session.
     fn step(&mut self, session: &mut Session, sink: &mut dyn Sink, wait: Duration) -> io::Result<Step> {
+        #[cfg(target_os = "macos")]
+        self.network_step(session, sink)?;
         if !self.expired && self.deadline.is_some_and(|at| Instant::now() >= at) {
             self.expired = true;
             self.stop.store(true, Ordering::SeqCst);
@@ -304,7 +326,44 @@ impl LiveInput<'_> {
         let input = match self.rx.recv_timeout(wait) {
             Ok(input) => input,
             Err(RecvTimeoutError::Timeout) => return Ok(Step::Idle),
-            Err(RecvTimeoutError::Disconnected) => return Ok(Step::Closed),
+            Err(RecvTimeoutError::Disconnected) => {
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(network) = &mut self.network {
+                        network.finish();
+                    }
+                    self.network_step(session, sink)?;
+                }
+                return Ok(Step::Closed);
+            }
+        };
+        #[cfg(target_os = "macos")]
+        let input = {
+            match &input {
+                Input::Attached { process, .. } => {
+                    if let Some(network) = &self.network {
+                        let info = session.info();
+                        network.add_pid(
+                            process.pid,
+                            info.anchor.unix_nanos_at(info.timebase, time::now_ticks()),
+                        );
+                    }
+                }
+                Input::Stopped { .. } => {
+                    if let Some(network) = &mut self.network {
+                        network.finish();
+                    }
+                    self.network_step(session, sink)?;
+                }
+                _ => {}
+            }
+            if matches!(input, Input::Stopped { .. }) && self.network.is_some() {
+                Input::Stopped {
+                    ticks: time::now_ticks(),
+                }
+            } else {
+                input
+            }
         };
         self.src.input(&input);
         session.handle(&input, self.src, sink)?;

@@ -122,6 +122,28 @@ pub fn notice_text(notice: &Notice, clock: &mut LocalClock) -> String {
 }
 
 impl<W: Write> Sink for TextSink<W> {
+    fn network(&mut self, update: &crate::traffic::Update) -> io::Result<()> {
+        match update {
+            crate::traffic::Update::Sample(sample) if !self.quiet => writeln!(
+                self.out,
+                "{}  network  {}  received {}  sent {}  {}",
+                self.clock.format(sample.time_ns),
+                sample.pid,
+                bytes(sample.received_bytes),
+                bytes(sample.sent_bytes),
+                sample.target
+            ),
+            crate::traffic::Update::Status(status) => {
+                if let Some(reason) = &status.reason {
+                    self.out.flush()?;
+                    let _ = writeln!(io::stderr(), "iotap: {reason}");
+                }
+                Ok(())
+            }
+            crate::traffic::Update::Sample(_) => Ok(()),
+        }
+    }
+
     fn event(&mut self, event: &IoEvent) -> io::Result<()> {
         if self.quiet {
             return Ok(());
@@ -158,13 +180,23 @@ pub fn write_summary(
     if let Some(hosts) = hosts.as_deref_mut()
         && filter.network
     {
-        let shown: Vec<IpAddr> = summary
+        let mut shown: Vec<IpAddr> = summary
             .network
             .iter()
             .take(top)
             .filter_map(|row| row.key.remote())
             .map(|addr| addr.ip())
             .collect();
+        if let Some(traffic) = &summary.network_traffic {
+            shown.extend(
+                traffic
+                    .targets
+                    .iter()
+                    .take(top)
+                    .filter_map(|row| row.key.remote())
+                    .map(|addr| addr.ip()),
+            );
+        }
         hosts.look_up(&shown, Instant::now() + HOST_NAMES_WAIT);
     }
     let mut processes: Vec<String> = summary
@@ -188,7 +220,21 @@ pub fn write_summary(
         table(out, "Files", ["READ", "WRITTEN"], &summary.files, top, None)?;
     }
     if filter.network {
-        table(out, "Network", ["RECEIVED", "SENT"], &summary.network, top, hosts)?;
+        if let Some(traffic) = &summary.network_traffic {
+            traffic_table(out, traffic, top, hosts.as_deref_mut())?;
+        }
+        table(
+            out,
+            if summary.network_traffic.is_some() {
+                "Network syscalls"
+            } else {
+                "Network"
+            },
+            ["RECEIVED", "SENT"],
+            &summary.network,
+            top,
+            hosts,
+        )?;
     }
     if filter.other && !summary.other.is_empty() {
         table(
@@ -203,6 +249,50 @@ pub fn write_summary(
 
     write_totals(out, summary, filter)?;
     write_gaps(out, summary)
+}
+
+fn traffic_table(
+    out: &mut dyn Write,
+    traffic: &crate::traffic::Report,
+    top: usize,
+    mut hosts: Option<&mut Hosts>,
+) -> io::Result<()> {
+    writeln!(out, "\nNetwork traffic (macOS statistics)")?;
+    if let Some(reason) = &traffic.status.reason {
+        writeln!(out, "  {reason}")?;
+    }
+    if traffic.status.state != crate::traffic::State::Unavailable {
+        writeln!(out, "  {:>10}  {:>10}  TARGET", "RECEIVED", "SENT")?;
+        for row in traffic.targets.iter().take(top) {
+            let host = match (row.key.remote(), hosts.as_deref_mut()) {
+                (Some(addr), Some(hosts)) => hosts.name(addr.ip()),
+                _ => None,
+            };
+            writeln!(
+                out,
+                "  {:>10}  {:>10}  {}",
+                bytes(row.received_bytes),
+                bytes(row.sent_bytes),
+                row.key.named(host)
+            )?;
+        }
+        writeln!(
+            out,
+            "  total received {}, sent {}",
+            bytes(traffic.received_bytes),
+            bytes(traffic.sent_bytes)
+        )?;
+        for interface in &traffic.interfaces {
+            writeln!(
+                out,
+                "    {}  received {}, sent {}",
+                interface.interface,
+                bytes(interface.received_bytes),
+                bytes(interface.sent_bytes)
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Writes the totals by kind of I/O, and network I/O by interface.
@@ -224,7 +314,17 @@ fn write_totals(out: &mut dyn Write, summary: &Summary, filter: &Filter) -> io::
         writeln!(out, "{files}")?;
     }
     if filter.network {
-        let network = line("  network ", "received", t.net_read, "sent", t.net_write);
+        let network = line(
+            if summary.network_traffic.is_some() {
+                "  network syscalls "
+            } else {
+                "  network "
+            },
+            "received",
+            t.net_read,
+            "sent",
+            t.net_write,
+        );
         writeln!(out, "{network}")?;
         let names: Vec<String> = summary
             .interfaces
@@ -399,6 +499,7 @@ mod tests {
             });
         }
         Summary {
+            network_traffic: None,
             duration_ns: 1_000_000_000,
             processes: vec![Process {
                 pid: 7,

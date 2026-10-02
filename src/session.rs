@@ -72,6 +72,7 @@ pub struct UntracedChildren {
 /// What the kernel reader delivers, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
+    Network(crate::traffic::Input),
     Records(Records),
     /// A process is now traced too: a newly started one matching a traced name, or one that
     /// `parent`, a traced process, started. What it did before is not in the trace.
@@ -135,6 +136,9 @@ pub enum Notice {
 pub trait Sink {
     fn event(&mut self, event: &IoEvent) -> io::Result<()>;
     fn notice(&mut self, notice: &Notice) -> io::Result<()>;
+    fn network(&mut self, _update: &crate::traffic::Update) -> io::Result<()> {
+        Ok(())
+    }
     /// Called after each input has been handled.
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -198,6 +202,8 @@ pub struct Summary {
     pub files: Vec<SummaryRow>,
     pub network: Vec<SummaryRow>,
     pub other: Vec<SummaryRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_traffic: Option<crate::traffic::Report>,
 }
 
 #[derive(Debug)]
@@ -261,6 +267,7 @@ pub struct Session {
     fds: FdTable,
     interfaces: Table,
     stats: Stats,
+    traffic: crate::traffic::Tracker,
     processes: BTreeMap<i32, ProcessState>,
     lost_events: u64,
     untraced: UntracedChildren,
@@ -288,6 +295,7 @@ impl Session {
             fds: FdTable::new(retry_ticks),
             interfaces: Table::new(src.interfaces(), info.anchor.ticks, retry_ticks),
             stats: Stats::default(),
+            traffic: crate::traffic::Tracker::default(),
             processes: BTreeMap::new(),
             lost_events: 0,
             untraced: UntracedChildren::default(),
@@ -366,6 +374,19 @@ impl Session {
     pub fn handle(&mut self, input: &Input, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
         // Records only ever come in the format of the session's system.
         match input {
+            Input::Network(input) => {
+                if self.filter.network {
+                    for update in self.traffic.ingest(input) {
+                        if let crate::traffic::Update::Sample(sample) = &update {
+                            if !self.filter.accepts_interface(&sample.interface) {
+                                continue;
+                            }
+                            self.traffic.stats.record_traffic(sample);
+                        }
+                        sink.network(&update)?;
+                    }
+                }
+            }
             Input::Records(Records::Kdebug(records)) => {
                 for record in records {
                     let step = match &mut self.decoder {
@@ -470,6 +491,7 @@ impl Session {
             files: self.stats.summary_rows(Category::File),
             network: self.stats.summary_rows(Category::Network),
             other: self.stats.summary_rows(Category::Other),
+            network_traffic: self.traffic.report(),
         }
     }
 

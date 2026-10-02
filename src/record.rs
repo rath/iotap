@@ -24,7 +24,7 @@ use crate::trace::procs::{Described, ProcSource, Snapshot};
 use crate::trace::{Records, System};
 
 const MAGIC: &[u8; 8] = b"IOTAPREC";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Refuses frames larger than this, so a corrupt length cannot exhaust memory.
 const MAX_FRAME: usize = 1 << 30;
 
@@ -40,6 +40,7 @@ const TAG_WATERMARK: u8 = 9;
 const TAG_LINUX_RECORDS: u8 = 10;
 const TAG_UNTRACED: u8 = 11;
 const TAG_INTERFACES: u8 = 12;
+const TAG_NETWORK: u8 = 13;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -135,6 +136,7 @@ impl<W: Write> Recorder<W> {
 
     pub fn input(&mut self, input: &Input) -> io::Result<()> {
         match input {
+            Input::Network(input) => self.json(TAG_NETWORK, input),
             Input::Records(Records::Kdebug(records)) => {
                 let mut payload = Vec::with_capacity(records.len() * KdBuf::SIZE);
                 for record in records {
@@ -455,6 +457,7 @@ fn not_a_recording(err: io::Error) -> ReplayError {
 /// version of the same layout added, which is skipped.
 fn input_frame(tag: u8, payload: &[u8]) -> Result<Option<Input>, String> {
     Ok(Some(match tag {
+        TAG_NETWORK => Input::Network(json(payload)?),
         TAG_KDEBUG_RECORDS => Input::Records(Records::Kdebug(kdebug_records(payload)?)),
         TAG_LINUX_RECORDS => Input::Records(Records::Linux(linux_records(payload)?)),
         TAG_ATTACHED => {

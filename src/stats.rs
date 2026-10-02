@@ -191,9 +191,24 @@ pub struct Row {
     /// Wall-clock time of the first and of the latest event, in Unix nanoseconds.
     pub first_ns: u64,
     pub last_ns: u64,
+    /// Last measured interval of each connection, separate from syscall counters.
+    measured_rates: HashMap<(u64, u64), (u64, u64, u64, u64)>,
 }
 
 impl Row {
+    pub fn measured_rate(&self, now_ns: u64) -> (u64, u64) {
+        self.measured_rates
+            .values()
+            .filter(|&&(at, _, _, _)| now_ns.saturating_sub(at) <= 2_000_000_000)
+            .fold((0u64, 0u64), |(rx, tx), &(_, span, received, sent)| {
+                let rate = |bytes| {
+                    u64::try_from(u128::from(bytes) * 1_000_000_000 / u128::from(span.max(1)))
+                        .unwrap_or(u64::MAX)
+                };
+                (rx.saturating_add(rate(received)), tx.saturating_add(rate(sent)))
+            })
+    }
+
     pub fn bytes(&self) -> u64 {
         self.read.bytes.saturating_add(self.write.bytes)
     }
@@ -204,7 +219,11 @@ impl Row {
 
     /// Distinct local socket addresses seen for this peer.
     pub fn connections(&self) -> usize {
-        self.locals.len()
+        if self.measured_rates.is_empty() {
+            self.locals.len()
+        } else {
+            self.measured_rates.len()
+        }
     }
 
     /// The local socket addresses seen for this peer, in order.
@@ -411,6 +430,107 @@ fn compare(sort: SortBy, (ka, a): &(&Key, &Row), (kb, b): &(&Key, &Row)) -> Orde
 }
 
 impl Stats {
+    /// Adds measured network bytes without manufacturing a syscall or its latency.
+    pub fn record_traffic(&mut self, sample: &crate::traffic::Sample) {
+        if sample.time_ns <= sample.interval_start_ns {
+            return;
+        }
+        let target = Target::Socket(sample.target.clone());
+        let key = Key::of(&target);
+        if sample.received_bytes == 0 && sample.sent_bytes == 0 && !self.rows.contains_key(&key) {
+            return;
+        }
+        let row = self.rows.entry(key).or_insert_with(|| {
+            self.targets[category_index(Category::Network)] += 1;
+            Row {
+                first_ns: sample.time_ns,
+                last_ns: sample.time_ns,
+                ..Row::default()
+            }
+        });
+        row.read.bytes = row.read.bytes.saturating_add(sample.received_bytes);
+        row.write.bytes = row.write.bytes.saturating_add(sample.sent_bytes);
+        if sample.received_bytes != 0 || sample.sent_bytes != 0 {
+            row.last_ns = row.last_ns.max(sample.time_ns);
+        }
+        if let Err(at) = row.pids.binary_search(&sample.pid) {
+            row.pids.insert(at, sample.pid);
+        }
+        if let Some(local) = sample.target.local {
+            row.locals.insert(local);
+        }
+        row.interfaces.insert(sample.interface.clone());
+        let elapsed = sample.time_ns.saturating_sub(sample.interval_start_ns).max(1);
+        row.measured_rates.insert(
+            (sample.process_id, sample.source),
+            (sample.time_ns, elapsed, sample.received_bytes, sample.sent_bytes),
+        );
+        self.totals.net_read.bytes = self.totals.net_read.bytes.saturating_add(sample.received_bytes);
+        self.totals.net_write.bytes = self.totals.net_write.bytes.saturating_add(sample.sent_bytes);
+        let traffic = self.interfaces.entry(sample.interface.clone()).or_default();
+        traffic.read.bytes = traffic.read.bytes.saturating_add(sample.received_bytes);
+        traffic.write.bytes = traffic.write.bytes.saturating_add(sample.sent_bytes);
+        // Rate samples are interval averages. Attribute their history to the completed
+        // interval, rather than treating delayed polling as an instantaneous burst.
+        let last = sample.time_ns.saturating_sub(1) / 1_000_000_000;
+        let first = (sample.interval_start_ns / 1_000_000_000).max(last.saturating_sub(119));
+        for second in first..=last {
+            let start = sample.interval_start_ns.max(second * 1_000_000_000);
+            let end = sample
+                .time_ns
+                .min(second.saturating_add(1).saturating_mul(1_000_000_000));
+            let share = |bytes| {
+                u64::try_from(u128::from(bytes) * u128::from(end - start) / u128::from(elapsed))
+                    .unwrap_or(u64::MAX)
+            };
+            let (received, sent) = (share(sample.received_bytes), share(sample.sent_bytes));
+            let traffic = self.interfaces.entry(sample.interface.clone()).or_default();
+            let [older, latest] = &mut traffic.recent;
+            if second > latest.unix_sec {
+                *older = *latest;
+                *latest = Moved {
+                    unix_sec: second,
+                    ..Moved::default()
+                };
+            }
+            let moved = if second == latest.unix_sec {
+                Some(latest)
+            } else if second == older.unix_sec {
+                Some(older)
+            } else {
+                None
+            };
+            if let Some(moved) = moved {
+                moved.read = moved.read.saturating_add(received);
+                moved.write = moved.write.saturating_add(sent);
+            }
+            if let Some(history) = self.measured_second(second) {
+                history.net_read = history.net_read.saturating_add(received);
+                history.net_write = history.net_write.saturating_add(sent);
+            }
+        }
+    }
+
+    fn measured_second(&mut self, second: u64) -> Option<&mut Second> {
+        if self
+            .history
+            .back()
+            .is_some_and(|last| last.unix_sec.saturating_sub(second) >= HISTORY_SECONDS as u64)
+        {
+            return None;
+        }
+        while let Some(first) = self.history.front() {
+            if first.unix_sec <= second {
+                break;
+            }
+            self.history.push_front(Second {
+                unix_sec: first.unix_sec - 1,
+                ..Second::default()
+            });
+        }
+        Some(self.second(second))
+    }
+
     pub fn record(&mut self, event: &IoEvent) {
         let key = Key::of(&event.target);
         let category = key.category();

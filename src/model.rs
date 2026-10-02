@@ -404,6 +404,16 @@ impl Serialize for Via {
     }
 }
 
+impl<'de> Deserialize<'de> for Via {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            None => Self::NoInterface,
+            Some(name) if name == "?" => Self::Unknown,
+            Some(name) => Self::Interface(name.into()),
+        })
+    }
+}
+
 /// How iotap learned what a descriptor refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
