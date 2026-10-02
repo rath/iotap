@@ -139,6 +139,8 @@ without it they are skipped. When changing the scripts:
 | `src/trace/fdtable.rs` | What each descriptor of each process refers to; checks the answers of libproc or `/proc` against the trace |
 | `src/trace/procs.rs` | `ProcSource`: libproc or `/proc`, and the host's network interfaces, when live; fixed answers in tests |
 | `src/stats.rs` | Per-target, per-interface and per-second aggregation |
+| `src/traffic.rs` | Deterministic differences of macOS network counters, separate from syscall accounting |
+| `src/sys/network_stats.rs`, `csrc/network_stats.c` | Optional NetworkStatistics collector and safe Rust boundary; metadata only, including Skywalk |
 | `src/interfaces.rs` | Which network interface a socket's traffic goes over: the host's interfaces as last listed, and the rules that name one from a socket's addresses |
 | `src/hosts.rs` | Host names of remote addresses for the terminal UI and the text summary: threads that ask the resolver, and the answers so far |
 | `src/record.rs` | `--record` and `--replay` file format |

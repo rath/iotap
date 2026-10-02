@@ -7,6 +7,9 @@ for macOS and Linux.
 Give iotap a process ID or a name and it reports every read and write that process makes as it
 happens: the file or the remote address, how many bytes were asked for and how many moved, how long
 the call took, and whether it failed. When you stop, it sums the trace up per file and per endpoint.
+On macOS it also measures TCP/UDP traffic through the system's network statistics, including
+Skywalk traffic that does not make ordinary socket read/write calls. These measurements are
+kept separate from syscall byte counts.
 
 It is for the moment when something on your machine is busy and you want to know with what: a
 process is chewing through the disk, an app you just installed is talking to somewhere you never
@@ -126,7 +129,8 @@ can be told to log each one as it happens, with the process it came from, its ar
 result.
 
 - On macOS that log is the kernel trace facility, kdebug, the same source Apple's `fs_usage`
-  reads. It is built into the kernel, so nothing has to be installed.
+  reads. Network measurements use the built-in NetworkStatistics framework; root also gives
+  it access to Skywalk statistics. Nothing has to be installed.
 - On Linux, iotap loads a small eBPF program of its own onto the kernel's syscall tracepoints.
   The kernel verifies the program before running it and unloads it when iotap exits.
 
@@ -245,12 +249,23 @@ epoch.
 |---|---|
 | `start` | `time_ns`, `processes` |
 | `event` | `time_ns`, `pid`, `tid`, `op`, `dir`, `syscall`, `fd`, `requested`, `bytes`, `messages`, `errno`, `error`, `latency_ns`, `target`, `interface`, `resolved` |
+| `network_sample` | macOS: `time_ns`, `interval_start_ns`, `source`, `process_id`, `pid`, `target`, `interface`, `received_bytes`, `sent_bytes` |
+| `network_status` | macOS: `time_ns`, `state` (`active`, `partial`, `unavailable`), `reason` |
 | `lost_events` | `time_ns` |
 | `attached` | `pid`, `name`, `parent` |
 | `untraced` | `pid`, `parent`, `reason` |
 | `exec` | `pid`, `path` |
 | `exited` | `pid`, `name` |
-| `summary` | `duration_ns`, `processes`, `totals`, `interfaces`, `lost_events`, `unfinished_calls`, `calls_started_before_trace`, `untraced_children`, `unknown_interface_calls`, `files`, `network`, `other` |
+| `summary` | `duration_ns`, `processes`, `totals`, `interfaces`, `lost_events`, `unfinished_calls`, `calls_started_before_trace`, `untraced_children`, `unknown_interface_calls`, `files`, `network`, `other`, optional `network_traffic` |
+
+`event`, `totals`, `network` and `interfaces` retain their syscall meanings. Never add their
+bytes to `network_traffic`: they can describe the same communication. A `network_sample`
+contains the increase in OS counters over its interval, not one syscall. Its target is an
+endpoint (`proto`, optional `local` and `remote`); `source` identifies the observed connection
+and `process_id` distinguishes different processes that reused the same PID. `network_traffic`
+contains `source`, `status`, `received_bytes`, `sent_bytes`, per-interface `interfaces` and
+per-endpoint `targets`. Check its status before interpreting totals; unavailable statistics
+do not mean that the application used no network. `-q` suppresses samples but keeps status.
 
 The `parent` of an `attached` process is the traced process that started it, or null when iotap
 does not know it, as for a process attached by its name. An `untraced` object tells of a child
@@ -310,11 +325,30 @@ events are not kept for it. This is the Files tab after replaying a recorded dow
 | `r` | Reset the view: tables, totals and events start again from zero, and the clock shows the time since the reset. The summary still covers the whole trace |
 | `n` | Show remote addresses as host names, or as addresses again (see [Host names](#host-names)). The summary printed on quitting does as the UI did |
 | `i` | Show the network throughput of each interface below the totals, or hide it again (see [Network interfaces](#network-interfaces)) |
+| `v` | On macOS, switch Network between OS-measured Traffic and socket Syscalls |
 | Up, Down, Page Up, Page Down, Home, End, or `k` `j` `g` `G` | In the Files and Network tabs, select a row and move the selection; the first key selects the top row, or the last row for End. In the Events tab, scroll; End follows new events again |
 | Esc | Back out a step: close the details, then let go of the selection, then quit |
 | `q`, Ctrl-C | Quit and print the summary |
 
 The UI stays open after tracing stops and says why it stopped.
+
+On macOS, Network starts in **Traffic** view: received and sent bytes, interval-average rates,
+connection counts and endpoints. **Syscalls** keeps the existing socket-call table, including
+Unix-domain sockets, call counts, errors and latencies. The top network totals and interface
+table follow the selected view. Pause and reset apply to both views; resetting does not change
+the final summary. The text summary prints Traffic and Syscalls separately.
+
+Traffic is sampled about once a second. Existing connections start at a baseline so their
+earlier traffic is excluded. New connections whose start is known to follow attachment include
+their first counters. Rates distribute each measured interval over the seconds it covers;
+they are estimates within that interval, not packet timestamps. An interface change whose
+bytes cannot be attributed unambiguously is shown as `?`. Only processes selected by the usual
+target rules are included; activity delegated to an unrelated system service is not reassigned.
+
+NetworkStatistics is a private macOS interface. If it is unavailable, iotap says so and keeps
+tracing syscalls. Lost samples, restarted counters or an unresponsive collector mark measurements
+as partial, retaining the bytes already observed. The UI does not show partial data as a current
+rate. Linux and older recordings keep the syscall-only view.
 
 Nothing is selected at first, and each table shows its top rows as they change. A selected row is
 bold, with a mark in the left margin, and the selection stays with its target as the rows
@@ -425,6 +459,10 @@ calls use that system's numbers for errors, address families and flags. iotap wr
 each time it has read the trace up to a new point, so the recording of a run that was killed replays
 up to about there, and says that it ends abruptly.
 
+Version 3 recordings also save macOS network counter observations, their timestamps and status.
+Their differences are calculated again during replay, without consulting the live system.
+Version 1 and 2 recordings remain readable and have no OS traffic measurements.
+
 ## How it works
 
 1. On macOS, iotap configures kdebug to record BSD syscalls, file-system path lookups and process
@@ -470,7 +508,7 @@ up to about there, and says that it ends abruptly.
 - **One owner, on macOS.** Only one program can use kdebug at a time. iotap cannot run alongside
   fs_usage, ktrace, Instruments or tailspin. On Linux several iotap runs, and other eBPF tools,
   can trace at once.
-- **Only syscalls.** Memory-mapped file I/O and I/O the kernel does on a process's behalf, such as
+- **Syscall coverage.** Memory-mapped file I/O and I/O the kernel does on a process's behalf, such as
   page-cache writeback, never appear. On Linux neither does I/O submitted through io_uring or
   libaio (`io_submit`), nor data that `splice`, `tee`, `vmsplice` or `copy_file_range` move.
 - **Unknown sizes.** On macOS, `sendfile` returns its byte count through a pointer the trace does
@@ -612,6 +650,13 @@ interface checks a route to 192.0.2.1, such as a default route.
     Totals line for `lo0` and no Files table; with a name no interface has, a warning and the
     trace. In the terminal UI, `i` must show a row for each interface, its columns in line with
     the throughput's, and the details of the connected socket its interface.
+
+14. **Network statistics.** Trace a Foundation HTTP client with `--json --record`. Expect
+    `network_sample` records with its PID and endpoint, a separate `network_traffic` summary
+    whose totals equal those samples, and a byte-identical replay. Compare received bytes
+    with `nettop` while the connection is still open. The client reports whether macOS chose
+    a Skywalk channel. In the TUI, `v` must switch between Traffic and Syscalls without changing
+    either account.
 
 ### Linux
 

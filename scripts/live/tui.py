@@ -176,6 +176,12 @@ def keys(binary, pid, writer, written, copy):
     ui.show("Files tab, live")
     ui.keys("2")
     ui.show("Network tab")
+    if MACOS:
+        ui.verdict(has(ui.lines(), "Network: Traffic"), "Network defaults to OS traffic")
+        ui.keys("v")
+        ui.verdict(has(ui.lines(), "Network: Syscalls"), "v selects syscall accounting")
+        ui.keys("v")
+        ui.verdict(has(ui.lines(), "Network: Traffic"), "v restores traffic accounting")
     ui.keys("3")
     ui.show("Events tab")
     ui.keys("\x1b[A\x1b[A\x1b[A")
@@ -342,6 +348,8 @@ def names(binary, curl, peer, ip, name, slow):
     ui = Ui("I slow lookups", [binary, "--tui", "--resolve", peer])
     ui.pump(2.0)
     ui.keys("2", wait=1.0)
+    if MACOS:
+        ui.keys("v")  # These sockets exercise failed calls, not transferred traffic.
     first = ui.show("Network tab")
     ui.verdict(has(first, "udp one.one.one.one:9"), "a quick name shows")
     ui.verdict(has(first, f"udp {slow}:9"), "the slow address shows as itself meanwhile")
@@ -373,6 +381,8 @@ def names(binary, curl, peer, ip, name, slow):
 def interfaces(binary, pid, iface, loopback, far):
     ui = Ui("J interfaces", [binary, "--tui", pid])
     ui.pump(2.5)
+    if MACOS:
+        ui.keys("2v1")  # This scenario checks the interface attributed to each syscall.
     lines = ui.show("Files tab")
     ui.verdict(
         has(lines, "FILE READ") and not has(lines, "INTERFACE"), "no interface table at first"

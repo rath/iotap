@@ -391,6 +391,102 @@ def interfaces(run):
     shared.interfaces(run)
 
 
+@check("Darwin", 14, "Network statistics")
+def network_statistics(run):
+    client = os.path.join(run.work, "network-client")
+    built = subprocess.run(
+        [
+            "clang",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-fobjc-arc",
+            "-fblocks",
+            os.path.join(HERE, "network_client.m"),
+            "-framework",
+            "Foundation",
+            "-o",
+            client,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if not run.expect(built.returncode == 0, "the Foundation client builds", built.stderr):
+        return
+    url = "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/ntstat.h"
+    proc = run.start([client, url], stdout="client.out", stderr="client.err")
+    if not run.expect(wait_for(lambda: "ready" in run.read("client.out"), 5), "the client starts"):
+        return
+    recording = run.file("network.iotaprec")
+    rc = run.iotap(
+        "--json",
+        "--record",
+        recording,
+        "-d",
+        "10",
+        proc.pid,
+        stdout="network.json",
+        stderr="network.err",
+        timeout=20,
+    )
+    lines = json_lines(run.file("network.json"))
+    samples = [line for line in lines if line.get("type") == "network_sample"]
+    total = next((line for line in lines if line.get("type") == "summary"), {})
+    traffic = total.get("network_traffic", {})
+    received = sum(sample.get("received_bytes", 0) for sample in samples)
+    sent = sum(sample.get("sent_bytes", 0) for sample in samples)
+    run.expect(
+        rc == 0 and received > 0 and traffic.get("status", {}).get("state") == "active",
+        "Foundation traffic is measured independently of syscalls",
+        f"received {received}, client: {run.read('client.out').strip()}",
+    )
+    run.expect(
+        bool(samples)
+        and traffic.get("received_bytes") == received
+        and traffic.get("sent_bytes") == sent,
+        "OS totals sum only the network samples",
+    )
+    run.expect(
+        bool(samples)
+        and all(sample.get("pid") == proc.pid for sample in samples)
+        and any(sample.get("target", {}).get("remote") for sample in samples),
+        "samples identify the selected process and its remote endpoint",
+    )
+    with open(run.file("network.replay"), "wb") as out:
+        replayed = subprocess.run(
+            [run.bin, "--json", "--replay", recording],
+            stdout=out,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+    run.expect(
+        bool(samples)
+        and replayed.returncode == 0
+        and run.read("network.json") == run.read("network.replay"),
+        "network measurements replay byte for byte",
+    )
+    measured = subprocess.run(
+        ["nettop", "-n", "-P", "-x", "-L", "1", "-p", str(proc.pid), "-J", "bytes_in,bytes_out"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    rows = [line.split(",") for line in measured.stdout.splitlines() if f".{proc.pid}," in line]
+    if rows:
+        actual = int(rows[-1][1])
+        run.expect(
+            received > 0 and actual >= received >= actual * 0.8,
+            "received bytes agree with nettop within the sampling window",
+            f"iotap {received}, nettop {actual}",
+        )
+    else:
+        run.expect(False, "nettop still sees the Foundation client", measured.stderr)
+
+
 def traced_program(run, name, *args):
     """Starts a program of programs.py that waits to be traced, traces it until it exits, and
     returns what it wrote about itself and the events iotap saw."""
