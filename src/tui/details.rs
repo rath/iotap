@@ -42,39 +42,8 @@ pub(super) fn lines(
         lines.push(field("host", vec![host]));
     }
 
-    let [read, written] = if key.category() == Category::Network {
-        ["received", "sent"]
-    } else {
-        ["read", "written"]
-    };
-    let moved = |counter: Counter| format!("{} in {}", bytes(counter.bytes), count(counter.calls, "call"));
-    let mut totals = vec![
-        Span::raw(moved(row.read)),
-        Span::styled(format!("   {written} "), DIM),
-        Span::raw(moved(row.write)),
-        Span::styled("   failed ", DIM),
-        Span::raw(row.errors.to_string()),
-    ];
-    if row.messages > 0 {
-        totals.push(Span::raw(format!("   {}", count(row.messages, "message"))));
-    }
-    if row.unsized_calls > 0 {
-        totals.push(Span::raw(format!(
-            "   {} of unknown size",
-            count(row.unsized_calls, "call")
-        )));
-    }
-    lines.push(field(read, totals));
-
-    let latency = match row.latency.mean_ns() {
-        Some(mean) => format!(
-            "{} on average, {} at most",
-            short_latency(mean),
-            short_latency(row.latency.max_ns)
-        ),
-        None => "not timed".to_owned(),
-    };
-    lines.push(field("latency", vec![Span::raw(latency)]));
+    let measured = shown.traffic && key.category() == Category::Network;
+    lines.extend(movement_lines(row, key.category() == Category::Network, measured));
 
     let mut first = view.clock.format(row.first_ns);
     first.truncate(8);
@@ -116,7 +85,7 @@ pub(super) fn lines(
         lines.push(field("local", vec![Span::raw(fit_list(&locals, value_width))]));
     }
 
-    if view.tabs.contains(&Tab::Events) {
+    if view.tabs.contains(&Tab::Events) && !measured {
         let ring = shown.events;
         let mut recent: Vec<&IoEvent> = ring
             .range(ring.first(), ring.end())
@@ -136,6 +105,58 @@ pub(super) fn lines(
             lines.push(field(label, event_spans(event, view)));
         }
     }
+    lines
+}
+
+fn movement_lines(row: &Row, network: bool, measured: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let [read, written] = if network {
+        ["received", "sent"]
+    } else {
+        ["read", "written"]
+    };
+    let moved = |counter: Counter| {
+        if measured {
+            bytes(counter.bytes)
+        } else {
+            format!("{} in {}", bytes(counter.bytes), count(counter.calls, "call"))
+        }
+    };
+    let mut totals = vec![
+        Span::raw(moved(row.read)),
+        Span::styled(format!("   {written} "), DIM),
+        Span::raw(moved(row.write)),
+        Span::styled("   failed ", DIM),
+        Span::raw(row.errors.to_string()),
+    ];
+    if measured {
+        totals.truncate(3);
+    }
+    if row.messages > 0 {
+        totals.push(Span::raw(format!("   {}", count(row.messages, "message"))));
+    }
+    if row.unsized_calls > 0 {
+        totals.push(Span::raw(format!(
+            "   {} of unknown size",
+            count(row.unsized_calls, "call")
+        )));
+    }
+    lines.push(field(read, totals));
+
+    let latency = match row.latency.mean_ns() {
+        Some(mean) => format!(
+            "{} on average, {} at most",
+            short_latency(mean),
+            short_latency(row.latency.max_ns)
+        ),
+        None => "not timed".to_owned(),
+    };
+    if measured {
+        lines.push(field("source", vec![Span::raw("macOS network statistics")]));
+    } else {
+        lines.push(field("latency", vec![Span::raw(latency)]));
+    }
+
     lines
 }
 

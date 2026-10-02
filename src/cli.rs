@@ -8,8 +8,8 @@ use clap::Parser;
 ///
 /// iotap reports every read and write syscall of the chosen processes: descriptor, bytes,
 /// latency and the file path or socket endpoint. On macOS it reads the kernel trace facility
-/// (the source `fs_usage` uses); on Linux it runs an eBPF program of its own. Tracing requires
-/// root; run it with sudo.
+/// (the source `fs_usage` uses) and separately measures TCP/UDP traffic, including Skywalk;
+/// on Linux it runs an eBPF program of its own. Tracing requires root; run it with sudo.
 #[derive(Debug, Parser)]
 #[command(name = "iotap", version, about, long_about)]
 #[expect(clippy::struct_excessive_bools, reason = "independent command-line flags")]
@@ -47,6 +47,8 @@ pub struct Cli {
     /// address; Esc closes the details, then lets go of the selection, then quits; q quits and
     /// prints the summary. The UI stays open after tracing stops. With --quiet it has no Events
     /// tab.
+    /// On macOS, v switches Network between measured Traffic and Syscalls. The traffic view
+    /// has byte counts and rates, while the syscall view keeps call counts and latency.
     #[arg(long, conflicts_with = "json")]
     pub tui: bool,
 
@@ -54,7 +56,8 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
-    /// Print only the summary, not individual events; with --tui, leave out the Events tab.
+    /// Print only the summary, not individual events or traffic samples; with --tui, leave
+    /// out the Events tab.
     #[arg(short, long)]
     pub quiet: bool,
 

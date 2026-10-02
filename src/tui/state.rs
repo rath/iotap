@@ -306,6 +306,8 @@ impl View {
 #[derive(Clone, Debug)]
 struct Frozen {
     stats: Stats,
+    measured: Stats,
+    network_status: Option<crate::traffic::Status>,
     events: Ring,
     processes: Vec<ProcessStatus>,
     lost_events: u64,
@@ -316,6 +318,8 @@ impl Frozen {
     fn of(model: &Model, session: &Session, now_ns: u64) -> Self {
         Self {
             stats: model.stats.clone(),
+            measured: model.measured.clone(),
+            network_status: model.network_status.clone(),
             events: model.events.clone(),
             processes: session.processes(),
             lost_events: model.lost_events(session),
@@ -328,6 +332,8 @@ impl Frozen {
 #[derive(Debug)]
 pub struct Shown<'a> {
     pub stats: &'a Stats,
+    pub traffic: bool,
+    pub network_status: Option<&'a crate::traffic::Status>,
     pub events: &'a Ring,
     pub processes: Cow<'a, [ProcessStatus]>,
     pub lost_events: u64,
@@ -350,6 +356,9 @@ pub struct Shown<'a> {
 #[derive(Debug)]
 pub struct Model {
     stats: Stats,
+    measured: Stats,
+    network_status: Option<crate::traffic::Status>,
+    use_traffic: bool,
     events: Ring,
     /// Records the kernel had dropped when the view was last reset.
     lost_before: u64,
@@ -365,6 +374,9 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             stats: Stats::default(),
+            measured: Stats::default(),
+            network_status: None,
+            use_traffic: true,
             events: Ring::new(EVENT_CAPACITY),
             lost_before: 0,
             reset_ns: None,
@@ -378,16 +390,14 @@ impl Default for Model {
 
 impl Model {
     pub fn shown<'a>(&'a self, session: &'a Session, now_ns: u64) -> Shown<'a> {
-        let (stats, events, processes, lost_events, now_ns) = match &self.frozen {
+        let (events, processes, lost_events, now_ns) = match &self.frozen {
             Some(frozen) => (
-                &frozen.stats,
                 &frozen.events,
                 Cow::Borrowed(frozen.processes.as_slice()),
                 frozen.lost_events,
                 frozen.now_ns,
             ),
             None => (
-                &self.stats,
                 &self.events,
                 Cow::Owned(session.processes()),
                 self.lost_events(session),
@@ -395,7 +405,9 @@ impl Model {
             ),
         };
         Shown {
-            stats,
+            stats: self.stats(),
+            traffic: self.traffic(),
+            network_status: self.network_status(),
             events,
             processes,
             lost_events,
@@ -416,7 +428,25 @@ impl Model {
 
     /// The statistics shown: live, or the copy taken when the view was paused.
     fn stats(&self) -> &Stats {
-        self.frozen.as_ref().map_or(&self.stats, |frozen| &frozen.stats)
+        match (&self.frozen, self.traffic()) {
+            (Some(frozen), true) => &frozen.measured,
+            (Some(frozen), false) => &frozen.stats,
+            (None, true) => &self.measured,
+            (None, false) => &self.stats,
+        }
+    }
+
+    fn network_status(&self) -> Option<&crate::traffic::Status> {
+        self.frozen
+            .as_ref()
+            .map_or(self.network_status.as_ref(), |f| f.network_status.as_ref())
+    }
+
+    fn traffic(&self) -> bool {
+        self.use_traffic
+            && self
+                .network_status()
+                .is_some_and(|s| s.state != crate::traffic::State::Unavailable)
     }
 
     fn toggle_pause(&mut self, session: &Session, now_ns: u64) {
@@ -429,6 +459,7 @@ impl Model {
     /// Forgets the statistics and events shown so far; a paused view stays paused, now empty.
     fn reset(&mut self, session: &Session, now_ns: u64) {
         self.stats = Stats::default();
+        self.measured = Stats::default();
         self.events = Ring::new(EVENT_CAPACITY);
         self.lost_before = session.lost_events();
         self.reset_ns = Some(now_ns);
@@ -529,7 +560,27 @@ impl App {
             KeyCode::Char(digit @ '1'..='9') => view.select(digit),
             KeyCode::Tab | KeyCode::Right => view.next_tab(),
             KeyCode::BackTab | KeyCode::Left => view.previous_tab(),
-            KeyCode::Char('s') => view.sort = view.sort.next(),
+            KeyCode::Char('s') => {
+                view.sort = view.sort.next();
+                if view.tab == Tab::Network && self.model.traffic() && view.sort == SortBy::Calls {
+                    view.sort = view.sort.next();
+                }
+            }
+            KeyCode::Char('v')
+                if view.tab == Tab::Network
+                    && self
+                        .model
+                        .network_status()
+                        .is_some_and(|s| s.state != crate::traffic::State::Unavailable) =>
+            {
+                self.model.use_traffic = !self.model.use_traffic;
+                view.deselect();
+                view.details = false;
+                view.offsets[1] = 0;
+                if view.sort == SortBy::Calls && self.model.traffic() {
+                    view.sort = SortBy::Bytes;
+                }
+            }
             KeyCode::Char('p' | ' ') => self.model.toggle_pause(session, now_ns),
             KeyCode::Char('y') if table => {
                 let key = view.selected_row(self.model.stats()).map(|(key, _)| key.clone());
@@ -613,8 +664,19 @@ fn brief(text: &str) -> Cow<'_, str> {
 }
 
 impl Sink for App {
+    fn network(&mut self, update: &crate::traffic::Update) -> io::Result<()> {
+        match update {
+            crate::traffic::Update::Sample(sample) => self.model.measured.record_traffic(sample),
+            crate::traffic::Update::Status(status) => self.model.network_status = Some(status.clone()),
+        }
+        Ok(())
+    }
+
     fn event(&mut self, event: &IoEvent) -> io::Result<()> {
         self.model.stats.record(event);
+        if event.target.category() != Category::Network {
+            self.model.measured.record(event);
+        }
         if self.keeps_events() {
             self.model.events.push(event.clone());
         }

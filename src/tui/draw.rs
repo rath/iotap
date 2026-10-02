@@ -87,7 +87,7 @@ pub fn draw(frame: &mut Frame<'_>, view: &mut View, shown: &Shown<'_>) {
     draw_title(frame, title, shown);
     draw_rates(frame, rates, shown, label);
     if let Some(rows) = &interfaces {
-        draw_interfaces(frame, interface_area, rows, label);
+        draw_interfaces(frame, interface_area, rows, label, rates_known(shown));
     }
     frame.render_widget(Paragraph::new(alerts), alert_area);
     // Tables start one column in, like the lines above them; that gutter marks the selected
@@ -165,8 +165,8 @@ fn draw_rates(frame: &mut Frame<'_>, area: Rect, shown: &Shown<'_>, label: u16) 
             Cell::from(" per second"),
             value(filter.files, second.file_read),
             value(filter.files, second.file_write),
-            value(filter.network, second.net_read),
-            value(filter.network, second.net_write),
+            value(filter.network && rates_known(shown), second.net_read),
+            value(filter.network && rates_known(shown), second.net_write),
         ]),
         Row::new([
             Cell::from(" total"),
@@ -250,7 +250,7 @@ fn interface_rows(shown: &Shown<'_>, room: usize) -> Option<Vec<InterfaceRow>> {
 }
 
 /// Network I/O by interface, with a first column `label` wide as the rates table has.
-fn draw_interfaces(frame: &mut Frame<'_>, area: Rect, rows: &[InterfaceRow], label: u16) {
+fn draw_interfaces(frame: &mut Frame<'_>, area: Rect, rows: &[InterfaceRow], label: u16, known: bool) {
     let header = Row::new([
         Cell::from(" INTERFACE"),
         right("RECEIVED/S".to_owned()),
@@ -273,8 +273,16 @@ fn draw_interfaces(frame: &mut Frame<'_>, area: Rect, rows: &[InterfaceRow], lab
     let body = rows.iter().map(|row| {
         let cells = [
             Cell::from(row.label.clone()),
-            right(bytes(row.per_second.0)),
-            right(bytes(row.per_second.1)),
+            right(if known {
+                bytes(row.per_second.0)
+            } else {
+                "–".into()
+            }),
+            right(if known {
+                bytes(row.per_second.1)
+            } else {
+                "–".into()
+            }),
             right(bytes(row.total.0)),
             right(bytes(row.total.1)),
         ];
@@ -294,6 +302,9 @@ fn draw_interfaces(frame: &mut Frame<'_>, area: Rect, rows: &[InterfaceRow], lab
 
 fn alerts(shown: &Shown<'_>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if let Some(reason) = shown.network_status.and_then(|status| status.reason.as_ref()) {
+        lines.push(Line::styled(format!(" {reason}"), WARNING));
+    }
     if let Some(reason) = shown.ended {
         lines.push(Line::styled(
             format!(" {reason} Press q for the summary. "),
@@ -317,7 +328,16 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>, 
     let titles = view.tabs.iter().enumerate().map(|(i, &tab)| {
         let (name, count) = match tab {
             Tab::Files => ("Files", tab.rows(stats) as u64),
-            Tab::Network => ("Network", tab.rows(stats) as u64),
+            Tab::Network => (
+                if shown.traffic {
+                    "Network: Traffic"
+                } else if shown.network_status.is_some() {
+                    "Network: Syscalls"
+                } else {
+                    "Network"
+                },
+                tab.rows(stats) as u64,
+            ),
             Tab::Events => ("Events", shown.events.end()),
         };
         format!("{} {name} ({})", i + 1, grouped(count))
@@ -427,10 +447,17 @@ fn draw_targets(
         return String::new();
     }
     let rows = stats.page(|category| tab.lists(category), view.sort, offset, page);
+    let measured = !files && shown.traffic;
 
     let numbers: Vec<[String; 6]> = rows
         .iter()
-        .map(|(_, row)| row_numbers(row, shown.now_ns))
+        .map(|(_, row)| {
+            if measured {
+                measured_numbers(row, shown)
+            } else {
+                row_numbers(row, shown.now_ns)
+            }
+        })
         .collect();
     let widths = target_columns(&numbers);
     let spacing = spacing(area.width);
@@ -439,20 +466,7 @@ fn draw_targets(
     let home = view.home.as_deref();
     let names = view.names;
     let hosts = &mut view.hosts;
-    let highlight = |label: &str, sorted: bool| {
-        let cell = right(label.to_owned());
-        if sorted { cell.style(SORTED) } else { cell }
-    };
-    let header = Row::new([
-        highlight(words[0], matches!(sort, SortBy::Bytes | SortBy::Read)),
-        highlight("CALLS", sort == SortBy::Calls),
-        highlight(words[1], matches!(sort, SortBy::Bytes | SortBy::Write)),
-        highlight("CALLS", sort == SortBy::Calls),
-        right("FAILED".to_owned()),
-        highlight("IDLE", sort == SortBy::Recent),
-        Cell::from("TARGET"),
-    ])
-    .style(BOLD);
+    let header = target_header(sort, words, measured);
     let body = rows
         .iter()
         .zip(&numbers)
@@ -496,6 +510,23 @@ fn draw_targets(
     }
 }
 
+fn target_header(sort: SortBy, words: [&str; 2], measured: bool) -> Row<'static> {
+    let highlight = |label: &str, sorted: bool| {
+        let cell = right(label.to_owned());
+        if sorted { cell.style(SORTED) } else { cell }
+    };
+    Row::new([
+        highlight(words[0], matches!(sort, SortBy::Bytes | SortBy::Read)),
+        highlight(if measured { "/s" } else { "CALLS" }, sort == SortBy::Calls),
+        highlight(words[1], matches!(sort, SortBy::Bytes | SortBy::Write)),
+        highlight(if measured { "/s" } else { "CALLS" }, sort == SortBy::Calls),
+        right(if measured { "CONNS" } else { "FAILED" }.to_owned()),
+        highlight("IDLE", sort == SortBy::Recent),
+        Cell::from("TARGET"),
+    ])
+    .style(BOLD)
+}
+
 /// The columns of the Files and Network tables for rows with these `numbers`: the numbers
 /// take what they need, which is normally what they have, and the target the rest.
 fn target_columns(numbers: &[[String; 6]]) -> [Constraint; 7] {
@@ -514,6 +545,25 @@ fn target_columns(numbers: &[[String; 6]]) -> [Constraint; 7] {
         failed,
         idle,
         Constraint::Fill(1),
+    ]
+}
+
+fn measured_numbers(row: &stats::Row, shown: &Shown<'_>) -> [String; 6] {
+    let (received, sent) = row.measured_rate(shown.now_ns);
+    let rate = |value| {
+        if rates_known(shown) {
+            bytes(value)
+        } else {
+            "–".into()
+        }
+    };
+    [
+        bytes(row.read.bytes),
+        rate(received),
+        bytes(row.write.bytes),
+        rate(sent),
+        row.connections().to_string(),
+        idle(shown.now_ns.saturating_sub(row.last_ns)),
     ]
 }
 
@@ -705,6 +755,13 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
         hints.push("i interfaces");
     }
     hints.push("r reset");
+    if view.tab == Tab::Network
+        && shown
+            .network_status
+            .is_some_and(|s| s.state != crate::traffic::State::Unavailable)
+    {
+        hints.push(if shown.traffic { "v syscalls" } else { "v traffic" });
+    }
     if view.tab != Tab::Files && shown.filter.network {
         hints.push(if view.names { "n addresses" } else { "n names" });
     }
@@ -718,6 +775,11 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, shown: &Shown<'_>
     let status = shown.status.map_or(0, |status| usize::from(width(status)) + 1);
     if let Some(at) = interfaces
         && status + usize::from(width(&hints.join("  "))) + 1 > usize::from(area.width)
+    {
+        hints.remove(at);
+    }
+    if status + usize::from(width(&hints.join("  "))) + 1 > usize::from(area.width)
+        && let Some(at) = hints.iter().position(|hint| hint.starts_with("v "))
     {
         hints.remove(at);
     }
@@ -742,6 +804,13 @@ fn last_second(shown: &Shown<'_>) -> Second {
         .find(|second| second.unix_sec == wanted)
         .copied()
         .unwrap_or_default()
+}
+
+fn rates_known(shown: &Shown<'_>) -> bool {
+    !shown.traffic
+        || shown
+            .network_status
+            .is_some_and(|s| s.state == crate::traffic::State::Active)
 }
 
 fn right(text: String) -> Cell<'static> {
