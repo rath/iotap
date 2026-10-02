@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.0] - 2026-10-02
+
+Measure macOS network traffic even when an application uses Skywalk instead of
+ordinary socket read/write syscalls. Radio streaming through AVPlayer, including
+vtamp, now appears in the Network tab.
+
+- Add OS-measured TCP/UDP byte counts, interval-average rates, endpoints and
+  interfaces on macOS, collected separately from syscall accounting.
+- Start the macOS Network tab in **Traffic** view. Press `v` to switch to
+  **Syscalls** for call counts, errors, latency and Unix-domain socket I/O.
+- Add `network_sample` and `network_status` JSON Lines records and an optional
+  `network_traffic` summary. Existing event and syscall summary fields keep their
+  meanings; do not add the two accounts together.
+- Save network counter observations in version 3 recordings for deterministic
+  replay. Versions 1 and 2 remain readable; older iotap versions cannot read
+  version 3 recordings.
+- Report unavailable or incomplete macOS statistics and keep syscall tracing
+  running. Linux retains its syscall-based network accounting.
+- Fix crowded TUI hints clipping the host-name status message.
+
+### Upgrade
+
+```sh
+brew update
+brew upgrade iotap
+iotap --version
+sudo iotap -q --tui vtamp
+```
+
+NetworkStatistics is a private macOS interface; its availability can vary with
+the OS version. iotap records metadata only, never transferred data.
+
 ## [0.1.0] - 2026-10-02
 
 First release of iotap: trace the file and network I/O of selected processes on
