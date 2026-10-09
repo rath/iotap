@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.1] - 2026-10-09
+
+Show short-lived connections in the macOS Traffic view again once the Mac has slept.
 
 - Fix macOS Traffic measurements after the Mac had slept. NetworkStatistics gives connection
   start times in `mach_continuous_time`, which runs on during sleep, where iotap read them as
@@ -8,6 +10,14 @@
   and a connection shorter than one sampling interval, such as an HTTP range request for a
   piece of audio, was missing from Traffic altogether. Start times are now converted to trace
   time.
+
+### Upgrade
+
+```sh
+brew update
+brew upgrade iotap
+iotap --version
+```
 
 ## [0.2.0] - 2026-10-02
 
