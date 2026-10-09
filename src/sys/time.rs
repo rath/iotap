@@ -48,6 +48,7 @@ mod clock {
     unsafe extern "C" {
         fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
         safe fn mach_absolute_time() -> u64;
+        safe fn mach_continuous_time() -> u64;
     }
 
     /// The mach timebase; zeros if it cannot be read.
@@ -60,6 +61,21 @@ mod clock {
 
     pub(super) fn now() -> u64 {
         mach_absolute_time()
+    }
+
+    /// Trace time of a `mach_continuous_time` reading. That clock runs on while the machine
+    /// sleeps, where trace time stands still, so it is ahead of trace time by the time slept
+    /// since boot. Trace time is read first: read after, the continuous clock can only be
+    /// further ahead, so the result never comes after a trace time read afterwards.
+    pub(super) fn from_continuous(continuous: u64) -> u64 {
+        let absolute = mach_absolute_time();
+        let ahead = mach_continuous_time().saturating_sub(absolute);
+        continuous.saturating_sub(ahead)
+    }
+
+    #[cfg(test)]
+    pub(super) fn continuous_now() -> u64 {
+        mach_continuous_time()
     }
 }
 
@@ -119,6 +135,13 @@ pub fn now_ticks() -> u64 {
     clock::now()
 }
 
+/// The trace time of a `mach_continuous_time` reading, such as the connection start times the
+/// kernel's network statistics give; never after a [`now_ticks`] taken afterwards.
+#[cfg(target_os = "macos")]
+pub fn ticks_from_continuous(continuous: u64) -> u64 {
+    clock::from_continuous(continuous)
+}
+
 /// Formats Unix timestamps as local `HH:MM:SS.uuuuuu`, caching the conversion per second.
 #[derive(Debug, Default)]
 pub struct LocalClock {
@@ -160,6 +183,16 @@ fn local_hms(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn continuous_time_maps_onto_trace_time() {
+        let converted = ticks_from_continuous(clock::continuous_now());
+        let now = now_ticks();
+        assert!(converted <= now, "{converted} is after {now}");
+        let tolerance = Timebase::host().nanos_to_ticks(100_000_000);
+        assert!(now - converted < tolerance, "{now} - {converted} >= {tolerance}");
+    }
 
     #[test]
     fn converts_apple_silicon_ticks() {

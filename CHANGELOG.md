@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix macOS Traffic measurements after the Mac had slept. NetworkStatistics gives connection
+  start times in `mach_continuous_time`, which runs on during sleep, where iotap read them as
+  trace time: every new connection then seemed to start in the future, lost its first interval,
+  and a connection shorter than one sampling interval, such as an HTTP range request for a
+  piece of audio, was missing from Traffic altogether. Start times are now converted to trace
+  time.
+
 ## [0.2.0] - 2026-10-02
 
 Measure macOS network traffic even when an application uses Skywalk instead of

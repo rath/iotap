@@ -54,11 +54,15 @@ extern "C" fn observe(context: *mut c_void, sample: *const NativeSample) {
     // SAFETY: the boxed context stays at a fixed address until stop has drained the native
     // callback queue; the C adapter lends a fully initialized sample for this invocation.
     let (context, sample) = unsafe { (&*context.cast::<Context>(), &*sample) };
-    let ticks = time::now_ticks();
     if sample.flags & 2 != 0 {
-        context.heartbeat.store(ticks, Ordering::Relaxed);
+        context.heartbeat.store(time::now_ticks(), Ordering::Relaxed);
         return;
     }
+    // The kernel stamps a connection's start with `mach_continuous_time`, not trace time.
+    // Converted before now is read, so that a start just before now is not taken for a future
+    // one, which would cost the connection its first counters.
+    let started = (sample.started != 0).then(|| time::ticks_from_continuous(sample.started));
+    let ticks = time::now_ticks();
     let Ok(targets) = context.targets.lock() else {
         return;
     };
@@ -86,8 +90,9 @@ extern "C" fn observe(context: *mut c_void, sample: *const NativeSample) {
     let input = Input::Observation(Observation {
         time_ns: context.anchor.unix_nanos_at(context.timebase, ticks),
         since_ns,
-        started_ns: (sample.started != 0 && sample.started <= ticks)
-            .then(|| context.anchor.unix_nanos_at(context.timebase, sample.started)),
+        started_ns: started
+            .filter(|&start| start <= ticks)
+            .map(|start| context.anchor.unix_nanos_at(context.timebase, start)),
         source: sample.source,
         process_id: sample.process,
         pid: sample.pid,
