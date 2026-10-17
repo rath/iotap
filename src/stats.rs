@@ -480,8 +480,11 @@ impl Stats {
                 .time_ns
                 .min(second.saturating_add(1).saturating_mul(1_000_000_000));
             let share = |bytes| {
-                u64::try_from(u128::from(bytes) * u128::from(end - start) / u128::from(elapsed))
-                    .unwrap_or(u64::MAX)
+                // Differences of cumulative shares carry rounding remainders into the next
+                // second, so splitting an interval never loses its final bytes.
+                let through =
+                    |at| u128::from(bytes) * u128::from(at - sample.interval_start_ns) / u128::from(elapsed);
+                u64::try_from(through(end) - through(start)).unwrap_or(u64::MAX)
             };
             let (received, sent) = (share(sample.received_bytes), share(sample.sent_bytes));
             let traffic = self.interfaces.entry(sample.interface.clone()).or_default();
@@ -504,31 +507,11 @@ impl Stats {
                 moved.read = moved.read.saturating_add(received);
                 moved.write = moved.write.saturating_add(sent);
             }
-            if let Some(history) = self.measured_second(second) {
+            if let Some(history) = self.second(second) {
                 history.net_read = history.net_read.saturating_add(received);
                 history.net_write = history.net_write.saturating_add(sent);
             }
         }
-    }
-
-    fn measured_second(&mut self, second: u64) -> Option<&mut Second> {
-        if self
-            .history
-            .back()
-            .is_some_and(|last| last.unix_sec.saturating_sub(second) >= HISTORY_SECONDS as u64)
-        {
-            return None;
-        }
-        while let Some(first) = self.history.front() {
-            if first.unix_sec <= second {
-                break;
-            }
-            self.history.push_front(Second {
-                unix_sec: first.unix_sec - 1,
-                ..Second::default()
-            });
-        }
-        Some(self.second(second))
     }
 
     pub fn record(&mut self, event: &IoEvent) {
@@ -593,8 +576,9 @@ impl Stats {
         };
         counter.add(event.bytes);
 
-        if let Some(bytes) = event.bytes {
-            let second = self.second(event.time_ns / 1_000_000_000);
+        if let Some(bytes) = event.bytes
+            && let Some(second) = self.second(event.time_ns / 1_000_000_000)
+        {
             match (category, dir) {
                 (Category::File, Dir::Read) => second.file_read = second.file_read.saturating_add(bytes),
                 (Category::File, Dir::Write) => second.file_write = second.file_write.saturating_add(bytes),
@@ -731,15 +715,29 @@ impl Stats {
         &self.history
     }
 
-    fn second(&mut self, unix_sec: u64) -> &mut Second {
+    fn second(&mut self, unix_sec: u64) -> Option<&mut Second> {
+        // Syscalls and network observations arrive independently. Both can reach an earlier
+        // second than the first one kept, but neither may rewrite the latest second instead.
+        if self
+            .history
+            .back()
+            .is_some_and(|last| last.unix_sec.saturating_sub(unix_sec) >= HISTORY_SECONDS as u64)
+        {
+            return None;
+        }
+        while let Some(first) = self.history.front() {
+            if first.unix_sec <= unix_sec {
+                break;
+            }
+            self.history.push_front(Second {
+                unix_sec: first.unix_sec - 1,
+                ..Second::default()
+            });
+        }
         let index = match self.history.back() {
             Some(last) if last.unix_sec == unix_sec => self.history.len() - 1,
             Some(last) if last.unix_sec > unix_sec => {
-                // Events arrive in trace order, but tolerate a small step back.
-                self.history
-                    .iter()
-                    .rposition(|s| s.unix_sec == unix_sec)
-                    .unwrap_or(self.history.len() - 1)
+                self.history.iter().rposition(|s| s.unix_sec == unix_sec)?
             }
             _ => {
                 // Fill idle seconds so the history stays contiguous.
@@ -761,7 +759,7 @@ impl Stats {
                 self.history.len() - 1
             }
         };
-        &mut self.history[index]
+        self.history.get_mut(index)
     }
 }
 
@@ -828,6 +826,59 @@ mod tests {
         assert_eq!(stats.history()[0].file_read, u64::MAX);
         let file = stats.rows(Category::File, SortBy::Bytes);
         assert_eq!(file[0].1.bytes(), u64::MAX, "read and written together");
+    }
+
+    #[test]
+    fn measured_intervals_preserve_bytes_across_second_boundaries() {
+        let mut stats = Stats::default();
+        stats.record_traffic(&crate::traffic::Sample {
+            time_ns: 2_500_000_000,
+            interval_start_ns: 1_500_000_000,
+            source: 1,
+            process_id: 1,
+            pid: 1,
+            target: Endpoint::unresolved(Proto::Tcp),
+            interface: Via::Unknown,
+            received_bytes: 3,
+            sent_bytes: 1,
+        });
+        assert_eq!(stats.history().iter().map(|s| s.net_read).sum::<u64>(), 3);
+        assert_eq!(stats.history().iter().map(|s| s.net_write).sum::<u64>(), 1);
+        let traffic = stats.interfaces()[0].1;
+        assert_eq!(traffic.during(1), (1, 0));
+        assert_eq!(traffic.during(2), (2, 1));
+    }
+
+    #[test]
+    fn delayed_events_keep_their_second_after_a_network_sample() {
+        let mut stats = Stats::default();
+        stats.record_traffic(&crate::traffic::Sample {
+            time_ns: 2_500_000_000,
+            interval_start_ns: 2_000_000_000,
+            source: 1,
+            process_id: 1,
+            pid: 1,
+            target: Endpoint::unresolved(Proto::Tcp),
+            interface: Via::Unknown,
+            received_bytes: 100,
+            sent_bytes: 0,
+        });
+        let file = || Target::File { path: "/a".into() };
+        stats.record(&event(Op::Read, file(), Some(10), 0, 1_900_000_000));
+        assert_eq!(
+            stats
+                .history()
+                .iter()
+                .map(|s| (s.unix_sec, s.file_read, s.net_read))
+                .collect::<Vec<_>>(),
+            [(1, 10, 0), (2, 0, 100)]
+        );
+
+        stats.record(&event(Op::Read, file(), Some(20), 0, 200_000_000_000));
+        stats.record(&event(Op::Read, file(), Some(30), 0, 1_950_000_000));
+        assert_eq!(stats.totals().file_read.bytes, 60);
+        assert_eq!(stats.history().back().unwrap().file_read, 20);
+        assert!(stats.history().len() <= HISTORY_SECONDS);
     }
 
     #[test]
