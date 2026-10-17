@@ -4,7 +4,7 @@
 use iotap::model::{Endpoint, Proto, Target, Via};
 use iotap::output::{json::JsonSink, text};
 use iotap::record::{self, Recorder, Recording};
-use iotap::session::{Filter, Input, Process, Session, SessionInfo, Sink};
+use iotap::session::{Collect, Discard, Filter, Input, Process, Session, SessionInfo, Sink};
 use iotap::sys::time::{ClockAnchor, Timebase};
 use iotap::trace::kdebug::{pairing::PathRecords, synth::Synth};
 use iotap::trace::procs::{Fixed, Snapshot};
@@ -115,6 +115,94 @@ fn recording_preserves_both_accounts_and_exact_output() {
     let json = String::from_utf8(expected).unwrap();
     assert!(json.contains("\"type\":\"network_sample\""));
     assert!(json.contains("\"type\":\"event\""));
+}
+
+#[test]
+fn truncated_recordings_include_the_last_network_time_in_their_duration() {
+    let (info, fixed, inputs) = fixture();
+    let mut data = Vec::new();
+    let mut source = Recording::new(fixed, Some(Recorder::new(&mut data, &info).unwrap()));
+    let mut session = Session::new(info, Filter::ALL, &mut source);
+    for input in &inputs {
+        source.input(input);
+        session.handle(input, &mut source, &mut Discard).unwrap();
+    }
+    source.finish().unwrap();
+    data.pop(); // The final Stopped frame was only partly written.
+
+    for filter in [
+        Filter::ALL,
+        Filter {
+            network: false,
+            ..Filter::ALL
+        },
+    ] {
+        let mut replay = record::parse(data.as_slice()).unwrap();
+        assert!(replay.truncated);
+        let mut session = Session::new(replay.info, filter, &mut replay.answers);
+        for input in &replay.inputs {
+            session.handle(input, &mut replay.answers, &mut Discard).unwrap();
+        }
+        session.finish(&mut Discard).unwrap();
+        assert_eq!(session.now_ns(), BASE + 2_000_000_000);
+        assert_eq!(session.summary().duration_ns, 2_000_000_000);
+    }
+}
+
+#[test]
+fn network_time_does_not_confirm_pending_descriptors_or_process_exits() {
+    let (info, mut fixed, _) = fixture();
+    fixed.answered_at = 1_500_000_000;
+    fixed.targets.insert(
+        (5, 9),
+        Target::File {
+            path: "/later".into(),
+        },
+    );
+    let mut session = Session::new(info, Filter::ALL, &mut fixed);
+    let mut sink = Collect::default();
+    let mut synth = Synth::new(1_000_000_000, 1_000);
+    session
+        .handle(
+            &Input::Records(Records::Kdebug(synth.io(1, 5, 3, 9, 10, 10))),
+            &mut fixed,
+            &mut sink,
+        )
+        .unwrap();
+    assert!(sink.events.is_empty());
+    session
+        .handle(
+            &Input::Network(traffic::Input::Status(Status {
+                time_ns: BASE + 4_000_000_000,
+                state: State::Active,
+                reason: None,
+            })),
+            &mut fixed,
+            &mut sink,
+        )
+        .unwrap();
+    session
+        .handle(
+            &Input::Exited {
+                pid: 5,
+                ticks: 2_000_000_000,
+            },
+            &mut fixed,
+            &mut sink,
+        )
+        .unwrap();
+    assert!(sink.events.is_empty());
+    assert!(!session.all_exited());
+    assert_eq!(session.now_ns(), BASE + 4_000_000_000);
+    session
+        .handle(
+            &Input::Records(Records::Kdebug(synth.close(1, 5, 9))),
+            &mut fixed,
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(*sink.events[0].target, Target::Unknown);
+    assert_eq!(session.now_ns(), BASE + 4_000_000_000);
 }
 
 fn key(app: &mut App, session: &Session, ch: char) {

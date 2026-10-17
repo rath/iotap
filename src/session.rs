@@ -273,6 +273,9 @@ pub struct Session {
     untraced: UntracedChildren,
     unknown_interface_calls: u64,
     last_ticks: u64,
+    /// Network callbacks can arrive ahead of the kernel records. Their time contributes to
+    /// elapsed time, but must never advance the watermark that settles descriptors and exits.
+    last_network_ns: u64,
     stopped_ticks: Option<u64>,
     unknown: Arc<Target>,
     /// Stands in for an unidentified descriptor that a socket-only call used.
@@ -301,6 +304,7 @@ impl Session {
             untraced: UntracedChildren::default(),
             unknown_interface_calls: 0,
             last_ticks: info.anchor.ticks,
+            last_network_ns: info.anchor.unix_nanos,
             stopped_ticks: None,
             unknown: Arc::new(Target::Unknown),
             some_socket: Arc::new(Target::Socket(Endpoint::unresolved(Proto::Other))),
@@ -369,12 +373,18 @@ impl Session {
     /// Wall-clock time of the latest input, in Unix nanoseconds.
     pub fn now_ns(&self) -> u64 {
         self.unix_ns(self.stopped_ticks.unwrap_or(self.last_ticks))
+            .max(self.last_network_ns)
     }
 
     pub fn handle(&mut self, input: &Input, src: &mut dyn ProcSource, sink: &mut dyn Sink) -> io::Result<()> {
         // Records only ever come in the format of the session's system.
         match input {
             Input::Network(input) => {
+                let time_ns = match input {
+                    crate::traffic::Input::Observation(observation) => observation.time_ns,
+                    crate::traffic::Input::Status(status) => status.time_ns,
+                };
+                self.last_network_ns = self.last_network_ns.max(time_ns);
                 if self.filter.network {
                     for update in self.traffic.ingest(input) {
                         if let crate::traffic::Update::Sample(sample) = &update {
@@ -469,7 +479,8 @@ impl Session {
         let duration_ns = self
             .info
             .timebase
-            .ticks_to_nanos(end.saturating_sub(self.info.anchor.ticks));
+            .ticks_to_nanos(end.saturating_sub(self.info.anchor.ticks))
+            .max(self.last_network_ns.saturating_sub(self.info.anchor.unix_nanos));
         let processes = self
             .processes
             .iter()
