@@ -402,17 +402,18 @@ impl FdTable {
                 self.insert(pid, fd, entry, since);
             }
             Role::Chdir => {
-                if let Some(lookup) = &done.lookup {
-                    // Past the limit it is not a directory anyone is in, so nothing is known.
-                    let cwd = Some(self.guess(pid, None, lookup)).filter(|cwd| cwd.len() <= CWD_MAX);
-                    self.procs.entry(pid).or_default().cwd = cwd;
-                }
+                // A successful change invalidates the old directory even when its new path
+                // was not captured. Past the limit, nothing useful is known either.
+                let cwd = done
+                    .lookup
+                    .as_ref()
+                    .map(|lookup| self.guess(pid, None, lookup))
+                    .filter(|cwd| cwd.len() <= CWD_MAX);
+                self.procs.entry(pid).or_default().cwd = cwd;
             }
             Role::Fchdir => {
                 let dir = done.arg_i32(0).and_then(|fd| self.file_path(pid, fd));
-                if let Some(dir) = dir {
-                    self.procs.entry(pid).or_default().cwd = Some(dir);
-                }
+                self.procs.entry(pid).or_default().cwd = dir;
             }
         }
     }
@@ -1558,6 +1559,39 @@ mod tests {
         table.apply(&done(13, 13, 14, [4, 0, 0, 0], 0, &[]), &mut src);
         table.apply(&done(5, 15, 16, [0; 4], 8, &["g"]), &mut src);
         assert_eq!(target_of(&mut table, 8, 17, &mut src).0, file("/var/db/g"));
+    }
+
+    #[test]
+    fn an_unknown_directory_change_discards_the_previous_working_directory() {
+        for change in [
+            done(12, 1, 2, [0; 4], 0, &[]),
+            done(13, 1, 2, [9, 0, 0, 0], 0, &[]),
+        ] {
+            let mut src = Fake::default();
+            src.snapshots.insert(
+                PID,
+                Snapshot {
+                    cwd: Some("/old".into()),
+                    ..Snapshot::default()
+                },
+            );
+            let mut table = FdTable::new(1_000);
+            assert!(table.attach(PID, &mut src));
+
+            let mut failed = change.clone();
+            failed.errno = libc::ENOENT;
+            table.apply(&failed, &mut src);
+            table.apply(&open_of(3, 4, "before", 0, 3), &mut src);
+            assert_eq!(target_of(&mut table, 3, 5, &mut src).0, file("/old/before"));
+
+            table.apply(&change, &mut src);
+            table.apply(&open_of(6, 7, "after", 0, 4), &mut src);
+            assert_eq!(target_of(&mut table, 4, 8, &mut src).0, file("after"));
+
+            table.apply(&done(12, 9, 10, [0; 4], 0, &["/known"]), &mut src);
+            table.apply(&open_of(11, 12, "restored", 0, 5), &mut src);
+            assert_eq!(target_of(&mut table, 5, 13, &mut src).0, file("/known/restored"));
+        }
     }
 
     #[test]
